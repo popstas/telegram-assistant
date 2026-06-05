@@ -183,6 +183,23 @@ async def test_string_not_found_raises():
         await resolver.resolve("@ghost")
 
 
+@pytest.mark.parametrize("raw", ["-100", -100])
+def test_entity_ref_malformed_marked_id_does_not_crash(raw):
+    """A bare ``-100`` marker with no channel id must not raise on ``int('')``."""
+    ref = EntityRef.parse(raw)
+    assert ref.is_numeric is True
+    # Falls back to ``abs`` rather than crashing; the value is still numeric.
+    assert ref.numeric_id == 100
+
+
+@pytest.mark.asyncio
+async def test_malformed_marked_id_resolves_to_not_found():
+    """``--entity -100`` surfaces a clean EntityNotFoundError, not a ValueError."""
+    resolver = CachingEntityResolver(FakeResolverBackend())
+    with pytest.raises(EntityNotFoundError):
+        await resolver.resolve("-100")
+
+
 # ---------------------------------------------------------------------------
 # Cache + FloodWait
 # ---------------------------------------------------------------------------

@@ -51,6 +51,24 @@ _PERMISSION_TO_LEVEL = {
 }
 
 
+def _canonical_chat_id(chat_id: int) -> int:
+    """Reduce a chat id to the bare form the rule index is keyed on.
+
+    ``chat`` rule refs are resolved through ``EntityRef.numeric_id``, which
+    strips the ``-100`` channel marker, so the index is keyed by bare ids. A
+    request that carries the *marked* form (``-1001234567890``) must be reduced
+    to the same bare id (``1234567890``) before lookup or it would never match
+    an otherwise-granting ``chat`` rule — denying a permitted chat. Mirrors
+    ``EntityRef.numeric_id`` so both sides normalise identically.
+    """
+    text = str(chat_id)
+    if text.startswith("-100"):
+        bare = text[4:]
+        if bare.isdigit():
+            return int(bare)
+    return abs(chat_id)
+
+
 class AccessDenied(RuntimeError):
     """The configured policy does not grant the required level for a chat/folder.
 
@@ -190,11 +208,12 @@ class Authorizer:
         if self._config is None:
             return
         await self._ensure_index()
+        lookup_id = _canonical_chat_id(chat_id)
         if folder_memberships is None:
-            memberships: Iterable[str] = await self._folder_memberships(chat_id)
+            memberships: Iterable[str] = await self._folder_memberships(lookup_id)
         else:
             memberships = set(folder_memberships)
-        granted, matched = self._effective_chat_level(chat_id, memberships)
+        granted, matched = self._effective_chat_level(lookup_id, memberships)
         if granted is None or granted < level:
             _log.warning(
                 "access_denied",

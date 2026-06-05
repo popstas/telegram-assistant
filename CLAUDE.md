@@ -39,7 +39,12 @@ Each domain area (`groups/`, `topics/`, `members/`, `messages/`, `folders/`) fol
 - `service.py` — pure domain logic; defines a `Backend` protocol it depends on.
 - `telethon_backend.py` — production Telethon adapter implementing that protocol.
 
-This split is what lets tests inject fakes without spinning up Telethon. The HTTP layer mirrors the pattern via **backend factories** on `app.state.*_backend_factory`. A factory returns `None` when the Telethon client isn't yet connected; the router then responds **503 Service Unavailable** instead of 500. When changing how backends are constructed, preserve this contract — `/health` must still respond even with an unauthorized session.
+This split is what lets tests inject fakes without spinning up Telethon. The HTTP layer mirrors the pattern via **backend factories** on `app.state.*_backend_factory` (including `resolver_factory` for the entity resolver and `message_read_backend_factory` for the get-recent read op). A factory returns `None` when the Telethon client isn't yet connected; the router then responds **503 Service Unavailable** instead of 500. When changing how backends are constructed, preserve this contract — `/health` must still respond even with an unauthorized session.
+
+Two shared domain modules sit alongside the per-area ones:
+
+- **`entities/`** — turns any chat reference (numeric id with or without the `-100` marker, `@username`, `t.me`/invite link, phone, exact title) into a numeric `chat_id`. Resolution order: numeric peer probe → `get_entity` → exact-title dialog scan (none → `EntityNotFoundError`, several → `AmbiguousEntityError`). Holds a per-request cache; propagates `FloodWaitError` rather than swallowing it. Surfaced as CLI `--entity` and an HTTP `entity` request field. `EntityRef.numeric_id` strips the `-100` marker to the bare id.
+- **`access/`** — a config-driven read/write gate enforced in the domain layer. An optional `Authorizer` is threaded into the mutating/reading domain ops (send, member add/remove, topic create/close, folder add-chat → WRITE on the resolved chat; group create → WRITE on the destination folder; `messages recent` → READ). With `telegram.access` absent the authorizer is an allow-all no-op (backward compatible); when present it is deny-by-default. Rules union with the highest level winning, and `write` implies `read`. `require()` normalises the request `chat_id` to the same bare form the rule index uses, so marked and bare ids match the same rule. `AccessDenied` → CLI exit code **3** / HTTP **403**; entity-not-found → exit 2 / HTTP **404**; ambiguous entity → HTTP **409**.
 
 `OperationStore` (SQLite, `src/telegram_assistant/persistence/`) is the source of truth for idempotency and bulk progress. Idempotency keys (full spec in `docs/init-plan.md`):
 
@@ -54,6 +59,8 @@ Operation states are `pending | completed | failed | needs_review`. `needs_revie
 `data/config.yml` is loaded by `config.loader.load_config()`. Schema (Pydantic) is in `config/models.py`. Notable: `telegram.default_chat_folder.folder_name` is the default for CLI `--folder-name` and for placing newly created groups; chat folders are never auto-created — if the configured folder is missing, the service returns an error.
 
 `telegram.defaults` knobs applied to new groups: `topics_layout` (overridable per call via `groups create --topics-layout` / the `topics_layout` HTTP field); `group_title_postfix`, appended to the Telegram title but deliberately kept out of the idempotency key so Planfix replays still match on the raw title; `default_member_permissions.{create_topics,pin_messages}`, set as the group's default member rights; and `cleanup_planfix_messages` (opt-in, default off) / `task_reply_wait_seconds`, which control deleting @planfix_bot's welcome, the `/task <id>` command, and the bot's reply after creation (best-effort — failures land in `skipped`).
+
+`telegram.access` (optional, `AccessConfig`) is the read/write policy. **Omitted ⇒ allow-all; present ⇒ deny-by-default** (an empty `rules: []` denies everything). Each `AccessRule` sets exactly one target — `chat` (entity ref), `folder` (name), or `all: true` (wildcard) — plus `permission` (`read`/`write`, default `write`). A common shape is a wildcard `all: read` baseline layered with targeted `folder`/`chat` `write` rules.
 
 ## Updating CLI/HTTP
 

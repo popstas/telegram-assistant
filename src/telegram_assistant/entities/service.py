@@ -81,12 +81,17 @@ class EntityRef:
 
         Telegram's "marked" channel ids look like ``-1001234567890``; Telethon's
         ``Peer*`` constructors expect the bare ``1234567890``. Legacy basic-group
-        ids arrive as plain negatives (``-123456``) and only need ``abs``.
+        ids arrive as plain negatives (``-123456``) and only need ``abs``. A
+        malformed marked id with nothing after the ``-100`` marker (e.g.
+        ``-100``) falls back to ``abs`` rather than crashing on ``int("")`` —
+        the resulting id simply resolves to "not found" downstream.
         """
         raw_int = int(self.raw)
         text = str(raw_int)
         if text.startswith("-100"):
-            return int(text[4:])
+            bare = text[4:]
+            if bare.isdigit():
+                return int(bare)
         return abs(raw_int)
 
     @property

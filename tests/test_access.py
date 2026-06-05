@@ -136,6 +136,30 @@ async def test_read_chat_rule_denies_write() -> None:
         await auth.require(777, AccessLevel.WRITE)
 
 
+@pytest.mark.asyncio
+async def test_marked_request_chat_id_matches_bare_rule() -> None:
+    """A marked ``-100…`` request id must match a rule resolved to the bare id.
+
+    The rule side normalises via ``EntityRef.numeric_id`` (``-1001234567890`` →
+    ``1234567890``); ``require`` must apply the same normalisation so the same
+    marked id supplied at call time is not denied.
+    """
+    resolver = FakeResolver({"-1001234567890": 1234567890})
+    auth = Authorizer(
+        AccessConfig(
+            rules=[AccessRule(chat="-1001234567890", permission="write")]
+        ),
+        resolver=resolver,
+    )
+    # Marked form (as a user would type with --chat-id) resolves to the rule.
+    await auth.require(-1001234567890, AccessLevel.WRITE)
+    # Bare form matches the same rule too.
+    await auth.require(1234567890, AccessLevel.READ)
+    # An unrelated chat is still denied.
+    with pytest.raises(AccessDenied):
+        await auth.require(-1009999999999, AccessLevel.READ)
+
+
 # ---------------------------------------------------------------------------
 # Folder rules
 # ---------------------------------------------------------------------------
