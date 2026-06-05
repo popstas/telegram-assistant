@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from telegram_assistant.access.service import AccessDenied, AccessLevel, Authorizer
 from telegram_assistant.folders import (
     FolderBackend,
     resolve_folder,
@@ -178,6 +179,7 @@ async def send_message(
     backend: MessageBackend,
     store: OperationStore,
     request: SendMessageRequest,
+    authorizer: Authorizer | None = None,
 ) -> tuple[SendMessageResult, OperationRecord]:
     """Send a single message (or service command), or replay the saved result.
 
@@ -187,9 +189,16 @@ async def send_message(
     * ``failed``       → raise :class:`MessageSendFailed`
     * ``needs_review`` → raise :class:`MessageSendNeedsReview`
     * ``pending``      → raise :class:`MessageSendPending`
+
+    Sending is a WRITE op: when an ``authorizer`` is supplied it must grant
+    WRITE on the target chat or :class:`AccessDenied` is raised before any
+    operation row is created.
     """
     if not request.text or not request.text.strip():
         raise ValueError("send_message requires non-empty text")
+
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
 
     key = idempotency.message_send_key(
         telegram_chat_id=request.telegram_chat_id,
@@ -359,6 +368,7 @@ async def mass_send_message(
     folder_backend: FolderBackend,
     store: OperationStore,
     request: MassSendRequest,
+    authorizer: Authorizer | None = None,
 ) -> MassSendResult:
     """Send ``request.text`` to every chat in ``folder_name`` that has the
     matching ``topic_name``.
@@ -385,6 +395,30 @@ async def mass_send_message(
     service = is_service_command(request.text)
 
     for chat in snapshot.chats:
+        # Mass send is WRITE per resolved chat. Chats the policy doesn't permit
+        # to write are recorded as skipped with reason=access_denied rather than
+        # aborting the whole run, so a partial allowlist still delivers to the
+        # chats it covers.
+        if authorizer is not None:
+            try:
+                await authorizer.require(
+                    chat.chat_id,
+                    AccessLevel.WRITE,
+                    folder_memberships=[snapshot.folder_name],
+                )
+            except AccessDenied:
+                skipped += 1
+                items.append(
+                    MassSendItemResult(
+                        status="skipped",
+                        telegram_chat_id=chat.chat_id,
+                        chat_name=chat.title,
+                        topic_name=request.topic_name,
+                        reason="access_denied",
+                    )
+                )
+                continue
+
         try:
             match = await _match_topic(
                 topic_backend=topic_backend,

@@ -116,20 +116,20 @@ there is a real read operation to protect:
 
 ### Task 2: Add the access-control config and authorizer, enforced in the domain layer
 
-- [ ] Add `AccessRule` / `AccessConfig` to `config/models.py` and `TelegramConfig.access`
+- [x] Add `AccessRule` / `AccessConfig` to `config/models.py` and `TelegramConfig.access`
   (None ⇒ allow-all); validate exactly one target of `chat` / `folder` / `all` per rule
-- [ ] Add a commented `access:` example to the `config/loader.py` template (default stays allow-all);
+- [x] Add a commented `access:` example to the `config/loader.py` template (default stays allow-all);
   show a combined config: a wildcard `all: read` rule plus per-`chat`/`folder` `write` rules
-- [ ] Add `access/service.py` with `AccessLevel`, `AccessDenied`, and `Authorizer` (wildcard default
+- [x] Add `access/service.py` with `AccessLevel`, `AccessDenied`, and `Authorizer` (wildcard default
   + chat + folder index with union/highest-level-wins resolution, `require` / `require_folder`, no-op
   sentinel when `access is None`)
-- [ ] Thread an optional `authorizer` into the domain services and enforce the matrix: WRITE for
+- [x] Thread an optional `authorizer` into the domain services and enforce the matrix: WRITE for
   send / members / topics / folders, WRITE on destination folder for group create, READ where
   applicable; mass-send marks unpermitted chats `skipped` reason `access_denied`
-- [ ] write tests for the authorizer (chat rule, folder rule, wildcard `all` rule, read vs write,
+- [x] write tests for the authorizer (chat rule, folder rule, wildcard `all` rule, read vs write,
   write-implies-read, union of read-all baseline + targeted write rules, allow-all when None,
   deny-by-default when present, create-by-folder) and per-service deny/allow
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 3: Promote get-recent-messages to a first-class read op
 

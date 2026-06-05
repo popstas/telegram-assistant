@@ -23,6 +23,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from telegram_assistant.access.service import AccessLevel, Authorizer
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
     OperationItemRecord,
@@ -256,6 +257,7 @@ async def create_topic(
     store: OperationStore,
     request: TopicCreateRequest,
     plugins: PluginRegistry | None = None,
+    authorizer: Authorizer | None = None,
 ) -> tuple[TopicCreateResult, OperationRecord]:
     """Create a forum topic, or replay the saved result for the same key.
 
@@ -270,6 +272,10 @@ async def create_topic(
         plugins = PluginRegistry()
     if not request.topic_name.strip():
         raise ValueError("topic create requires non-empty topic_name")
+
+    # Creating a topic is a WRITE op on the host chat.
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
 
     key = idempotency.topic_create_key(
         external_ref=request.external_ref,
@@ -527,6 +533,7 @@ async def bulk_create_topics(
     queue: WorkerQueue,
     request: BulkTopicCreateRequest,
     plugins: PluginRegistry | None = None,
+    authorizer: Authorizer | None = None,
 ) -> tuple[BulkTopicCreateResult, OperationRecord]:
     """Create many forum topics under one parent operation.
 
@@ -547,6 +554,10 @@ async def bulk_create_topics(
     for it in request.items:
         if not it.topic_name.strip():
             raise ValueError("bulk topic create requires non-empty topic_name per item")
+
+    # The whole bulk targets one chat — gate it once with WRITE up front.
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
 
     parent_key, _ = _bulk_parent_key(request.operation_id)
     begin = store.begin_operation(
@@ -771,6 +782,7 @@ async def close_topic(
     backend: TopicBackend,
     store: OperationStore,
     request: TopicCloseRequest,
+    authorizer: Authorizer | None = None,
 ) -> tuple[TopicCloseResult, OperationRecord]:
     """Close a forum topic, or replay the saved result for the same key.
 
@@ -781,6 +793,10 @@ async def close_topic(
     """
     if request.telegram_topic_id <= 0:
         raise ValueError("close_topic requires a positive telegram_topic_id")
+
+    # Closing a topic is a WRITE op on the host chat.
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
 
     key = idempotency.topic_close_key(
         telegram_chat_id=request.telegram_chat_id,

@@ -41,6 +41,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from telegram_assistant.access.service import AccessLevel, Authorizer
 from telegram_assistant.config.models import TelegramConfig
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
@@ -348,6 +349,7 @@ async def bulk_add_members(
     store: OperationStore,
     queue: WorkerQueue,
     request: BulkMemberAddRequest,
+    authorizer: Authorizer | None = None,
 ) -> tuple[BulkMemberAddResult, OperationRecord]:
     """Add many members to a supergroup under one parent operation.
 
@@ -363,6 +365,9 @@ async def bulk_add_members(
     """
     if not request.items:
         raise ValueError("bulk member add requires at least one item")
+    # Adding members mutates the chat — gate the whole bulk with WRITE up front.
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
     # Drop blank/whitespace-only user references up front so a stray empty
     # string no longer raises in normalize_user_ref and aborts the whole batch.
     items = [it for it in request.items if it.user is not None and str(it.user).strip()]
@@ -811,6 +816,7 @@ async def bulk_remove_members(
     store: OperationStore,
     queue: WorkerQueue,
     request: BulkMemberRemoveRequest,
+    authorizer: Authorizer | None = None,
 ) -> tuple[BulkMemberRemoveResult, OperationRecord]:
     """Remove many members from a supergroup under one parent operation.
 
@@ -824,6 +830,9 @@ async def bulk_remove_members(
     """
     if not request.items:
         raise ValueError("bulk member remove requires at least one item")
+    # Removing members mutates the chat — gate the whole bulk with WRITE up front.
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
     normalized_per_item: list[NormalizedMember] = [
         normalize_user_ref(it.user) for it in request.items
     ]

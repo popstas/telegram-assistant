@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- Add shared entity resolver
+
 ### Documentation
 
 - Adopt access-control plan into ralphex format

@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from telegram_assistant.access.service import AccessLevel, Authorizer
 from telegram_assistant.worker.queue import NeedsReviewError
 
 
@@ -189,6 +190,7 @@ async def add_chat_to_folder(
     folder_name: str,
     chat_ref: str | int,
     folder_id: int | None = None,
+    authorizer: Authorizer | None = None,
 ) -> dict[str, Any]:
     """Move ``chat_ref`` into ``folder_name``.
 
@@ -203,6 +205,10 @@ async def add_chat_to_folder(
         backend, folder_name=folder_name, folder_id=folder_id
     )
     chat = await backend.resolve_chat(chat_ref)
+    # Moving a chat into a folder mutates the chat — gate WRITE on the resolved
+    # chat. Checked after resolution so we authorize the real numeric id.
+    if authorizer is not None:
+        await authorizer.require(chat.chat_id, AccessLevel.WRITE)
     already = any(c.chat_id == chat.chat_id for c in snapshot.chats)
     if already:
         return {
