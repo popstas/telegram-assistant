@@ -12,6 +12,10 @@
 - Add access-control config and authorizer enforced in the domain layer
 - Add shared entity resolver
 
+### Bug Fixes
+
+- review: Normalize marked chat ids in access gate and resolver
+
 ### Documentation
 
 - Adopt access-control plan into ralphex format
