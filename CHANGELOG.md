@@ -5,6 +5,7 @@
 
 ### Documentation
 
+- Pin e2e approach in access-control draft (extend e2e scripts)
 - Draft plan for access control + entity resolver + read op
 - Add AGENTS.md documenting the release workflow
 
