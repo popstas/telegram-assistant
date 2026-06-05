@@ -73,6 +73,7 @@
 
 ### Task
 
+- Make Planfix an optional plugin, not core
 - Settle rename target -> telegram-assistant
 - Generalize entity resolution (entity everywhere, not just chat_id)
 - Add addressing chats by username/title for message send
