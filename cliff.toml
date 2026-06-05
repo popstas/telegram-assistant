@@ -21,6 +21,9 @@ footer = ""
 trim = true
 postprocessors = [
     { pattern = "<!-- [0-9] -->", replace = "" },
+    # Project was renamed; rewrite the old name in generated output (commit
+    # subjects in git history still reference it and cannot be changed).
+    { pattern = "telegram-planfix-assistant", replace = "telegram-assistant" },
 ]
 
 [git]

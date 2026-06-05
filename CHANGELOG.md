@@ -40,7 +40,7 @@
 - Add SQLite persistence and idempotency layer
 - Add /health endpoint and health CLI with shared probes
 - Add Telethon session wrapper and auth CLI
-- Scaffold telegram-planfix-assistant project
+- Scaffold telegram-assistant project
 
 ### Bug Fixes
 
@@ -69,6 +69,7 @@
 
 ### Refactor
 
+- Rename project telegram-assistant -> telegram-assistant
 - Rename cleanup_service_messages -> cleanup_planfix_messages, default off
 
 ### Task
@@ -82,5 +83,5 @@
 - Add addressing chats by username/title for message send
 - Add write/manage access restrictions (whitelist + folder)
 - Add integration/agent-setup layer (INTEGRATION.md)
-- Add project rename (telegram-planfix-assistant -> telegram-?)
+- Add project rename (telegram-assistant -> telegram-?)
 
