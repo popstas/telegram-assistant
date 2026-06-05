@@ -5,16 +5,7 @@
 
 ### Features
 
-- Verify access control, entity resolver, and read op acceptance criteria
-- Document access control, log access decisions, extend error taxonomy
-- Wire entity resolver, authorizer, and read op into CLI and HTTP
-- Promote get-recent-messages to a first-class read op
-- Add access-control config and authorizer enforced in the domain layer
-- Add shared entity resolver
-
-### Bug Fixes
-
-- review: Normalize marked chat ids in access gate and resolver
+- Entity resolver, read/write access control, and first-class get-recent read op (#8)
 
 ### Documentation
 
