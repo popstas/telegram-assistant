@@ -73,6 +73,7 @@
 
 ### Task
 
+- Settle rename target -> telegram-assistant
 - Generalize entity resolution (entity everywhere, not just chat_id)
 - Add addressing chats by username/title for message send
 - Add write/manage access restrictions (whitelist + folder)
