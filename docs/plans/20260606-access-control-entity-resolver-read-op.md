@@ -104,15 +104,15 @@ there is a real read operation to protect:
 
 ### Task 1: Build the shared entity resolver
 
-- [ ] Add `entities/` module with `EntityRef`, `ResolvedEntity`, the `EntityResolver` protocol, and
+- [x] Add `entities/` module with `EntityRef`, `ResolvedEntity`, the `EntityResolver` protocol, and
   `AmbiguousEntityError` / `EntityNotFoundError`
-- [ ] Implement `TelethonEntityResolver` with the full resolution order (numeric variants → peer
+- [x] Implement `TelethonEntityResolver` with the full resolution order (numeric variants → peer
   types → dialog scan by id → `client.get_entity()` for usernames/links/phones → title dialog scan)
-- [ ] Add a per-request resolution cache and translate `FloodWaitError` instead of swallowing it
-- [ ] Keep numeric `chat_id` resolution working unchanged (backward compatible)
-- [ ] write tests for the resolver (numeric variants, `@username`, link, title ambiguity → error,
+- [x] Add a per-request resolution cache and translate `FloodWaitError` instead of swallowing it
+- [x] Keep numeric `chat_id` resolution working unchanged (backward compatible)
+- [x] write tests for the resolver (numeric variants, `@username`, link, title ambiguity → error,
   not-found)
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 2: Add the access-control config and authorizer, enforced in the domain layer
 
