@@ -117,9 +117,11 @@ are threaded today). At the top of the operation:
     deny-by-default when block present, create-by-folder.
   - per-service: denied when unauthorized / allowed when permitted; mass-send skip=`access_denied`.
   - HTTP 403 + CLI exit code.
-- **e2e (`scripts/e2e_*.sh`):** *to be specified at adopt time* — likely configure an allowlist
-  permitting only folder `Clients` / chat `Client chat test`, assert a permitted op succeeds and a
-  non-listed chat is denied; `messages recent` returns ≤5.
+- **e2e — extend existing `scripts/e2e_*.sh`** (real account, idempotent/re-runnable): configure
+  an allowlist permitting only folder `Clients` / chat `Client chat test`, then assert (a) a
+  permitted send succeeds, (b) a non-listed chat returns access-denied (HTTP 403 / CLI non-zero
+  exit), (c) `messages recent` returns ≤5, and (d) the resolver works via both `@username` and
+  exact title against `Client chat test`.
 
 ## Backward-compatibility & risks
 

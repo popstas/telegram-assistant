@@ -5,6 +5,7 @@
 
 ### Documentation
 
+- Draft plan for access control + entity resolver + read op
 - Add AGENTS.md documenting the release workflow
 
 ### Task
