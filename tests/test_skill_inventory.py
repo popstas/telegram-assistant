@@ -2,7 +2,7 @@
 
 This is a cheap structural check that catches drift between the actual
 Typer CLI in ``cli/main.py`` and the resource/action catalog inside
-``skills/telegram-planfix-assistant/SKILL.md``. Whenever a new CLI
+``skills/telegram-assistant/SKILL.md``. Whenever a new CLI
 subcommand is added (or removed), the skill catalog must be updated in
 the same change.
 
@@ -23,12 +23,12 @@ from pathlib import Path
 import pytest
 import typer
 
-from telegram_planfix_assistant.cli.main import app
+from telegram_assistant.cli.main import app
 
 SKILL_PATH = (
     Path(__file__).resolve().parent.parent
     / "skills"
-    / "telegram-planfix-assistant"
+    / "telegram-assistant"
     / "SKILL.md"
 )
 

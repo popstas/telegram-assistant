@@ -1,11 +1,11 @@
-# telegram-planfix-assistant
+# telegram-assistant
 
 Telegram automation service for the Planfix ↔ Telegram integration.
 
 Three interfaces share one domain layer:
 
 - HTTP API (FastAPI) on port `8085` with bearer-token auth — primary entry point for Planfix and automations.
-- CLI (`telegram-planfix-assistant`) — mirrors every HTTP endpoint plus admin commands (`auth`, `operations status`, `operations retry`).
+- CLI (`telegram-assistant`) — mirrors every HTTP endpoint plus admin commands (`auth`, `operations status`, `operations retry`).
 - Worker/queue — performs Telegram operations with throttling and `FLOOD_WAIT` handling.
 
 Runs on MTProto via Telethon under a technical Telegram user account.
@@ -18,9 +18,9 @@ source .venv/bin/activate
 pip install -e ".[dev]"
 
 # Place a config file at data/config.yml (see Configuration below)
-telegram-planfix-assistant auth      # interactive Telethon login
-telegram-planfix-assistant health    # show current health
-uvicorn telegram_planfix_assistant.http_api.app:create_app --factory --port 8085
+telegram-assistant auth      # interactive Telethon login
+telegram-assistant health    # show current health
+uvicorn telegram_assistant.http_api.app:create_app --factory --port 8085
 ```
 
 ## Commands
@@ -64,13 +64,13 @@ Top-level:
 - `operations status` — show the status of an operation, including per-item summary.
 - `operations retry` — reset a failed/`needs_review` operation (and its items) back to pending.
 
-Updating this list: descriptions are sourced from each Typer command's docstring in `src/telegram_planfix_assistant/cli/main.py`. When you add or rename a command, update this section, `skills/telegram-planfix-assistant/SKILL.md`, and re-run `pytest tests/test_skill_inventory.py` — the inventory guard fails if the README/skill catalog drifts from the CLI.
+Updating this list: descriptions are sourced from each Typer command's docstring in `src/telegram_assistant/cli/main.py`. When you add or rename a command, update this section, `skills/telegram-assistant/SKILL.md`, and re-run `pytest tests/test_skill_inventory.py` — the inventory guard fails if the README/skill catalog drifts from the CLI.
 
 ## Configuration
 
 Config is read from `data/config.yml` by default. The `data/` directory is excluded from version control and holds the Telethon session, SQLite database, and secrets.
 
-If `./data/config.yml` is absent, the loader falls back to `~/.config/telegram-planfix-assistant/config.yml`. On a clean machine, running any CLI command without `--config` will create a template at that path with `REPLACE_ME` placeholders for `api_id`, `api_hash`, and `bearer_token` — fill them in and re-run.
+If `./data/config.yml` is absent, the loader falls back to `~/.config/telegram-assistant/config.yml`. On a clean machine, running any CLI command without `--config` will create a template at that path with `REPLACE_ME` placeholders for `api_id`, `api_hash`, and `bearer_token` — fill them in and re-run.
 
 To reach Telegram through a proxy, set `telegram.proxy_url` to a single URL — supported schemes are `socks5`, `socks4`, `http`, and `https`. Credentials and explicit ports are optional:
 
@@ -89,9 +89,6 @@ telegram:
     enable_topics: true
     create_invite_link: true
     topics_layout: "list"        # "list" | "tabs" — applied after groups create
-    group_title_postfix: ""      # appended to the Telegram chat title at creation
-    cleanup_planfix_messages: false  # delete welcome / /task / bot-reply after creation (opt-in)
-    task_reply_wait_seconds: 5       # how long to poll for @planfix_bot's /task reply
     default_member_permissions:
       create_topics: true        # let ordinary members create forum topics
       pin_messages: true         # let ordinary members pin messages
@@ -99,13 +96,29 @@ telegram:
 
 `topics_layout` controls how the forum opens after `groups create`: `"list"` shows topics as a vertical list (Telegram's default), `"tabs"` shows them as horizontal tabs. The CLI `groups create --topics-layout` and `groups set-layout --layout` flags, and the `POST /telegram/groups` / `POST /telegram/groups/layout` bodies (`topics_layout`), override the default per call.
 
-`group_title_postfix` is appended to the Telegram chat title at creation time (e.g. a shared suffix Planfix scenarios would otherwise add). It is deliberately kept out of the idempotency key, so a Planfix replay still matches on the raw title.
-
 `default_member_permissions` sets the new group's default banned rights so ordinary members can `create_topics` and `pin_messages`. Other default rights are left untouched.
 
-`cleanup_planfix_messages` (default `false`, opt-in) deletes @planfix_bot's welcome message, the `/task <id>` service command, and the bot's reply to it after the group is populated, so the chat starts clean. `task_reply_wait_seconds` is how long the worker polls for the bot's reply before deleting only the welcome + command. All cleanup is best-effort: failures are recorded in the operation's `skipped` list and never fail the create.
+### Idempotency anchor
 
-See `docs/plans/20260518-telegram-planfix-assistant-mvp.md` for the full configuration schema and feature scope.
+Group/topic creation is idempotent on a generic `external_ref` (CLI `--external-ref`, HTTP `external_ref`). For backward compatibility the CLI `--planfix-task-id` flag and the HTTP `planfix_task_id` field are accepted as aliases that map onto `external_ref`. With no `external_ref`, groups key on the exact title and topics key on `chat_id + topic_name`.
+
+### Planfix plugin (optional, off by default)
+
+Planfix-specific behavior lives behind an opt-in plugin. With it disabled the core has **zero Planfix knowledge** — `external_ref` still anchors idempotency, but there is no `/task <id>` service message, no `@planfix_bot` welcome cleanup, and `@planfix_bot` is not treated as a protected account. Enable it under `plugins`:
+
+```yaml
+plugins:
+  planfix:
+    enabled: true                 # turn on Planfix-specific behavior
+    bot_username: "@planfix_bot"  # group member that receives the /task command
+    group_title_postfix: ""       # appended to the Telegram chat title at creation
+    cleanup_messages: false       # delete welcome / /task / bot-reply after creation (opt-in)
+    task_reply_wait_seconds: 5    # how long to poll for the bot's /task reply
+```
+
+When enabled and `external_ref` is set on a group whose members include `bot_username`, the plugin sends `/task <external_ref>` after creation. `group_title_postfix` is appended to the Telegram chat title at creation time but deliberately kept out of the idempotency key, so a replay of the same `external_ref` still matches on the raw title. `cleanup_messages` (default `false`) deletes the bot's welcome message, the `/task <id>` command, and the bot's reply to it; `task_reply_wait_seconds` is how long to poll for that reply before deleting only the welcome + command. All cleanup is best-effort: failures are recorded in the operation's `skipped` list and never fail the create.
+
+See `docs/plans/20260518-telegram-assistant-mvp.md` for the full configuration schema and feature scope.
 
 ## Docker
 
@@ -123,15 +136,15 @@ curl http://127.0.0.1:8085/health
 Run a one-shot CLI invocation against the same volume:
 
 ```bash
-docker compose run --rm telegram-planfix-assistant \
-    telegram-planfix-assistant health
+docker compose run --rm telegram-assistant \
+    telegram-assistant health
 ```
 
 The `auth` CLI is interactive (it prompts for phone, code, and optional 2FA password), so run it with a TTY attached:
 
 ```bash
-docker compose run --rm -it telegram-planfix-assistant \
-    telegram-planfix-assistant auth
+docker compose run --rm -it telegram-assistant \
+    telegram-assistant auth
 ```
 
 The Telethon session is written to `/data` and persists across container restarts.

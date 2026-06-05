@@ -9,12 +9,12 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.folders import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.folders import (
     FolderChat,
     FolderSnapshot,
 )
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
     idempotency,

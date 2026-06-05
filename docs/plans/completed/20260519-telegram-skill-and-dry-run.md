@@ -2,15 +2,15 @@
 
 ## Overview
 
-Добавить в проект `telegram-planfix-assistant` настоящий Codex/Claude skill (`./skills/telegram-planfix-assistant/SKILL.md`), который учит агента превращать человеческие просьбы в безопасные вызовы уже существующего CLI: понять resource/action из фразы, найти чат/folder/topic, при необходимости подготовить временный CSV/JSON в `/tmp`, выполнить `--dry-run`, дождаться явного подтверждения и только потом сделать реальное изменение.
+Добавить в проект `telegram-assistant` настоящий Codex/Claude skill (`./skills/telegram-assistant/SKILL.md`), который учит агента превращать человеческие просьбы в безопасные вызовы уже существующего CLI: понять resource/action из фразы, найти чат/folder/topic, при необходимости подготовить временный CSV/JSON в `/tmp`, выполнить `--dry-run`, дождаться явного подтверждения и только потом сделать реальное изменение.
 
 Параллельно нужно довести CLI до состояния, при котором скилл будет безопасным: добавить `--dry-run` во все команды, меняющие состояние Telegram или очереди операций. Без нормального dry-run агентский скилл опасен, поэтому это часть одной фичи.
 
 ## Context
 
-- Целевой проект: `telegram-planfix-assistant`. CLI уже умеет работать с Telegram (`groups`, `topics`, `members`, `messages`, `folders`, `operations`, `auth`, `health`).
+- Целевой проект: `telegram-assistant`. CLI уже умеет работать с Telegram (`groups`, `topics`, `members`, `messages`, `folders`, `operations`, `auth`, `health`).
 - Конфиг проекта: `data/config.yml` (отсюда агент может брать default folder и прочее).
-- Скилл живёт в репозитории: `./skills/telegram-planfix-assistant/SKILL.md`.
+- Скилл живёт в репозитории: `./skills/telegram-assistant/SKILL.md`.
 - HTTP API, сценарии Planfix и Telegram-логика в рамках этой фичи не меняются — скилл только описывает агенту, как пользоваться готовым CLI.
 - В итоговом `SKILL.md` нельзя использовать реальные имена, usernames, названия клиентов и invite links — только обезличенные примеры (`@employee_username`, `Клиент / проект`, `Planfix clients`).
 - Адаптировано из `data/plan-skill.md`.
@@ -39,19 +39,19 @@
 
 | Resource | Action | Когда выбирать | Команда |
 |---|---|---|---|
-| `auth` | `login` | Авторизовать технический Telegram-аккаунт | `telegram-planfix-assistant auth` |
-| `health` | `check` | Проверить, что сервис, база, session и default folder живые | `telegram-planfix-assistant health` |
-| `groups` | `create` | Создать клиентскую supergroup с топиками, участниками, invite link и folder | `telegram-planfix-assistant groups create ...` |
-| `topics` | `create` | Создать один topic в существующей группе | `telegram-planfix-assistant topics create ...` |
-| `topics` | `bulk-create` | Создать несколько topic из CSV/JSON | `telegram-planfix-assistant topics bulk-create ...` |
-| `topics` | `close` | Закрыть topic, не удаляя историю | `telegram-planfix-assistant topics close ...` |
-| `members` | `bulk-add` | Добавить участников/админов в группу | `telegram-planfix-assistant members bulk-add ...` |
-| `members` | `bulk-remove` | Удалить участников из группы | `telegram-planfix-assistant members bulk-remove ...` |
-| `messages` | `send` | Отправить сообщение или служебную команду в чат/topic | `telegram-planfix-assistant messages send ...` |
-| `folders` | `inspect` | Проверить Telegram folder и список чатов в ней | `telegram-planfix-assistant folders inspect ...` |
-| `folders` | `add-chat` | Переместить существующий чат в folder | `telegram-planfix-assistant folders add-chat ...` |
-| `operations` | `status` | Посмотреть статус операции | `telegram-planfix-assistant operations status ...` |
-| `operations` | `retry` | Повторить операцию, если допустимо | `telegram-planfix-assistant operations retry ...` |
+| `auth` | `login` | Авторизовать технический Telegram-аккаунт | `telegram-assistant auth` |
+| `health` | `check` | Проверить, что сервис, база, session и default folder живые | `telegram-assistant health` |
+| `groups` | `create` | Создать клиентскую supergroup с топиками, участниками, invite link и folder | `telegram-assistant groups create ...` |
+| `topics` | `create` | Создать один topic в существующей группе | `telegram-assistant topics create ...` |
+| `topics` | `bulk-create` | Создать несколько topic из CSV/JSON | `telegram-assistant topics bulk-create ...` |
+| `topics` | `close` | Закрыть topic, не удаляя историю | `telegram-assistant topics close ...` |
+| `members` | `bulk-add` | Добавить участников/админов в группу | `telegram-assistant members bulk-add ...` |
+| `members` | `bulk-remove` | Удалить участников из группы | `telegram-assistant members bulk-remove ...` |
+| `messages` | `send` | Отправить сообщение или служебную команду в чат/topic | `telegram-assistant messages send ...` |
+| `folders` | `inspect` | Проверить Telegram folder и список чатов в ней | `telegram-assistant folders inspect ...` |
+| `folders` | `add-chat` | Переместить существующий чат в folder | `telegram-assistant folders add-chat ...` |
+| `operations` | `status` | Посмотреть статус операции | `telegram-assistant operations status ...` |
+| `operations` | `retry` | Повторить операцию, если допустимо | `telegram-assistant operations retry ...` |
 
 ### Команды, которым нужен `--dry-run`
 
@@ -84,7 +84,7 @@
 2. Определить resource/action.
 3. Извлечь параметры: chat, topic, users, role, text, planfix task id, folder.
 4. Если не хватает обязательных данных — задать короткий уточняющий вопрос.
-5. Перед изменениями проверить `telegram-planfix-assistant health`, если ещё не проверялось в сессии.
+5. Перед изменениями проверить `telegram-assistant health`, если ещё не проверялось в сессии.
 6. Для bulk-команд подготовить временный CSV/JSON в `/tmp`.
 7. Для меняющих команд сначала выполнить `--dry-run`, если он поддерживается.
 8. Показать план человеку: что найдено, какая команда, какой результат dry-run.
@@ -133,9 +133,9 @@
 
 ### Task 5: Создать каркас `SKILL.md` и общие правила работы агента
 
-- [x] создать файл `./skills/telegram-planfix-assistant/SKILL.md` с YAML front-matter и заголовком
+- [x] создать файл `./skills/telegram-assistant/SKILL.md` с YAML front-matter и заголовком
 - [x] описать, где лежит конфиг (`data/config.yml`) и как им пользоваться (default folder и прочее)
-- [x] описать команду `telegram-planfix-assistant health` как проверку живости перед любыми изменениями
+- [x] описать команду `telegram-assistant health` как проверку живости перед любыми изменениями
 - [x] зафиксировать правило: основной интерфейс агента — CLI, не прямые вызовы Telethon
 - [x] описать общий алгоритм агента из 11 шагов (читать просьбу → resource/action → параметры → health → CSV → dry-run → план → подтверждение → запуск → результат)
 - [x] прописать правила подготовки временных CSV/JSON в `/tmp`, не в репозитории

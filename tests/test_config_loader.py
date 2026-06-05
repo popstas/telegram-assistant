@@ -6,14 +6,14 @@ from pathlib import Path
 
 import pytest
 
-from telegram_planfix_assistant.config import (
+from telegram_assistant.config import (
     AppConfig,
     ConfigError,
     load_config,
     load_config_from_text,
 )
-from telegram_planfix_assistant.config import loader as loader_module
-from telegram_planfix_assistant.config.loader import DEFAULT_CONFIG_TEMPLATE
+from telegram_assistant.config import loader as loader_module
+from telegram_assistant.config.loader import DEFAULT_CONFIG_TEMPLATE
 
 
 def test_load_valid_config_from_text(minimal_config_yaml: str) -> None:
@@ -318,7 +318,7 @@ def test_non_mapping_top_level_rejected(tmp_path: Path) -> None:
 @pytest.fixture()
 def patched_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     cwd_path = tmp_path / "cwd" / "data" / "config.yml"
-    user_path = tmp_path / "home" / ".config" / "telegram-planfix-assistant" / "config.yml"
+    user_path = tmp_path / "home" / ".config" / "telegram-assistant" / "config.yml"
     monkeypatch.setattr(loader_module, "CWD_CONFIG_PATH", cwd_path)
     monkeypatch.setattr(loader_module, "USER_CONFIG_PATH", user_path)
     return {"cwd": cwd_path, "user": user_path}

@@ -12,14 +12,14 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.http_api import create_app
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.http_api import create_app
+from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
     idempotency,
 )
-from telegram_planfix_assistant.worker.queue import FloodWaitError
+from telegram_assistant.worker.queue import FloodWaitError
 
 
 class FakeLayoutBackend:
@@ -202,7 +202,7 @@ def test_http_get_layout_returns_list(minimal_config_yaml: str) -> None:
 
 
 def test_http_get_layout_returns_502_on_flood_wait(minimal_config_yaml: str) -> None:
-    from telegram_planfix_assistant.worker.queue import FloodWaitError
+    from telegram_assistant.worker.queue import FloodWaitError
 
     backend = FakeLayoutBackend(get_error=FloodWaitError(seconds=12))
     client = _http_client(minimal_config_yaml, backend)

@@ -1,4 +1,4 @@
-"""Structural tests for ``skills/telegram-planfix-assistant/SKILL.md``.
+"""Structural tests for ``skills/telegram-assistant/SKILL.md``.
 
 Task 5 of ``docs/plans/20260519-telegram-skill-and-dry-run.md`` introduces
 the agent skill. This module pins the skeleton that later tasks (6, 7,
@@ -21,7 +21,7 @@ import pytest
 SKILL_PATH = (
     Path(__file__).resolve().parent.parent
     / "skills"
-    / "telegram-planfix-assistant"
+    / "telegram-assistant"
     / "SKILL.md"
 )
 
@@ -41,7 +41,7 @@ def _front_matter(text: str) -> str:
 
 def test_front_matter_has_name_and_description(skill_text: str) -> None:
     fm = _front_matter(skill_text)
-    assert "name: telegram-planfix-assistant" in fm
+    assert "name: telegram-assistant" in fm
     assert "description:" in fm
     desc_line = next(line for line in fm.splitlines() if line.startswith("description:"))
     description = desc_line.split(":", 1)[1].strip()
@@ -50,7 +50,7 @@ def test_front_matter_has_name_and_description(skill_text: str) -> None:
 
 def test_cli_is_primary_interface(skill_text: str) -> None:
     # The skill must say the agent drives the CLI and not Telethon directly.
-    assert "telegram-planfix-assistant" in skill_text
+    assert "telegram-assistant" in skill_text
     assert "Telethon" in skill_text
     assert "CLI" in skill_text
 
@@ -61,7 +61,7 @@ def test_config_location_documented(skill_text: str) -> None:
 
 
 def test_health_check_required_before_changes(skill_text: str) -> None:
-    assert "telegram-planfix-assistant health" in skill_text
+    assert "telegram-assistant health" in skill_text
     # The skeleton must say health is a pre-flight check.
     lowered = skill_text.lower()
     assert "health" in lowered

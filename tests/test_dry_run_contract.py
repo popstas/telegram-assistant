@@ -26,8 +26,8 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.persistence import OperationStore
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.persistence import OperationStore
 
 # ---------------------------------------------------------------------------
 # Contract
@@ -149,7 +149,7 @@ def _patch_member_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 

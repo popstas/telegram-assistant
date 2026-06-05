@@ -12,29 +12,37 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.folders import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.config.models import PlanfixPluginConfig
+from telegram_assistant.folders import (
     FolderChat,
     FolderSnapshot,
 )
-from telegram_planfix_assistant.http_api import create_app
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.http_api import create_app
+from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
 )
-from telegram_planfix_assistant.topics import (
+from telegram_assistant.plugins import PluginRegistry
+from telegram_assistant.plugins.planfix import PlanfixPlugin
+from telegram_assistant.topics import (
     BulkTopicCreateNeedsReview,
     BulkTopicCreateRequest,
     BulkTopicItem,
     bulk_create_topics,
 )
-from telegram_planfix_assistant.worker import (
+from telegram_assistant.worker import (
     BulkItemSpec,
     FloodWaitError,
     NeedsReviewError,
     WorkerQueue,
 )
+
+
+def _planfix_plugins() -> PluginRegistry:
+    """Registry with the Planfix plugin enabled, for /task-behavior tests."""
+    return PluginRegistry([PlanfixPlugin(PlanfixPluginConfig(enabled=True))])
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -136,14 +144,14 @@ async def test_bulk_create_happy_path_creates_all_topics(
     req = BulkTopicCreateRequest(
         telegram_chat_id=-100,
         items=(
-            BulkTopicItem(topic_name="Alpha", planfix_task_id=1),
+            BulkTopicItem(topic_name="Alpha", external_ref=1),
             BulkTopicItem(topic_name="Beta", message="hello"),
             BulkTopicItem(topic_name="Gamma"),
         ),
         operation_id="op-happy",
     )
     result, op = await bulk_create_topics(
-        backend=backend, store=store, queue=queue, request=req
+        backend=backend, store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
 
     assert op.status is OperationStatus.COMPLETED
@@ -170,20 +178,20 @@ async def test_bulk_create_per_item_idempotency_planfix_task_id(
     req = BulkTopicCreateRequest(
         telegram_chat_id=-100,
         items=(
-            BulkTopicItem(topic_name="Alpha", planfix_task_id=10),
-            BulkTopicItem(topic_name="Beta", planfix_task_id=20),
+            BulkTopicItem(topic_name="Alpha", external_ref=10),
+            BulkTopicItem(topic_name="Beta", external_ref=20),
         ),
         operation_id="op-replay",
     )
     first, _ = await bulk_create_topics(
-        backend=backend1, store=store, queue=queue, request=req
+        backend=backend1, store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
     assert first.created == 2
 
     # Second run with the same operation_id — Telegram should not be touched.
     backend2 = FakeTopicBackend(topic_id_start=9999)
     second, op2 = await bulk_create_topics(
-        backend=backend2, store=store, queue=queue, request=req
+        backend=backend2, store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
     assert backend2.created == []
     assert backend2.messages == []
@@ -207,14 +215,14 @@ async def test_bulk_create_resume_partial_after_restart(
     req = BulkTopicCreateRequest(
         telegram_chat_id=-100,
         items=(
-            BulkTopicItem(topic_name="Alpha", planfix_task_id=1),
-            BulkTopicItem(topic_name="Beta", planfix_task_id=2),
-            BulkTopicItem(topic_name="Gamma", planfix_task_id=3),
+            BulkTopicItem(topic_name="Alpha", external_ref=1),
+            BulkTopicItem(topic_name="Beta", external_ref=2),
+            BulkTopicItem(topic_name="Gamma", external_ref=3),
         ),
         operation_id="op-resume",
     )
     first, op1 = await bulk_create_topics(
-        backend=backend1, store=store, queue=queue, request=req
+        backend=backend1, store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
     assert first.created == 2
     assert first.failed == 1
@@ -228,7 +236,7 @@ async def test_bulk_create_resume_partial_after_restart(
     # Second run with a healthy backend.
     backend2 = FakeTopicBackend(topic_id_start=9000)
     second, op2 = await bulk_create_topics(
-        backend=backend2, store=store, queue=queue, request=req
+        backend=backend2, store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
     # Only Beta should be re-executed — Alpha and Gamma stay as `existed`.
     assert backend2.created == [(-100, "Beta")]
@@ -248,15 +256,15 @@ async def test_bulk_create_continue_on_error_keeps_running(
     req = BulkTopicCreateRequest(
         telegram_chat_id=-100,
         items=(
-            BulkTopicItem(topic_name="Alpha", planfix_task_id=1),
-            BulkTopicItem(topic_name="Beta", planfix_task_id=2),
-            BulkTopicItem(topic_name="Gamma", planfix_task_id=3),
+            BulkTopicItem(topic_name="Alpha", external_ref=1),
+            BulkTopicItem(topic_name="Beta", external_ref=2),
+            BulkTopicItem(topic_name="Gamma", external_ref=3),
         ),
         continue_on_error=True,
         operation_id="op-continue",
     )
     result, op = await bulk_create_topics(
-        backend=backend, store=store, queue=queue, request=req
+        backend=backend, store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
     statuses = [it.status for it in result.items]
     assert statuses == ["created", "failed", "created"]
@@ -278,15 +286,15 @@ async def test_bulk_create_stop_on_error_short_circuits(
     req = BulkTopicCreateRequest(
         telegram_chat_id=-100,
         items=(
-            BulkTopicItem(topic_name="Alpha", planfix_task_id=1),
-            BulkTopicItem(topic_name="Beta", planfix_task_id=2),
-            BulkTopicItem(topic_name="Gamma", planfix_task_id=3),
+            BulkTopicItem(topic_name="Alpha", external_ref=1),
+            BulkTopicItem(topic_name="Beta", external_ref=2),
+            BulkTopicItem(topic_name="Gamma", external_ref=3),
         ),
         continue_on_error=False,
         operation_id="op-stop",
     )
     result, op = await bulk_create_topics(
-        backend=backend, store=store, queue=queue, request=req
+        backend=backend, store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
     statuses = [it.status for it in result.items]
     # Alpha succeeds, Beta fails, Gamma is skipped without touching Telegram.
@@ -325,13 +333,13 @@ async def test_bulk_create_flood_wait_pauses_and_retries(
     req = BulkTopicCreateRequest(
         telegram_chat_id=-100,
         items=(
-            BulkTopicItem(topic_name="Alpha", planfix_task_id=1),
-            BulkTopicItem(topic_name="Beta", planfix_task_id=2),
+            BulkTopicItem(topic_name="Alpha", external_ref=1),
+            BulkTopicItem(topic_name="Beta", external_ref=2),
         ),
         operation_id="op-flood",
     )
     result, op = await bulk_create_topics(
-        backend=FloodyBackend(), store=store, queue=queue, request=req
+        backend=FloodyBackend(), store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
     # The flood-wait + margin (3 + 2) shows up once for the retried call.
     assert sleeps == [5.0]
@@ -368,11 +376,11 @@ async def test_bulk_create_first_message_flood_wait_propagates(
     backend = FloodyFirstMessageBackend()
     req = BulkTopicCreateRequest(
         telegram_chat_id=-100,
-        items=(BulkTopicItem(topic_name="Alpha", planfix_task_id=1),),
+        items=(BulkTopicItem(topic_name="Alpha", external_ref=1),),
         operation_id="op-fw-first-msg",
     )
     result, op = await bulk_create_topics(
-        backend=backend, store=store, queue=queue, request=req
+        backend=backend, store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
     # The flood_wait + margin (4 + 2) shows up exactly once: the queue paused
     # the whole item and retried it cleanly, including the create_topic step.
@@ -403,7 +411,7 @@ async def test_bulk_create_per_item_key_fallback_to_chat_and_name(
         operation_id="op-fallback",
     )
     result, _ = await bulk_create_topics(
-        backend=backend, store=store, queue=queue, request=req
+        backend=backend, store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
     assert [(c, n) for c, n in backend.created] == [(-100, "Same"), (-100, "Other")]
     statuses = [it.status for it in result.items]
@@ -442,18 +450,18 @@ async def test_bulk_create_replay_after_needs_review_raises(
     queue = _make_queue(store)
     req = BulkTopicCreateRequest(
         telegram_chat_id=-100,
-        items=(BulkTopicItem(topic_name="Bad", planfix_task_id=99),),
+        items=(BulkTopicItem(topic_name="Bad", external_ref=99),),
         operation_id="op-nr",
     )
     _, op = await bulk_create_topics(
-        backend=backend, store=store, queue=queue, request=req
+        backend=backend, store=store, queue=queue, request=req, plugins=_planfix_plugins()
     )
     assert op.status is OperationStatus.NEEDS_REVIEW
 
     # Calling again without resetting must NOT auto-retry.
     with pytest.raises(BulkTopicCreateNeedsReview):
         await bulk_create_topics(
-            backend=FakeTopicBackend(), store=store, queue=queue, request=req
+            backend=FakeTopicBackend(), store=store, queue=queue, request=req, plugins=_planfix_plugins()
         )
 
 
@@ -607,7 +615,7 @@ def _patch_cli_topic_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 

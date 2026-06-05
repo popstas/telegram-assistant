@@ -17,13 +17,13 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.folders import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.folders import (
     FolderChat,
     FolderSnapshot,
 )
-from telegram_planfix_assistant.persistence import OperationStore
-from telegram_planfix_assistant.topics import TopicSummary
+from telegram_assistant.persistence import OperationStore
+from telegram_assistant.topics import TopicSummary
 
 from .test_dry_run_contract import assert_dry_run_envelope
 
@@ -131,7 +131,7 @@ def _patch_group_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 
@@ -154,7 +154,7 @@ def _patch_topic_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 
@@ -208,7 +208,7 @@ def test_cli_groups_create_dry_run_envelope(
         command="groups.create",
         resolved_keys=(
             "title",
-            "planfix_task_id",
+            "external_ref",
             "admins",
             "members",
             "reserve_admins",
@@ -338,7 +338,7 @@ def test_cli_topics_create_dry_run_with_chat_id(
         resolved_keys=(
             "telegram_chat_id",
             "topic_name",
-            "planfix_task_id",
+            "external_ref",
             "first_message_kind",
             "first_message_text",
             "existing_topic_ids",
@@ -531,14 +531,14 @@ def test_cli_topics_bulk_create_dry_run_flags_duplicates(
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     items = payload["resolved"]["items"]
-    # row 2 duplicates planfix_task_id
-    assert items[1]["duplicate_planfix_task_id_in_file"] is True
+    # row 2 duplicates external_ref
+    assert items[1]["duplicate_external_ref_in_file"] is True
     # row 3 duplicates topic_name
     assert items[2]["duplicate_topic_name_in_file"] is True
     # row 1 and row 3 reference an existing topic name on Telegram
     assert items[0]["existing_topic_ids"] == [42]
     assert items[2]["existing_topic_ids"] == [42]
-    assert any("duplicate planfix_task_id" in w for w in payload["warnings"])
+    assert any("duplicate external_ref" in w for w in payload["warnings"])
     assert any("duplicate topic_name" in w for w in payload["warnings"])
     assert any("already exists" in w for w in payload["warnings"])
 

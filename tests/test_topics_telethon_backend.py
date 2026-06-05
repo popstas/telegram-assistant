@@ -14,8 +14,8 @@ from typing import Any
 
 import pytest
 
-from telegram_planfix_assistant.topics import telethon_backend as tb
-from telegram_planfix_assistant.topics.telethon_backend import (
+from telegram_assistant.topics import telethon_backend as tb
+from telegram_assistant.topics.telethon_backend import (
     TelethonTopicBackend,
     _extract_topic_id,
     _peer_kwarg,
@@ -203,7 +203,7 @@ async def test_create_topic_translates_flood_wait(
     bare upstream exception would mark the operation failed instead, defeating
     rate-limit handling.
     """
-    from telegram_planfix_assistant.worker.queue import FloodWaitError
+    from telegram_assistant.worker.queue import FloodWaitError
 
     monkeypatch.setattr(
         tb,
@@ -219,7 +219,7 @@ async def test_create_topic_translates_flood_wait(
 
 @pytest.mark.asyncio
 async def test_send_message_translates_flood_wait() -> None:
-    from telegram_planfix_assistant.worker.queue import FloodWaitError
+    from telegram_assistant.worker.queue import FloodWaitError
 
     backend = TelethonTopicBackend(_FloodingClient())
     with pytest.raises(FloodWaitError) as excinfo:
@@ -258,7 +258,7 @@ async def test_create_topic_translates_flood_wait_on_resolver(
     FloodWaitError, not the raw Telethon class. Otherwise the queue treats
     it as a generic terminal failure.
     """
-    from telegram_planfix_assistant.worker.queue import FloodWaitError
+    from telegram_assistant.worker.queue import FloodWaitError
 
     monkeypatch.setattr(
         tb,

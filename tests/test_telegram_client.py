@@ -8,11 +8,11 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli.main import app as cli_app
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.config.loader import ConfigError
-from telegram_planfix_assistant.telegram_client.proxy import HTTP, SOCKS5
-from telegram_planfix_assistant.telegram_client.session import (
+from telegram_assistant.cli.main import app as cli_app
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.config.loader import ConfigError
+from telegram_assistant.telegram_client.proxy import HTTP, SOCKS5
+from telegram_assistant.telegram_client.session import (
     TelethonSessionManager,
     _reset_shared_for_tests,
     configure_shared_manager,
@@ -91,7 +91,7 @@ class _SessionPasswordNeededError(Exception):
 # Patch the matcher in the session module to also recognise our fake error.
 @pytest.fixture(autouse=True)
 def _patch_password_matcher(monkeypatch: pytest.MonkeyPatch) -> None:
-    from telegram_planfix_assistant.telegram_client import session as session_mod
+    from telegram_assistant.telegram_client import session as session_mod
 
     real = session_mod._is_password_needed
 
@@ -133,8 +133,8 @@ async def test_state_detects_unauthorized_session(minimal_config_yaml: str) -> N
     assert clients[0].connected is True
     assert state.authorized is False
     assert state.me is None
-    assert state.account_label == "planfix-assistant-main"
-    assert state.session_path == "/data/telegram-planfix-assistant.session"
+    assert state.account_label == "telegram-assistant-main"
+    assert state.session_path == "/data/telegram-assistant.session"
 
 
 async def test_state_detects_authorized_session(minimal_config_yaml: str) -> None:
@@ -332,7 +332,7 @@ def test_auth_cli_reports_already_authorized(
         created.append(client)
         return client
 
-    from telegram_planfix_assistant.cli import main as cli_module
+    from telegram_assistant.cli import main as cli_module
 
     real_build = cli_module._build_session_manager
 

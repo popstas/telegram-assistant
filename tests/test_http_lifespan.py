@@ -13,9 +13,9 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.http_api import create_app
-from telegram_planfix_assistant.telegram_client import session as session_module
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.http_api import create_app
+from telegram_assistant.telegram_client import session as session_module
 
 
 class _FakeFolder:

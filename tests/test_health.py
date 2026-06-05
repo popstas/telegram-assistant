@@ -11,9 +11,9 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.health import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.health import (
     DATABASE_ERROR,
     DATABASE_OK,
     FOLDER_MISSING,
@@ -27,7 +27,7 @@ from telegram_planfix_assistant.health import (
     probe_default_folder,
     probe_telegram_session,
 )
-from telegram_planfix_assistant.http_api import create_app
+from telegram_assistant.http_api import create_app
 
 
 @dataclass
@@ -84,7 +84,7 @@ class _FakeManager:
         self.state_calls += 1
         if self._raise:
             raise RuntimeError("telegram unreachable")
-        from telegram_planfix_assistant.telegram_client.session import SessionState
+        from telegram_assistant.telegram_client.session import SessionState
 
         return SessionState(
             authorized=self._authorized,
@@ -386,7 +386,7 @@ def test_cli_health_emits_json_payload(
 
     # Force the database probe to a known path by patching collect_health's
     # default through the module the CLI imports.
-    from telegram_planfix_assistant import health as health_mod
+    from telegram_assistant import health as health_mod
 
     monkeypatch.setattr(health_mod, "default_database_path", lambda cfg: db_path)
 
@@ -418,7 +418,7 @@ def test_cli_health_matches_http_payload(
     monkeypatch.setattr(
         cli_main, "TelethonSessionManager", lambda _telegram_config: fake_manager
     )
-    from telegram_planfix_assistant import health as health_mod
+    from telegram_assistant import health as health_mod
 
     monkeypatch.setattr(health_mod, "default_database_path", lambda cfg: db_path)
 

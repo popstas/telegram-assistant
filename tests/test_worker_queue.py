@@ -14,12 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
     idempotency,
 )
-from telegram_planfix_assistant.worker import (
+from telegram_assistant.worker import (
     BulkItemSpec,
     FloodWaitError,
     NeedsReviewError,

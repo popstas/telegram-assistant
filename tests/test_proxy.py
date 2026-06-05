@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from telegram_planfix_assistant.telegram_client.proxy import (
+from telegram_assistant.telegram_client.proxy import (
     HTTP,
     SOCKS4,
     SOCKS5,

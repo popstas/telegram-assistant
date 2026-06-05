@@ -15,23 +15,24 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.folders import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.folders import (
     FolderChat,
     FolderSnapshot,
 )
-from telegram_planfix_assistant.groups import (
+from telegram_assistant.groups import (
     GroupCreateFailed,
     GroupCreateNeedsReview,
     GroupCreateRequest,
     create_group,
 )
-from telegram_planfix_assistant.http_api import create_app
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.http_api import create_app
+from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
 )
+from telegram_assistant.plugins import build_registry
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -219,7 +220,7 @@ async def test_create_group_happy_path(
     folder_backend = FakeFolderBackend()
     request = GroupCreateRequest(
         title="Acme",
-        planfix_task_id=42,
+        external_ref=42,
         admins=["@alice"],
         members=["@bob"],
     )
@@ -229,13 +230,14 @@ async def test_create_group_happy_path(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
     assert op.status is OperationStatus.COMPLETED
     assert result.telegram_chat_id == -100123
     assert result.title == "Acme"
-    assert result.planfix_task_id == 42
+    assert result.external_ref == 42
     assert result.topics_enabled is True
     assert result.invite_link == "https://t.me/+invitehash"
     assert result.folder_name == "Planfix clients"
@@ -268,6 +270,7 @@ async def test_create_group_skip_reserve_uses_only_explicit_lists(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -286,7 +289,7 @@ async def test_create_group_idempotent_by_planfix_task_id(
     folder_backend = FakeFolderBackend()
     request = GroupCreateRequest(
         title="Acme",
-        planfix_task_id=42,
+        external_ref=42,
         admins=[],
         members=[],
         skip_reserve=True,
@@ -296,6 +299,7 @@ async def test_create_group_idempotent_by_planfix_task_id(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert first.replayed is False
@@ -308,6 +312,7 @@ async def test_create_group_idempotent_by_planfix_task_id(
         folder_backend=FakeFolderBackend(),
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert second.replayed is True
@@ -332,6 +337,7 @@ async def test_create_group_idempotent_by_title_when_no_task_id(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -341,6 +347,7 @@ async def test_create_group_idempotent_by_title_when_no_task_id(
         folder_backend=FakeFolderBackend(),
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert second.telegram_chat_id == -7
@@ -352,7 +359,7 @@ async def test_create_group_applies_title_postfix(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:
     config = _config(minimal_config_yaml)
-    config.telegram.defaults.group_title_postfix = " [client]"
+    config.plugins.planfix.group_title_postfix = " [client]"
     backend = FakeGroupBackend()
     folder_backend = FakeFolderBackend()
     request = GroupCreateRequest(title="Acme", skip_reserve=True)
@@ -362,6 +369,7 @@ async def test_create_group_applies_title_postfix(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -374,7 +382,7 @@ async def test_title_postfix_does_not_change_idempotency_key(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:
     config = _config(minimal_config_yaml)
-    config.telegram.defaults.group_title_postfix = " [client]"
+    config.plugins.planfix.group_title_postfix = " [client]"
     backend1 = FakeGroupBackend(chat_id=-7)
     request = GroupCreateRequest(title="Beta", skip_reserve=True)
 
@@ -383,6 +391,7 @@ async def test_title_postfix_does_not_change_idempotency_key(
         folder_backend=FakeFolderBackend(),
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert first.replayed is False
@@ -395,6 +404,7 @@ async def test_title_postfix_does_not_change_idempotency_key(
         folder_backend=FakeFolderBackend(),
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert second.replayed is True
@@ -406,7 +416,7 @@ async def test_empty_title_postfix_is_noop(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:
     config = _config(minimal_config_yaml)
-    assert config.telegram.defaults.group_title_postfix == ""
+    assert config.plugins.planfix.group_title_postfix == ""
     backend = FakeGroupBackend()
     request = GroupCreateRequest(title="Acme", skip_reserve=True)
 
@@ -415,6 +425,7 @@ async def test_empty_title_postfix_is_noop(
         folder_backend=FakeFolderBackend(),
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -431,7 +442,7 @@ async def test_create_group_missing_folder_marks_needs_review(
     folder_backend = FakeFolderBackend(folders=[])
     request = GroupCreateRequest(
         title="Acme",
-        planfix_task_id=1,
+        external_ref=1,
         skip_reserve=True,
     )
 
@@ -441,6 +452,7 @@ async def test_create_group_missing_folder_marks_needs_review(
             folder_backend=folder_backend,
             store=store,
             config=config.telegram,
+            plugins=build_registry(config),
             request=request,
         )
     # Replay should now also surface needs_review.
@@ -450,6 +462,7 @@ async def test_create_group_missing_folder_marks_needs_review(
             folder_backend=folder_backend,
             store=store,
             config=config.telegram,
+            plugins=build_registry(config),
             request=request,
         )
 
@@ -462,7 +475,7 @@ async def test_create_group_folder_mutation_failure_marks_needs_review(
     folder_backend = FakeFolderBackend(add_should_fail=True)
     request = GroupCreateRequest(
         title="Acme",
-        planfix_task_id=2,
+        external_ref=2,
         skip_reserve=True,
     )
 
@@ -472,6 +485,7 @@ async def test_create_group_folder_mutation_failure_marks_needs_review(
             folder_backend=folder_backend,
             store=store,
             config=config.telegram,
+            plugins=build_registry(config),
             request=request,
         )
 
@@ -486,7 +500,7 @@ async def test_create_group_task_message_only_when_bot_present(
     # message should be sent.
     request = GroupCreateRequest(
         title="Gamma",
-        planfix_task_id=77,
+        external_ref=77,
         admins=["@alice"],
         skip_reserve=True,
     )
@@ -495,6 +509,7 @@ async def test_create_group_task_message_only_when_bot_present(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert result.task_message_sent is False
@@ -521,6 +536,7 @@ async def test_create_group_skips_blank_member_references(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -552,6 +568,7 @@ async def test_create_group_failure_records_failed(
             folder_backend=folder_backend,
             store=store,
             config=config.telegram,
+            plugins=build_registry(config),
             request=request,
         )
     with pytest.raises(GroupCreateFailed):
@@ -560,6 +577,7 @@ async def test_create_group_failure_records_failed(
             folder_backend=FakeFolderBackend(),
             store=store,
             config=config.telegram,
+            plugins=build_registry(config),
             request=request,
         )
 
@@ -579,13 +597,14 @@ async def test_create_group_applies_tabs_layout_after_create(
     config = _config_with_layout(minimal_config_yaml, "tabs")
     backend = FakeGroupBackend()
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=1, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=1, skip_reserve=True)
 
     result, op = await create_group(
         backend=backend,
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -600,13 +619,14 @@ async def test_create_group_applies_list_layout_after_create(
     config = _config_with_layout(minimal_config_yaml, "list")
     backend = FakeGroupBackend()
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=2, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=2, skip_reserve=True)
 
     result, op = await create_group(
         backend=backend,
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -623,7 +643,7 @@ async def test_create_group_skips_layout_when_topics_disabled(
     folder_backend = FakeFolderBackend()
     request = GroupCreateRequest(
         title="Acme",
-        planfix_task_id=3,
+        external_ref=3,
         skip_reserve=True,
         enable_topics=False,
     )
@@ -633,6 +653,7 @@ async def test_create_group_skips_layout_when_topics_disabled(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -650,7 +671,7 @@ async def test_create_group_per_request_layout_overrides_config(
     folder_backend = FakeFolderBackend()
     request = GroupCreateRequest(
         title="Acme",
-        planfix_task_id=10,
+        external_ref=10,
         skip_reserve=True,
         topics_layout="tabs",
     )
@@ -660,6 +681,7 @@ async def test_create_group_per_request_layout_overrides_config(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -676,7 +698,7 @@ async def test_create_group_layout_falls_back_to_config_default(
     folder_backend = FakeFolderBackend()
     request = GroupCreateRequest(
         title="Acme",
-        planfix_task_id=11,
+        external_ref=11,
         skip_reserve=True,
         topics_layout=None,
     )
@@ -686,6 +708,7 @@ async def test_create_group_layout_falls_back_to_config_default(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -701,7 +724,7 @@ async def test_create_group_per_request_layout_skipped_when_topics_disabled(
     folder_backend = FakeFolderBackend()
     request = GroupCreateRequest(
         title="Acme",
-        planfix_task_id=12,
+        external_ref=12,
         skip_reserve=True,
         enable_topics=False,
         topics_layout="tabs",
@@ -712,6 +735,7 @@ async def test_create_group_per_request_layout_skipped_when_topics_disabled(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -732,16 +756,17 @@ async def test_create_group_layout_failure_does_not_fail_create(
         set_layout_error=RuntimeError("chat is not a forum"),
     )
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=4, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=4, skip_reserve=True)
 
     with caplog.at_level(
-        _logging.WARNING, logger="telegram_planfix_assistant.groups.service"
+        _logging.WARNING, logger="telegram_assistant.groups.service"
     ):
         result, op = await create_group(
             backend=backend,
             folder_backend=folder_backend,
             store=store,
             config=config.telegram,
+            plugins=build_registry(config),
             request=request,
         )
 
@@ -761,14 +786,14 @@ async def test_create_group_layout_flood_wait_promotes_to_needs_review(
     not be silently dropped to a warning log. The chat is already live, but the
     operator still needs to know Telegram is throttling this account.
     """
-    from telegram_planfix_assistant.worker.queue import FloodWaitError
+    from telegram_assistant.worker.queue import FloodWaitError
 
     config = _config_with_layout(minimal_config_yaml, "tabs")
     backend = FakeGroupBackend(
         set_layout_error=FloodWaitError(seconds=42),
     )
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=5, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=5, skip_reserve=True)
 
     with pytest.raises(GroupCreateNeedsReview):
         await create_group(
@@ -776,6 +801,7 @@ async def test_create_group_layout_flood_wait_promotes_to_needs_review(
             folder_backend=folder_backend,
             store=store,
             config=config.telegram,
+            plugins=build_registry(config),
             request=request,
         )
 
@@ -786,13 +812,14 @@ async def test_create_group_sets_default_permissions(
     config = _config(minimal_config_yaml)
     backend = FakeGroupBackend()
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=1, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=1, skip_reserve=True)
 
     result, op = await create_group(
         backend=backend,
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -809,13 +836,14 @@ async def test_create_group_respects_configured_permissions(
     config.telegram.defaults.default_member_permissions.pin_messages = True
     backend = FakeGroupBackend()
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=2, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=2, skip_reserve=True)
 
     result, op = await create_group(
         backend=backend,
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -831,13 +859,14 @@ async def test_create_group_permissions_failure_recorded_in_skipped(
         set_permissions_error=RuntimeError("cannot edit default rights"),
     )
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=3, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=3, skip_reserve=True)
 
     result, op = await create_group(
         backend=backend,
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -852,14 +881,14 @@ async def test_create_group_permissions_failure_recorded_in_skipped(
 async def test_create_group_permissions_flood_wait_promotes_to_needs_review(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:
-    from telegram_planfix_assistant.worker.queue import FloodWaitError
+    from telegram_assistant.worker.queue import FloodWaitError
 
     config = _config(minimal_config_yaml)
     backend = FakeGroupBackend(
         set_permissions_error=FloodWaitError(seconds=30),
     )
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=4, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=4, skip_reserve=True)
 
     with pytest.raises(GroupCreateNeedsReview):
         await create_group(
@@ -867,6 +896,7 @@ async def test_create_group_permissions_flood_wait_promotes_to_needs_review(
             folder_backend=folder_backend,
             store=store,
             config=config.telegram,
+            plugins=build_registry(config),
             request=request,
         )
 
@@ -883,13 +913,14 @@ async def test_cleanup_deletes_welcome_command_and_reply(
     ]
     backend = FakeGroupBackend(recent_messages=recent, sent_message_id=42)
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=1, skip_reserve=False)
+    request = GroupCreateRequest(title="Acme", external_ref=1, skip_reserve=False)
 
     result, op = await create_group(
         backend=backend,
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -911,13 +942,14 @@ async def test_cleanup_without_reply_still_deletes_welcome_and_command(
     ]
     backend = FakeGroupBackend(recent_messages=recent, sent_message_id=42)
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=2, skip_reserve=False)
+    request = GroupCreateRequest(title="Acme", external_ref=2, skip_reserve=False)
 
     result, op = await create_group(
         backend=backend,
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -931,19 +963,20 @@ async def test_cleanup_disabled_is_noop(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:
     config = _config(minimal_config_yaml)
-    config.telegram.defaults.cleanup_planfix_messages = False
+    config.plugins.planfix.cleanup_messages = False
     recent = [
         {"id": 40, "sender_username": "planfix_bot", "reply_to_msg_id": None, "text": "hi"},
     ]
     backend = FakeGroupBackend(recent_messages=recent, sent_message_id=42)
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=3, skip_reserve=False)
+    request = GroupCreateRequest(title="Acme", external_ref=3, skip_reserve=False)
 
     result, op = await create_group(
         backend=backend,
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -967,6 +1000,7 @@ async def test_cleanup_skipped_when_no_task_message(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -990,13 +1024,14 @@ async def test_cleanup_delete_failure_recorded_in_skipped(
         delete_messages_error=RuntimeError("cannot delete"),
     )
     folder_backend = FakeFolderBackend()
-    request = GroupCreateRequest(title="Acme", planfix_task_id=4, skip_reserve=False)
+    request = GroupCreateRequest(title="Acme", external_ref=4, skip_reserve=False)
 
     result, op = await create_group(
         backend=backend,
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -1015,7 +1050,7 @@ async def test_create_group_skip_folder_bypasses_folder_resolution(
     folder_backend = FakeFolderBackend(folders=[])
     request = GroupCreateRequest(
         title="Acme",
-        planfix_task_id=11,
+        external_ref=11,
         skip_reserve=True,
         skip_folder=True,
     )
@@ -1024,6 +1059,7 @@ async def test_create_group_skip_folder_bypasses_folder_resolution(
         folder_backend=folder_backend,
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert op.status is OperationStatus.COMPLETED
@@ -1036,13 +1072,14 @@ async def test_replay_returns_saved_result_when_chat_exists(
 ) -> None:
     config = _config(minimal_config_yaml)
     backend1 = FakeGroupBackend(chat_id=-555)
-    request = GroupCreateRequest(title="Acme", planfix_task_id=70, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=70, skip_reserve=True)
 
     first, _ = await create_group(
         backend=backend1,
         folder_backend=FakeFolderBackend(),
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert first.replayed is False
@@ -1055,6 +1092,7 @@ async def test_replay_returns_saved_result_when_chat_exists(
         folder_backend=FakeFolderBackend(),
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert second.replayed is True
@@ -1068,13 +1106,14 @@ async def test_stale_completed_op_dropped_and_recreated_when_chat_gone(
 ) -> None:
     config = _config(minimal_config_yaml)
     backend1 = FakeGroupBackend(chat_id=-555)
-    request = GroupCreateRequest(title="Acme", planfix_task_id=71, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=71, skip_reserve=True)
 
     first, op1 = await create_group(
         backend=backend1,
         folder_backend=FakeFolderBackend(),
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert first.telegram_chat_id == -555
@@ -1087,6 +1126,7 @@ async def test_stale_completed_op_dropped_and_recreated_when_chat_gone(
         folder_backend=FakeFolderBackend(),
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
     assert second.replayed is False
@@ -1101,17 +1141,18 @@ async def test_stale_completed_op_dropped_and_recreated_when_chat_gone(
 async def test_flood_wait_during_existence_check_needs_review(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:
-    from telegram_planfix_assistant.worker.queue import FloodWaitError
+    from telegram_assistant.worker.queue import FloodWaitError
 
     config = _config(minimal_config_yaml)
     backend1 = FakeGroupBackend(chat_id=-555)
-    request = GroupCreateRequest(title="Acme", planfix_task_id=72, skip_reserve=True)
+    request = GroupCreateRequest(title="Acme", external_ref=72, skip_reserve=True)
 
     await create_group(
         backend=backend1,
         folder_backend=FakeFolderBackend(),
         store=store,
         config=config.telegram,
+        plugins=build_registry(config),
         request=request,
     )
 
@@ -1126,11 +1167,12 @@ async def test_flood_wait_during_existence_check_needs_review(
             folder_backend=FakeFolderBackend(),
             store=store,
             config=config.telegram,
+            plugins=build_registry(config),
             request=request,
         )
     assert backend2.created == []
     # The original completed operation is still intact (not deleted).
-    op = store.find_by_idempotency_key("group_create:planfix_task_id=72")
+    op = store.find_by_idempotency_key("group_create:external_ref=72")
     assert op is not None
     assert op.status is OperationStatus.COMPLETED
 
@@ -1138,7 +1180,7 @@ async def test_flood_wait_during_existence_check_needs_review(
 def test_delete_operation_removes_row_and_index(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:
-    from telegram_planfix_assistant.persistence import idempotency
+    from telegram_assistant.persistence import idempotency
 
     store = OperationStore(tmp_path / "del.db")
     begin = store.begin_operation(
@@ -1201,7 +1243,7 @@ def test_http_create_group_happy_path(minimal_config_yaml: str) -> None:
         "/telegram/groups",
         json={
             "title": "Acme",
-            "planfix_task_id": 42,
+            "external_ref": 42,
             "admins": ["@alice"],
             "members": ["@bob"],
         },
@@ -1296,7 +1338,7 @@ def _patch_cli_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 

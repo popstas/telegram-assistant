@@ -1,8 +1,8 @@
-# telegram-planfix-assistant MVP
+# telegram-assistant MVP
 
 ## Overview
 
-Build `telegram-planfix-assistant` — a Telegram automation service for the Planfix ↔ Telegram integration. It exposes three interfaces over one domain layer: an HTTP API (primary entry point for Planfix and automations), a CLI that mirrors every HTTP endpoint for manual and batch use, and a worker/queue that performs Telegram operations with throttling and `FLOOD_WAIT` handling.
+Build `telegram-assistant` — a Telegram automation service for the Planfix ↔ Telegram integration. It exposes three interfaces over one domain layer: an HTTP API (primary entry point for Planfix and automations), a CLI that mirrors every HTTP endpoint for manual and batch use, and a worker/queue that performs Telegram operations with throttling and `FLOOD_WAIT` handling.
 
 The service runs on MTProto via Telethon under a technical Telegram user account, because the Bot API cannot create supergroups, add users before a dialog is started, or perform several other administrative actions this project needs. It must support creating client supergroups with topics enabled, placing them into a configured Telegram chat folder, generating invite links, adding `@planfix_bot` and reserve accounts, bulk membership changes, bulk topic creation, topic closing, and structured message sending — all with idempotency, queueing, and `FLOOD_WAIT` resilience.
 
@@ -44,7 +44,7 @@ The service runs on MTProto via Telethon under a technical Telegram user account
 telegram:
   api_id: 123456
   api_hash: "telegram_api_hash"
-  session_path: /data/telegram-planfix-assistant.session
+  session_path: /data/telegram-assistant.session
   main_account_label: planfix-assistant-main
   reserve_admins:
     - "@reserve_account"
@@ -97,14 +97,14 @@ logging:
 Every HTTP endpoint has a CLI counterpart:
 
 ```
-telegram-planfix-assistant <resource> <action> [options]
+telegram-assistant <resource> <action> [options]
 ```
 
 Plus CLI-only commands:
 
-- `telegram-planfix-assistant auth` — interactive Telethon login
-- `telegram-planfix-assistant operations status --operation-id <id>`
-- `telegram-planfix-assistant operations retry --operation-id <id>`
+- `telegram-assistant auth` — interactive Telethon login
+- `telegram-assistant operations status --operation-id <id>`
+- `telegram-assistant operations retry --operation-id <id>`
 
 CLI conventions:
 
@@ -130,9 +130,9 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 
 ### Task 1: Project scaffolding
 
-- [x] create Python 3.12+ project layout under `src/telegram_planfix_assistant/`
+- [x] create Python 3.12+ project layout under `src/telegram_assistant/`
 - [x] create `.venv` and pin dependencies (Telethon, FastAPI or equivalent, uvicorn, pydantic, SQLAlchemy or sqlite-utils, click/typer for CLI, structlog)
-- [x] add `pyproject.toml` (or equivalent) with `telegram-planfix-assistant` CLI entrypoint
+- [x] add `pyproject.toml` (or equivalent) with `telegram-assistant` CLI entrypoint
 - [x] add `.gitignore` excluding `data/`, `.venv/`, `__pycache__/`, build artifacts
 - [x] add config loader for `data/config.yml` with validation and clear error messages
 - [x] add FastAPI app skeleton with bearer-token auth middleware reading `http.bearer_token` from config
@@ -143,7 +143,7 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 ### Task 2: Telethon session and `auth` CLI
 
 - [x] implement Telethon session wrapper reading `api_id`, `api_hash`, `session_path` from config
-- [x] implement `telegram-planfix-assistant auth` interactive login (phone, code, optional 2FA password) writing session to configured path
+- [x] implement `telegram-assistant auth` interactive login (phone, code, optional 2FA password) writing session to configured path
 - [x] make re-running `auth` show the current authorized account and not re-prompt unnecessarily
 - [x] expose a single shared Telethon client used by HTTP, CLI, and worker
 - [x] write tests for session state detection (unauthorized vs authorized) using mock Telethon client
@@ -152,7 +152,7 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 ### Task 3: Healthcheck (HTTP + CLI)
 
 - [x] implement `GET /health` returning `status`, `telegram_session` (`authorized`/`unauthorized`), `database` (`ok`/`error`), `default_folder` (`ok`/`missing`)
-- [x] implement `telegram-planfix-assistant health` CLI returning the same payload
+- [x] implement `telegram-assistant health` CLI returning the same payload
 - [x] add startup probe so the service responds to `/health` even when Telegram is reachable but session is unauthorized
 - [x] write tests covering all health states (session authorized/unauthorized, DB ok/error, folder ok/missing)
 - [x] run project tests - must pass before next task
@@ -172,7 +172,7 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 - [x] implement async worker queue with bounded parallelism (`queue.max_parallel_telegram_ops`)
 - [x] handle `FLOOD_WAIT` as a graceful pause respecting `flood_wait_safety_margin_seconds` rather than a fatal error
 - [x] persist per-item progress for bulk operations so a restart resumes from the last incomplete item
-- [x] implement `telegram-planfix-assistant operations status --operation-id <id>` and `... operations retry --operation-id <id>` CLI commands
+- [x] implement `telegram-assistant operations status --operation-id <id>` and `... operations retry --operation-id <id>` CLI commands
 - [x] surface `needs_review` items in `operations status` output
 - [x] write tests covering `FLOOD_WAIT` retry, restart resumption, `operations status`, and `operations retry` for failed and `needs_review` items
 - [x] run project tests - must pass before next task
@@ -181,15 +181,15 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 
 - [x] implement helper that resolves `--folder-name` (and optional `folder_id` cross-check) to a Telegram folder peer list, returning a clear error if missing — never auto-create
 - [x] implement helper that resolves `--chat-name` within a folder to a `telegram_chat_id`; ambiguous matches must fail with the list of duplicates
-- [x] implement `GET /telegram/folders/{folder_name}` + `telegram-planfix-assistant folders inspect --folder-name <name>` returning `folder_id`, `folder_name`, `chats_count`, `chats`
-- [x] implement `POST /telegram/folders/{folder_name}/chats` + `telegram-planfix-assistant folders add-chat --folder-name <name> --chat-name <name>` to move an existing chat into a folder
+- [x] implement `GET /telegram/folders/{folder_name}` + `telegram-assistant folders inspect --folder-name <name>` returning `folder_id`, `folder_name`, `chats_count`, `chats`
+- [x] implement `POST /telegram/folders/{folder_name}/chats` + `telegram-assistant folders add-chat --folder-name <name> --chat-name <name>` to move an existing chat into a folder
 - [x] mark per-peer folder failures as `needs_review` rather than silent success
 - [x] write tests for folder resolution (found / missing / `folder_id` mismatch), chat-name resolution (unique / ambiguous / missing), inspect, and add-chat
 - [x] run project tests - must pass before next task
 
 ### Task 7: Group create (HTTP + CLI)
 
-- [x] implement `POST /telegram/groups` and `telegram-planfix-assistant groups create` sharing one domain function
+- [x] implement `POST /telegram/groups` and `telegram-assistant groups create` sharing one domain function
 - [x] create supergroup, enable topics (default from `telegram.defaults.enable_topics`), add `@planfix_bot` if listed in `members`/`reserve_members`
 - [x] add primary admins, members, reserve admins, and reserve members; promote admins to Telegram admin role
 - [x] create invite link when `create_invite_link` is true (default from `telegram.defaults.create_invite_link`)
@@ -202,7 +202,7 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 
 ### Task 8: Single topic create (HTTP + CLI)
 
-- [x] implement `POST /telegram/topics` and `telegram-planfix-assistant topics create`
+- [x] implement `POST /telegram/topics` and `telegram-assistant topics create`
 - [x] support CLI `--chat-id` or `--chat-name` + `--folder-name` resolution
 - [x] support CLI `--topic-name`
 - [x] first-message logic: `/task {planfix_task_id}` if id present, else `message` if provided, else duplicate the topic name
@@ -213,7 +213,7 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 
 ### Task 9: Bulk topic create (HTTP + CLI)
 
-- [x] implement `POST /telegram/topics/bulk-create` and `telegram-planfix-assistant topics bulk-create`
+- [x] implement `POST /telegram/topics/bulk-create` and `telegram-assistant topics bulk-create`
 - [x] accept JSON body and `--file <path>` CSV with columns `planfix_task_id,topic_name,message`
 - [x] run via the worker queue with FLOOD_WAIT awareness and per-item progress
 - [x] enforce per-item idempotency (by `planfix_task_id` when present, otherwise `telegram_chat_id + topic_name`)
@@ -225,7 +225,7 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 
 ### Task 10: Close topic (HTTP + CLI)
 
-- [x] implement `POST /telegram/topics/{topic_id}/close` and `telegram-planfix-assistant topics close`
+- [x] implement `POST /telegram/topics/{topic_id}/close` and `telegram-assistant topics close`
 - [x] support CLI `--topic-id` or `--topic-name` (within the resolved chat)
 - [x] do not delete topic or history
 - [x] make re-close idempotent (re-call returns `closed`)
@@ -235,7 +235,7 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 
 ### Task 11: Bulk add members (HTTP + CLI)
 
-- [x] implement `POST /telegram/groups/{chat_id}/members/bulk-add` and `telegram-planfix-assistant members bulk-add`
+- [x] implement `POST /telegram/groups/{chat_id}/members/bulk-add` and `telegram-assistant members bulk-add`
 - [x] accept JSON and `--file <path>` CSV with columns `user,role`
 - [x] accept user references as `@username`, phone/contact ID, or numeric Telegram user ID where MTProto permits
 - [x] support CLI `--chat-id` or `--chat-name` + `--folder-name`
@@ -247,7 +247,7 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 
 ### Task 12: Bulk remove members (HTTP + CLI)
 
-- [x] implement `POST /telegram/groups/{chat_id}/members/bulk-remove` and `telegram-planfix-assistant members bulk-remove`
+- [x] implement `POST /telegram/groups/{chat_id}/members/bulk-remove` and `telegram-assistant members bulk-remove`
 - [x] accept JSON and `--file <path>` CSV with column `user`
 - [x] default `mode = ban_unban` so users are removed but not blacklisted permanently
 - [x] support `--dry-run` in CLI: report the intended action per user without performing it
@@ -259,7 +259,7 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 
 ### Task 13: Send message/command (HTTP + CLI)
 
-- [x] implement `POST /telegram/messages` and `telegram-planfix-assistant messages send`
+- [x] implement `POST /telegram/messages` and `telegram-assistant messages send`
 - [x] support targeted send: `telegram_chat_id` (or `--chat-name` + `--folder-name`) and `telegram_topic_id` (or `--topic-name`)
 - [x] support mass send: when only `folder_name` + `topic_name` are given, send to every chat in the folder that has a matching topic; skip groups without that topic and mark them `skipped` with reason `topic_not_found`
 - [x] support sending service commands like `/task <id>` without leaking secrets in logs
@@ -288,9 +288,9 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 
 ### Task 16: Verify acceptance criteria
 
-- [x] verify project is named `telegram-planfix-assistant` and runs from Docker, `GET /health` passes (pyproject.toml name + Dockerfile + tests/test_docker_image.py + tests/test_health.py)
-- [x] verify `telegram-planfix-assistant auth` performs interactive Telethon login and stores session under `data/` (cli/main.py auth command + tests/test_telegram_client.py)
-- [x] verify `telegram-planfix-assistant health` reports the same status as `GET /health` (cli/main.py health command + tests/test_health.py shared service)
+- [x] verify project is named `telegram-assistant` and runs from Docker, `GET /health` passes (pyproject.toml name + Dockerfile + tests/test_docker_image.py + tests/test_health.py)
+- [x] verify `telegram-assistant auth` performs interactive Telethon login and stores session under `data/` (cli/main.py auth command + tests/test_telegram_client.py)
+- [x] verify `telegram-assistant health` reports the same status as `GET /health` (cli/main.py health command + tests/test_health.py shared service)
 - [x] verify config is read from `data/config.yml`, and `data/` is in `.gitignore` (.gitignore line 2 `data/`, config/loader.py default path, tests/test_config_loader.py)
 - [x] verify HTTP default port is `8085` (config/models.py default + Dockerfile EXPOSE + docker-compose port mapping)
 - [x] verify group creation works via HTTP and CLI (groups module + tests/test_groups.py)
@@ -333,5 +333,5 @@ Telethon session unauthorized, repeated `FLOOD_WAIT` in a row, stuck bulk operat
 - Decide which set of Telegram admin rights to grant managers and reserve accounts (open question from the source spec)
 - Decide where the service is hosted and who watches the alerts (open question from the source spec)
 - Provision the test Telegram contour (technical account, reserve account, test folder, `@planfix_bot`, 2-3 test users, test group) before running integration tests
-- Telethon session must be created interactively via `telegram-planfix-assistant auth` on the target host — it cannot be checked into the repository
+- Telethon session must be created interactively via `telegram-assistant auth` on the target host — it cannot be checked into the repository
 - Bearer token for HTTP API must be set in `data/config.yml` on the target host, not committed

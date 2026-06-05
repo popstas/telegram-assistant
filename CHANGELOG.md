@@ -5,6 +5,7 @@
 
 ### Features
 
+- Make Planfix an optional plugin; generic external_ref idempotency anchor
 - Verify acceptance criteria for first-day fixes
 - Clean up service messages after group creation
 - Verify chat existence before replaying group_create
@@ -40,7 +41,7 @@
 - Add SQLite persistence and idempotency layer
 - Add /health endpoint and health CLI with shared probes
 - Add Telethon session wrapper and auth CLI
-- Scaffold telegram-planfix-assistant project
+- Scaffold telegram-assistant project
 
 ### Bug Fixes
 
@@ -59,6 +60,10 @@
 - Add creds, repeat e2e
 - Add task 17: e2e tests
 
+### Build
+
+- Rewrite old project name in generated changelog
+
 ### Miscellaneous
 
 - Ignore installed skills and .claude
@@ -66,4 +71,24 @@
 - Drop exec bit on scripts/*.sh
 - Add git-cliff changelog and GitHub Actions workflows
 - Initial commit with spec and ralphex plan
+
+### Refactor
+
+- Rename project telegram-assistant -> telegram-assistant
+- Rename cleanup_service_messages -> cleanup_planfix_messages, default off
+
+### Task
+
+- Rename complete (remote+dir+code merged); drop leftover item
+- Settle Planfix-plugin design; clear completed rename item
+- Add HTTP MCP server (Google OAuth); scope reads in access control
+- Add scheduled msgs, mute, folder-remove, reactions, forward, get-recent
+- Support sending media (photos, videos, files)
+- Make Planfix an optional plugin, not core
+- Settle rename target -> telegram-assistant
+- Generalize entity resolution (entity everywhere, not just chat_id)
+- Add addressing chats by username/title for message send
+- Add write/manage access restrictions (whitelist + folder)
+- Add integration/agent-setup layer (INTEGRATION.md)
+- Add project rename (telegram-assistant -> telegram-?)
 

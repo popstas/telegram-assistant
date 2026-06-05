@@ -11,11 +11,11 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.folders import FolderChat, FolderSnapshot
-from telegram_planfix_assistant.http_api import create_app
-from telegram_planfix_assistant.members import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.folders import FolderChat, FolderSnapshot
+from telegram_assistant.http_api import create_app
+from telegram_assistant.members import (
     BulkMemberAddNeedsReview,
     BulkMemberAddRequest,
     BulkMemberItem,
@@ -24,11 +24,11 @@ from telegram_planfix_assistant.members import (
     bulk_add_members,
     normalize_user_ref,
 )
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
 )
-from telegram_planfix_assistant.worker import WorkerQueue
+from telegram_assistant.worker import WorkerQueue
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -570,7 +570,7 @@ def _patch_cli_member_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 

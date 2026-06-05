@@ -18,7 +18,7 @@ import pytest
 SKILL_PATH = (
     Path(__file__).resolve().parent.parent
     / "skills"
-    / "telegram-planfix-assistant"
+    / "telegram-assistant"
     / "SKILL.md"
 )
 

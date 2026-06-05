@@ -1,10 +1,10 @@
 services:
-  telegram-planfix-assistant:
+  telegram-assistant:
     build:
       context: .
       dockerfile: Dockerfile
-    image: telegram-planfix-assistant:latest
-    container_name: telegram-planfix-assistant
+    image: telegram-assistant:latest
+    container_name: telegram-assistant
     restart: unless-stopped
     ports:
       - "8085:8085"
