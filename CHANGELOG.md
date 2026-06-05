@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Task
+
+- Mark PyPI publishing done (v0.2.1 live)
+
 ## v0.2.1 - 2026-06-05
 
 ### Miscellaneous
