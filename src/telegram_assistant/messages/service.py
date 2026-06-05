@@ -97,6 +97,46 @@ class MessageBackend(Protocol):
 
 
 @dataclass(frozen=True)
+class RecentMessage:
+    """One message returned by the get-recent read op.
+
+    ``sender`` is the sender's ``@username`` when known (``None`` otherwise);
+    ``date`` is an ISO-8601 timestamp string (``None`` when the backend can't
+    supply one); ``reply_to`` is the replied-to message id; ``text`` is the
+    message body or, for media-only messages, a short media summary.
+    """
+
+    id: int
+    sender: str | None
+    date: str | None
+    reply_to: int | None
+    text: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "sender": self.sender,
+            "date": self.date,
+            "reply_to": self.reply_to,
+            "text": self.text,
+        }
+
+
+class MessageReadBackend(Protocol):
+    """Telethon-facing surface needed to read recent messages.
+
+    Production wires this to a Telethon adapter; tests inject a fake. The op
+    that consumes it (:func:`get_recent_messages`) is the canonical READ-level
+    operation the access gate protects.
+    """
+
+    async def get_recent_messages(
+        self, *, chat_id: int, limit: int = 5
+    ) -> list[RecentMessage]:
+        ...
+
+
+@dataclass(frozen=True)
 class SendMessageRequest:
     """Input to :func:`send_message`.
 
@@ -256,6 +296,33 @@ async def send_message(
     )
     op = store.complete_operation(operation_id, result.to_dict())
     return result, op
+
+
+# ---------------------------------------------------------------------------
+# Get recent (read op)
+# ---------------------------------------------------------------------------
+
+
+async def get_recent_messages(
+    *,
+    backend: MessageReadBackend,
+    chat_id: int,
+    limit: int = 5,
+    authorizer: Authorizer | None = None,
+) -> list[RecentMessage]:
+    """Return up to ``limit`` recent messages for ``chat_id``, newest first.
+
+    This is a READ op: when an ``authorizer`` is supplied it must grant READ on
+    the target chat or :class:`AccessDenied` is raised before any Telegram call.
+    ``limit`` defaults to 5 and must be positive.
+    """
+    if limit <= 0:
+        raise ValueError("get_recent_messages requires a positive limit")
+
+    if authorizer is not None:
+        await authorizer.require(chat_id, AccessLevel.READ)
+
+    return await backend.get_recent_messages(chat_id=chat_id, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -550,11 +617,14 @@ __all__ = [
     "MassSendRequest",
     "MassSendResult",
     "MessageBackend",
+    "MessageReadBackend",
     "MessageSendFailed",
     "MessageSendNeedsReview",
     "MessageSendPending",
+    "RecentMessage",
     "SendMessageRequest",
     "SendMessageResult",
+    "get_recent_messages",
     "is_service_command",
     "mass_send_message",
     "redact_message_text",

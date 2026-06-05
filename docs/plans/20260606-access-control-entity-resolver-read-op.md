@@ -133,12 +133,12 @@ there is a real read operation to protect:
 
 ### Task 3: Promote get-recent-messages to a first-class read op
 
-- [ ] Move `get_recent_messages` into `messages/` as a domain op with a `MessageReadBackend`
+- [x] Move `get_recent_messages` into `messages/` as a domain op with a `MessageReadBackend`
   protocol and a `RecentMessage` shape (id, sender, date, reply_to, text/media summary), default
   limit 5
-- [ ] Gate the read op behind READ-level authorization
-- [ ] write tests for the read op (limit default/override, READ-denied path)
-- [ ] run project tests - must pass before next task
+- [x] Gate the read op behind READ-level authorization
+- [x] write tests for the read op (limit default/override, READ-denied path)
+- [x] run project tests - must pass before next task
 
 ### Task 4: Wire the resolver, authorizer, and read op into CLI and HTTP
 

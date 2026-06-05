@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add access-control config and authorizer enforced in the domain layer
 - Add shared entity resolver
 
 ### Documentation
