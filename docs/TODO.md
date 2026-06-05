@@ -1,6 +1,5 @@
 # TODO
 
-- [ ] Finish rename out-of-band leftovers: rename the GitHub repo / git remote, rename the local repo dir, and regenerate `skills-lock.json` `computedHash` via the skills tool. (Code/docs rename `telegram-planfix-assistant` → `telegram-assistant` already merged.)
 - [ ] Make Planfix an optional **plugin**, not a core dependency (`telegram-assistant` is broader than Planfix).
   Decouple Planfix-specific bits from the generic core so the core has **zero Planfix knowledge**; keep current behavior available when the plugin is enabled.
   **Settled design:**
