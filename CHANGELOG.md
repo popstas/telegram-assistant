@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Miscellaneous
+
+- Publish to PyPI on release + add bump-my-version config (#7)
+
 ## v0.2.0 - 2026-06-05
 
 ### Features
