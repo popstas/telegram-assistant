@@ -17,14 +17,14 @@ The seven fixes:
 ## Context
 
 - Files involved:
-  - `src/telegram_planfix_assistant/config/models.py` — `TelegramDefaults` (postfix, cleanup, default-permissions knobs)
-  - `src/telegram_planfix_assistant/groups/service.py` — `GroupCreateRequest`, `_execute_create`, `create_group` replay path
-  - `src/telegram_planfix_assistant/groups/telethon_backend.py` — `GroupBackend` adapter (new verbs)
-  - `src/telegram_planfix_assistant/http_api/groups.py` — `GroupCreateBody`
-  - `src/telegram_planfix_assistant/cli/main.py` — `groups create` options + dry-run output
-  - `src/telegram_planfix_assistant/members/service.py` — empty-string filtering in bulk add
-  - `src/telegram_planfix_assistant/persistence/store.py` — `delete_operation` for stale-replay re-create
-  - `skills/telegram-planfix-assistant/SKILL.md`, `README.md`, `CLAUDE.md` — docs
+  - `src/telegram_assistant/config/models.py` — `TelegramDefaults` (postfix, cleanup, default-permissions knobs)
+  - `src/telegram_assistant/groups/service.py` — `GroupCreateRequest`, `_execute_create`, `create_group` replay path
+  - `src/telegram_assistant/groups/telethon_backend.py` — `GroupBackend` adapter (new verbs)
+  - `src/telegram_assistant/http_api/groups.py` — `GroupCreateBody`
+  - `src/telegram_assistant/cli/main.py` — `groups create` options + dry-run output
+  - `src/telegram_assistant/members/service.py` — empty-string filtering in bulk add
+  - `src/telegram_assistant/persistence/store.py` — `delete_operation` for stale-replay re-create
+  - `skills/telegram-assistant/SKILL.md`, `README.md`, `CLAUDE.md` — docs
 - Related patterns:
   - Domain `Backend` protocol + `telethon_backend.py` adapter; tests inject fakes.
   - Idempotency keys in `persistence/idempotency.py`; `group_create` keys on `planfix_task_id` else raw `title` — the postfix must NOT enter the key so Planfix replays still match.
@@ -44,9 +44,9 @@ The seven fixes:
 ### Task 1: Configurable chat-title postfix (fix 1)
 
 **Files:**
-- Modify: `src/telegram_planfix_assistant/config/models.py`
-- Modify: `src/telegram_planfix_assistant/groups/service.py`
-- Modify: `src/telegram_planfix_assistant/cli/main.py` (dry-run effective title)
+- Modify: `src/telegram_assistant/config/models.py`
+- Modify: `src/telegram_assistant/groups/service.py`
+- Modify: `src/telegram_assistant/cli/main.py` (dry-run effective title)
 
 - [x] Add `group_title_postfix: str = ""` to `TelegramDefaults`.
 - [x] In `_execute_create`, compute the effective Telegram title as `request.title + config.defaults.group_title_postfix` and pass it to `create_supergroup`; keep the idempotency key on the raw `request.title` (unchanged).
@@ -58,9 +58,9 @@ The seven fixes:
 ### Task 2: Per-request topics_layout on group creation (fix 2)
 
 **Files:**
-- Modify: `src/telegram_planfix_assistant/groups/service.py` (`GroupCreateRequest`, `to_payload`, `_execute_create`)
-- Modify: `src/telegram_planfix_assistant/http_api/groups.py` (`GroupCreateBody`)
-- Modify: `src/telegram_planfix_assistant/cli/main.py` (`--topics-layout` option)
+- Modify: `src/telegram_assistant/groups/service.py` (`GroupCreateRequest`, `to_payload`, `_execute_create`)
+- Modify: `src/telegram_assistant/http_api/groups.py` (`GroupCreateBody`)
+- Modify: `src/telegram_assistant/cli/main.py` (`--topics-layout` option)
 
 - [x] Add `topics_layout: TopicsLayout | None = None` to `GroupCreateRequest` (+ `to_payload`).
 - [x] In `_execute_create`, resolve layout as `request.topics_layout or config.defaults.topics_layout` and pass it to the existing post-create `set_topics_layout` call (group is created first, layout applied after — already the order).
@@ -72,9 +72,9 @@ The seven fixes:
 ### Task 3: Default group permissions — create_topics, pin_messages (fix 7)
 
 **Files:**
-- Modify: `src/telegram_planfix_assistant/config/models.py`
-- Modify: `src/telegram_planfix_assistant/groups/service.py` (protocol + `_execute_create`)
-- Modify: `src/telegram_planfix_assistant/groups/telethon_backend.py`
+- Modify: `src/telegram_assistant/config/models.py`
+- Modify: `src/telegram_assistant/groups/service.py` (protocol + `_execute_create`)
+- Modify: `src/telegram_assistant/groups/telethon_backend.py`
 
 - [x] Add config knob (e.g. `default_member_permissions: {create_topics: bool = True, pin_messages: bool = True}`) under `TelegramConfig`/`TelegramDefaults`.
 - [x] Add `set_default_permissions(*, chat_id, allow_create_topics, allow_pin_messages)` to the `GroupBackend` protocol; implement in `TelethonGroupBackend` via `EditChatDefaultBannedRights` (allowed flags map to `manage_topics=False`/`pin_messages=False` in the default banned rights, leaving other defaults intact).
@@ -85,8 +85,8 @@ The seven fixes:
 ### Task 4: Tolerate empty strings in members (fix 4)
 
 **Files:**
-- Modify: `src/telegram_planfix_assistant/groups/service.py` (population step)
-- Modify: `src/telegram_planfix_assistant/members/service.py` (bulk add)
+- Modify: `src/telegram_assistant/groups/service.py` (population step)
+- Modify: `src/telegram_assistant/members/service.py` (bulk add)
 
 - [x] Add a small helper to drop blank/whitespace-only user references; apply it to `members`/`admins`/reserves before the dedupe/population loop in `_execute_create`.
 - [x] In `bulk_add_members`, filter blank items before `normalize_user_ref` so a stray empty string no longer raises and aborts the whole batch (blanks are dropped from the run).
@@ -96,9 +96,9 @@ The seven fixes:
 ### Task 5: Verify real chat existence before replaying group_create (fix 3)
 
 **Files:**
-- Modify: `src/telegram_planfix_assistant/groups/telethon_backend.py` (+ protocol in `service.py`)
-- Modify: `src/telegram_planfix_assistant/persistence/store.py`
-- Modify: `src/telegram_planfix_assistant/groups/service.py` (replay path in `create_group`)
+- Modify: `src/telegram_assistant/groups/telethon_backend.py` (+ protocol in `service.py`)
+- Modify: `src/telegram_assistant/persistence/store.py`
+- Modify: `src/telegram_assistant/groups/service.py` (replay path in `create_group`)
 
 - [x] Add `chat_exists(*, chat_id) -> bool` to the `GroupBackend` protocol and implement in `TelethonGroupBackend` (resolve the entity / `GetFullChannelRequest`; return `False` on the "channel/chat not found" error, re-raise FLOOD_WAIT).
 - [x] Add `delete_operation(operation_id)` to `OperationStore` that removes the operation row, its `idempotency_index` entry, and any `operation_items` in one transaction.
@@ -109,9 +109,9 @@ The seven fixes:
 ### Task 6: Clean up service messages — welcome + /task + bot reply (fixes 5 & 6)
 
 **Files:**
-- Modify: `src/telegram_planfix_assistant/config/models.py`
-- Modify: `src/telegram_planfix_assistant/groups/telethon_backend.py` (+ protocol in `service.py`)
-- Modify: `src/telegram_planfix_assistant/groups/service.py` (`_execute_create`)
+- Modify: `src/telegram_assistant/config/models.py`
+- Modify: `src/telegram_assistant/groups/telethon_backend.py` (+ protocol in `service.py`)
+- Modify: `src/telegram_assistant/groups/service.py` (`_execute_create`)
 
 - [x] Add config knobs under `TelegramDefaults`: `cleanup_service_messages: bool = True` and `task_reply_wait_seconds: int = <small default>`.
 - [x] Add backend verbs `get_recent_messages(*, chat_id, limit)` (returns id + sender/bot + reply-to/text summary) and `delete_messages(*, chat_id, message_ids)` to the protocol and `TelethonGroupBackend`.
@@ -128,6 +128,6 @@ The seven fixes:
 
 ### Task 8: Update documentation
 
-- [x] Update `skills/telegram-planfix-assistant/SKILL.md` for the new `groups create` options/HTTP fields and re-sync to `~/.claude/skills/telegram-planfix-assistant/SKILL.md` (satisfies `tests/test_skill_inventory.py`).
+- [x] Update `skills/telegram-assistant/SKILL.md` for the new `groups create` options/HTTP fields and re-sync to `~/.claude/skills/telegram-assistant/SKILL.md` (satisfies `tests/test_skill_inventory.py`).
 - [x] Update the Commands section in `README.md`.
 - [x] Update `CLAUDE.md` Config section if new config knobs change documented behavior.

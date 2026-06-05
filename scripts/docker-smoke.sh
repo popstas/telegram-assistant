@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the telegram-planfix-assistant container, start it with a throwaway
+# Build the telegram-assistant container, start it with a throwaway
 # data/ volume, and verify GET /health returns 200.
 #
 # Usage: scripts/docker-smoke.sh
@@ -10,7 +10,7 @@
 
 set -euo pipefail
 
-IMAGE_TAG="${IMAGE_TAG:-telegram-planfix-assistant:smoke}"
+IMAGE_TAG="${IMAGE_TAG:-telegram-assistant:smoke}"
 CONTAINER_NAME="${CONTAINER_NAME:-tpa-smoke-$$}"
 HOST_PORT="${HOST_PORT:-18085}"
 
@@ -27,7 +27,7 @@ cat >"${DATA_DIR}/config.yml" <<'YAML'
 telegram:
   api_id: 123456
   api_hash: "telegram_api_hash"
-  session_path: /data/telegram-planfix-assistant.session
+  session_path: /data/telegram-assistant.session
   main_account_label: planfix-assistant-main
   reserve_admins:
     - "@reserve_account"

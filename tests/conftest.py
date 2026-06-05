@@ -15,7 +15,7 @@ def minimal_config_yaml() -> str:
         telegram:
           api_id: 123456
           api_hash: "telegram_api_hash"
-          session_path: /data/telegram-planfix-assistant.session
+          session_path: /data/telegram-assistant.session
           main_account_label: planfix-assistant-main
           reserve_admins:
             - "@reserve_account"

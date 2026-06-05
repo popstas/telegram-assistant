@@ -12,24 +12,24 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.folders import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.folders import (
     FolderChat,
     FolderSnapshot,
 )
-from telegram_planfix_assistant.http_api import create_app
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.http_api import create_app
+from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
 )
-from telegram_planfix_assistant.topics import (
+from telegram_assistant.topics import (
     BulkTopicCreateNeedsReview,
     BulkTopicCreateRequest,
     BulkTopicItem,
     bulk_create_topics,
 )
-from telegram_planfix_assistant.worker import (
+from telegram_assistant.worker import (
     BulkItemSpec,
     FloodWaitError,
     NeedsReviewError,
@@ -607,7 +607,7 @@ def _patch_cli_topic_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 

@@ -16,9 +16,9 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.folders import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.folders import (
     AmbiguousChatNameError,
     ChatNotFoundError,
     FolderBackend,
@@ -32,7 +32,7 @@ from telegram_planfix_assistant.folders import (
     resolve_chat_in_folder,
     resolve_folder,
 )
-from telegram_planfix_assistant.http_api import create_app
+from telegram_assistant.http_api import create_app
 
 
 class FakeFolderBackend:

@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from telegram_planfix_assistant.observability import (
+from telegram_assistant.observability import (
     bind_request_context,
     clear_request_context,
     configure_logging,

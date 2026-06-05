@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.persistence import (
     SCHEMA_VERSION,
     BeginResult,
     IdempotencyConflictError,

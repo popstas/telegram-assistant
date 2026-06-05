@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from telegram_planfix_assistant.groups.service import (
+from telegram_assistant.groups.service import (
     GroupLayoutSetFailed,
     GroupLayoutSetNeedsReview,
     LayoutSetRequest,
@@ -25,14 +25,14 @@ from telegram_planfix_assistant.groups.service import (
     get_topics_layout,
     set_topics_layout,
 )
-from telegram_planfix_assistant.groups.telethon_backend import (
+from telegram_assistant.groups.telethon_backend import (
     TelethonGroupBackend,
 )
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
 )
-from telegram_planfix_assistant.worker.queue import FloodWaitError
+from telegram_assistant.worker.queue import FloodWaitError
 
 
 class _Peer:

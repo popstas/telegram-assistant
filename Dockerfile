@@ -35,5 +35,5 @@ EXPOSE 8085
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 
-CMD ["uvicorn", "telegram_planfix_assistant.http_api.app:create_app", \
+CMD ["uvicorn", "telegram_assistant.http_api.app:create_app", \
      "--factory", "--host", "0.0.0.0", "--port", "8085"]

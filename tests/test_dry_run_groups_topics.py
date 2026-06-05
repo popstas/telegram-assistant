@@ -17,13 +17,13 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.folders import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.folders import (
     FolderChat,
     FolderSnapshot,
 )
-from telegram_planfix_assistant.persistence import OperationStore
-from telegram_planfix_assistant.topics import TopicSummary
+from telegram_assistant.persistence import OperationStore
+from telegram_assistant.topics import TopicSummary
 
 from .test_dry_run_contract import assert_dry_run_envelope
 
@@ -131,7 +131,7 @@ def _patch_group_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 
@@ -154,7 +154,7 @@ def _patch_topic_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 

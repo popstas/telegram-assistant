@@ -1,8 +1,8 @@
-> ТЗ на Telegram-часть проекта `telegram-planfix-assistant`. Planfix, `@planfix_bot` и объекты `Lead`/`Chat` описаны только как контекст: их настройка, поля и сценарии не входят в это задание.
+> ТЗ на Telegram-часть проекта `telegram-assistant`. Planfix, `@planfix_bot` и объекты `Lead`/`Chat` описаны только как контекст: их настройка, поля и сценарии не входят в это задание.
 
 ## Цель
 
-Разработать `telegram-planfix-assistant` - Telegram-клиент/HTTP-сервис/CLI-инструмент для автоматизации операций в Telegram-группах, которые используются в интеграции Planfix ↔ Telegram.
+Разработать `telegram-assistant` - Telegram-клиент/HTTP-сервис/CLI-инструмент для автоматизации операций в Telegram-группах, которые используются в интеграции Planfix ↔ Telegram.
 
 Сервис должен работать через MTProto от имени технического Telegram-пользователя, потому что Bot API не умеет создавать группы, добавлять пользователей до старта диалога и выполнять часть административных действий, которые нужны проекту.
 
@@ -56,7 +56,7 @@ Planfix будет вызывать сервис из сценариев или 
 
 ## Архитектура
 
-`telegram-planfix-assistant` состоит из трёх интерфейсов над одной доменной логикой:
+`telegram-assistant` состоит из трёх интерфейсов над одной доменной логикой:
 
 - **HTTP API** - основной интерфейс для Planfix/автоматизаций.
 - **CLI** - ручной и пакетный запуск тех же операций администратором.
@@ -80,7 +80,7 @@ telegram:
   api_id: 123456
   api_hash: "telegram_api_hash"
   # proxy_url: "socks5://user:pass@host:1080"  # опционально; socks5/socks4/http/https
-  session_path: /data/telegram-planfix-assistant.session
+  session_path: /data/telegram-assistant.session
   main_account_label: planfix-assistant-main
   reserve_admins:
     - "@reserve_account"
@@ -152,7 +152,7 @@ logging:
 Формат CLI:
 
 ```bash
-telegram-planfix-assistant <resource> <action> [options]
+telegram-assistant <resource> <action> [options]
 ```
 
 Для каждого endpoint ниже указана обязательная CLI-команда.
@@ -164,7 +164,7 @@ telegram-planfix-assistant <resource> <action> [options]
 CLI:
 
 ```bash
-telegram-planfix-assistant auth
+telegram-assistant auth
 ```
 
 Требования:
@@ -174,7 +174,7 @@ telegram-planfix-assistant auth
 - запрашивает phone/code/password в терминале;
 - сохраняет Telethon session по `telegram.session_path`;
 - повторный запуск для уже авторизованной session должен показать текущий аккаунт и не требовать повторного кода без необходимости;
-- после успешного логина `telegram-planfix-assistant health` и `GET /health` должны возвращать `telegram_session = authorized`.
+- после успешного логина `telegram-assistant health` и `GET /health` должны возвращать `telegram_session = authorized`.
 
 ## Endpoint: создать группу
 
@@ -185,7 +185,7 @@ POST /telegram/groups
 CLI:
 
 ```bash
-telegram-planfix-assistant groups create \
+telegram-assistant groups create \
   --planfix-task-id 901569 \
   --title "Клиент / проект" \
   --admin @manager \
@@ -251,7 +251,7 @@ POST /telegram/topics
 CLI:
 
 ```bash
-telegram-planfix-assistant topics create \
+telegram-assistant topics create \
   --planfix-task-id 987654 \
   --chat-name "Клиент / проект" \
   --folder-name "Planfix clients" \
@@ -302,7 +302,7 @@ POST /telegram/topics/bulk-create
 CLI:
 
 ```bash
-telegram-planfix-assistant topics bulk-create \
+telegram-assistant topics bulk-create \
   --chat-name "Клиент / проект" \
   --folder-name "Planfix clients" \
   --file topics.csv
@@ -371,7 +371,7 @@ POST /telegram/topics/{topic_id}/close
 CLI:
 
 ```bash
-telegram-planfix-assistant topics close \
+telegram-assistant topics close \
   --chat-name "Клиент / проект" \
   --folder-name "Planfix clients" \
   --topic-name "Научная статья 1"
@@ -413,7 +413,7 @@ POST /telegram/groups/{chat_id}/members/bulk-add
 CLI:
 
 ```bash
-telegram-planfix-assistant members bulk-add \
+telegram-assistant members bulk-add \
   --chat-name "Клиент / проект" \
   --folder-name "Planfix clients" \
   --file users.csv
@@ -473,7 +473,7 @@ POST /telegram/groups/{chat_id}/members/bulk-remove
 CLI:
 
 ```bash
-telegram-planfix-assistant members bulk-remove \
+telegram-assistant members bulk-remove \
   --chat-name "Клиент / проект" \
   --folder-name "Planfix clients" \
   --file users.csv
@@ -523,7 +523,7 @@ user
 CLI dry-run:
 
 ```bash
-telegram-planfix-assistant members bulk-remove \
+telegram-assistant members bulk-remove \
   --chat-name "Клиент / проект" \
   --folder-name "Planfix clients" \
   --file users.csv \
@@ -539,7 +539,7 @@ POST /telegram/messages
 CLI:
 
 ```bash
-telegram-planfix-assistant messages send \
+telegram-assistant messages send \
   --folder-name "Planfix clients" \
   --chat-name "Клиент / проект" \
   --topic-name "Научная статья 1" \
@@ -628,7 +628,7 @@ GET /telegram/folders/{folder_name}
 CLI:
 
 ```bash
-telegram-planfix-assistant folders inspect --folder-name "Planfix clients"
+telegram-assistant folders inspect --folder-name "Planfix clients"
 ```
 
 Ответ:
@@ -653,7 +653,7 @@ POST /telegram/folders/{folder_name}/chats
 CLI:
 
 ```bash
-telegram-planfix-assistant folders add-chat \
+telegram-assistant folders add-chat \
   --folder-name "Planfix clients" \
   --chat-name "Клиент / проект"
 ```
@@ -687,7 +687,7 @@ GET /health
 CLI:
 
 ```bash
-telegram-planfix-assistant health
+telegram-assistant health
 ```
 
 Ответ:
@@ -751,8 +751,8 @@ telegram-planfix-assistant health
 CLI:
 
 ```bash
-telegram-planfix-assistant operations status --operation-id op_123
-telegram-planfix-assistant operations retry --operation-id op_123
+telegram-assistant operations status --operation-id op_123
+telegram-assistant operations retry --operation-id op_123
 ```
 
 ## Ошибки
@@ -802,7 +802,7 @@ telegram-planfix-assistant operations retry --operation-id op_123
 ## Безопасность
 
 - Telethon session не хранится в репозитории.
-- Telethon session создаётся интерактивной командой `telegram-planfix-assistant auth`.
+- Telethon session создаётся интерактивной командой `telegram-assistant auth`.
 - HTTP token не хранится в репозитории.
 - CLI не печатает секреты.
 - Invite-ссылки считаются чувствительными данными.
@@ -823,7 +823,7 @@ telegram-planfix-assistant operations retry --operation-id op_123
 
 Проверить:
 
-- интерактивный логин через `telegram-planfix-assistant auth`;
+- интерактивный логин через `telegram-assistant auth`;
 - авторизацию Telethon session;
 - создание группы;
 - автоматическое помещение группы в configured chat folder;
@@ -845,10 +845,10 @@ telegram-planfix-assistant operations retry --operation-id op_123
 
 ## Критерии приёмки MVP
 
-- Проект называется `telegram-planfix-assistant`.
+- Проект называется `telegram-assistant`.
 - Сервис поднимается из Docker и проходит `GET /health`.
-- CLI-команда `telegram-planfix-assistant auth` выполняет интерактивный логин Telethon и сохраняет session в `data/`.
-- CLI-команда `telegram-planfix-assistant health` показывает тот же статус.
+- CLI-команда `telegram-assistant auth` выполняет интерактивный логин Telethon и сохраняет session в `data/`.
+- CLI-команда `telegram-assistant health` показывает тот же статус.
 - Конфиг читается из `data/config.yml`, директория `data/` находится в `.gitignore`.
 - HTTP-порт по умолчанию `8085`.
 - Создание группы работает через HTTP и CLI.

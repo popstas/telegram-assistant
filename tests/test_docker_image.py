@@ -48,7 +48,7 @@ def test_dockerfile_declares_data_volume() -> None:
 def test_dockerfile_default_command_runs_uvicorn_factory() -> None:
     content = _dockerfile()
     assert "uvicorn" in content
-    assert "telegram_planfix_assistant.http_api.app:create_app" in content
+    assert "telegram_assistant.http_api.app:create_app" in content
     assert "--factory" in content
     assert "--port" in content and "8085" in content
 
@@ -67,7 +67,7 @@ def test_dockerignore_excludes_data_directory() -> None:
 
 def test_compose_mounts_data_and_publishes_8085() -> None:
     payload = yaml.safe_load(COMPOSE_FILE.read_text(encoding="utf-8"))
-    service = payload["services"]["telegram-planfix-assistant"]
+    service = payload["services"]["telegram-assistant"]
     assert "8085:8085" in service["ports"]
     assert any(
         isinstance(v, str) and v.endswith(":/data")

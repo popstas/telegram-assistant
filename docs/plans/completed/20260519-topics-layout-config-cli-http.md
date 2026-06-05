@@ -2,12 +2,12 @@
 
 ## Overview
 
-Telegram forum chats expose two display modes for their topics: a vertical **list** (default) or horizontal **tabs** across the top. Today `telegram-planfix-assistant` always leaves new forums on Telegram's default ("list") and has no way to inspect or change the layout. This plan adds:
+Telegram forum chats expose two display modes for their topics: a vertical **list** (default) or horizontal **tabs** across the top. Today `telegram-assistant` always leaves new forums on Telegram's default ("list") and has no way to inspect or change the layout. This plan adds:
 
 1. A `telegram.defaults.topics_layout: "list" | "tabs"` config option that is applied automatically when `groups create` makes a new forum.
 2. CLI commands `groups set-layout` and `groups get-layout` to read and change the layout of any existing chat.
 3. HTTP API parity (`POST` / `GET /telegram/groups/layout`).
-4. Updates to `skills/telegram-planfix-assistant/SKILL.md` (and synced user-level copy), `README.md` (full CLI inventory), and `CLAUDE.md` (rule: always update the skill when CLI/HTTP changes).
+4. Updates to `skills/telegram-assistant/SKILL.md` (and synced user-level copy), `README.md` (full CLI inventory), and `CLAUDE.md` (rule: always update the skill when CLI/HTTP changes).
 
 Reference chats the user wants to verify against:
 
@@ -23,13 +23,13 @@ Reference chats the user wants to verify against:
   - Read via `GetFullChannelRequest(channel)`: `forum_tabs` is a flag on the `Channel` constructor (flags2.19), not on `ChannelFull`. Locate the matching `Channel` in `messages.ChatFull.chats` by `full_chat.id`.
   - `ToggleViewForumAsMessagesRequest` is **not** the right call — it controls a per-account preference, not the admin layout.
 - Critical files:
-  - `src/telegram_planfix_assistant/config/models.py` — add `TopicsLayout` literal + field on `TelegramDefaults`.
-  - `src/telegram_planfix_assistant/groups/service.py` — extend `GroupBackend` protocol, add `set_topics_layout` and `get_topics_layout` service functions, hook into `create_group` to apply default layout after creation.
-  - `src/telegram_planfix_assistant/groups/telethon_backend.py` — implement layout set/get against Telethon.
-  - `src/telegram_planfix_assistant/persistence/keys.py` (or wherever `topic_close_key` lives) — add `group_layout_set_key(chat_id, layout)`.
-  - `src/telegram_planfix_assistant/cli/main.py` — add `groups set-layout` and `groups get-layout` subcommands; wire config default into `groups create`.
-  - `src/telegram_planfix_assistant/http_api/groups.py` — add `POST /telegram/groups/layout` and `GET /telegram/groups/layout`.
-  - `skills/telegram-planfix-assistant/SKILL.md` (mirrored to `~/.claude/skills/telegram-planfix-assistant/SKILL.md`).
+  - `src/telegram_assistant/config/models.py` — add `TopicsLayout` literal + field on `TelegramDefaults`.
+  - `src/telegram_assistant/groups/service.py` — extend `GroupBackend` protocol, add `set_topics_layout` and `get_topics_layout` service functions, hook into `create_group` to apply default layout after creation.
+  - `src/telegram_assistant/groups/telethon_backend.py` — implement layout set/get against Telethon.
+  - `src/telegram_assistant/persistence/keys.py` (or wherever `topic_close_key` lives) — add `group_layout_set_key(chat_id, layout)`.
+  - `src/telegram_assistant/cli/main.py` — add `groups set-layout` and `groups get-layout` subcommands; wire config default into `groups create`.
+  - `src/telegram_assistant/http_api/groups.py` — add `POST /telegram/groups/layout` and `GET /telegram/groups/layout`.
+  - `skills/telegram-assistant/SKILL.md` (mirrored to `~/.claude/skills/telegram-assistant/SKILL.md`).
   - `README.md` — add a Commands reference section.
   - `CLAUDE.md` — add an "Updating CLI/HTTP" rule.
 - Reused patterns:
@@ -82,7 +82,7 @@ Reference chats the user wants to verify against:
 
 ### Task 1: Add `topics_layout` to config schema
 
-- [x] add `TopicsLayout = Literal["list", "tabs"]` in `src/telegram_planfix_assistant/config/models.py`
+- [x] add `TopicsLayout = Literal["list", "tabs"]` in `src/telegram_assistant/config/models.py`
 - [x] add `topics_layout: TopicsLayout = "list"` to `TelegramDefaults`
 - [x] update any committed example config (search for sample `config.yml` under `docs/` or repo root) to mention the new field
 - [x] write a unit test (in `tests/test_config_loader.py` or the existing config test file) asserting the default is `"list"` and that `"tabs"` parses correctly
@@ -91,8 +91,8 @@ Reference chats the user wants to verify against:
 
 ### Task 2: Extend backend protocol and Telethon adapter
 
-- [x] in `src/telegram_planfix_assistant/groups/service.py`, extend the `GroupBackend` Protocol with `async def set_topics_layout(self, chat_id: int, tabs: bool) -> None` and `async def get_topics_layout(self, chat_id: int) -> bool`
-- [x] in `src/telegram_planfix_assistant/groups/telethon_backend.py`, implement `set_topics_layout` using `from telethon.tl.functions.channels import ToggleForumRequest`, calling `ToggleForumRequest(channel=input_channel, enabled=True, tabs=tabs)`; wrap `FloodWaitError` via the existing `translate_flood_wait()` helper
+- [x] in `src/telegram_assistant/groups/service.py`, extend the `GroupBackend` Protocol with `async def set_topics_layout(self, chat_id: int, tabs: bool) -> None` and `async def get_topics_layout(self, chat_id: int) -> bool`
+- [x] in `src/telegram_assistant/groups/telethon_backend.py`, implement `set_topics_layout` using `from telethon.tl.functions.channels import ToggleForumRequest`, calling `ToggleForumRequest(channel=input_channel, enabled=True, tabs=tabs)`; wrap `FloodWaitError` via the existing `translate_flood_wait()` helper
 - [x] in the same file, implement `get_topics_layout` using `from telethon.tl.functions.channels import GetFullChannelRequest`: read `forum_tabs` from the matching `Channel` in `full.chats` (resolved by `full.full_chat.id`), since `forum_tabs` is a flag on `Channel`, not on `ChannelFull`
 - [x] create `tests/test_groups_layout.py` with a fake backend that records calls, asserting the service-layer mapping (string ↔ bool) round-trips correctly (deferred to Task 3, which lands the service helpers; this task covers the adapter-level round-trip)
 - [x] write error-case tests in `tests/test_groups_layout.py` for the Telethon adapter (FLOOD_WAIT translation, missing attribute defaults to `False`)
@@ -138,10 +138,10 @@ Reference chats the user wants to verify against:
 
 ### Task 7: Update SKILL.md and add inventory guard
 
-- [x] add `groups set-layout` and `groups get-layout` rows to the resources/actions catalog in `skills/telegram-planfix-assistant/SKILL.md`
+- [x] add `groups set-layout` and `groups get-layout` rows to the resources/actions catalog in `skills/telegram-assistant/SKILL.md`
 - [x] add a per-pair extraction-rules block: required flags (`--chat-id`, `--layout`), config fallback for `--layout`, confirmation policy (single-object state change → confirm by default), typical errors (chat not a forum, missing admin rights, FLOOD_WAIT → needs_review)
 - [x] add a short Russian scenario covering "переключи топики чата X на tabs" and "какой layout у чата X"
-- [x] sync the file to `~/.claude/skills/telegram-planfix-assistant/SKILL.md` (document the sync step as part of the rule added in Task 9)
+- [x] sync the file to `~/.claude/skills/telegram-assistant/SKILL.md` (document the sync step as part of the rule added in Task 9)
 - [x] add `tests/test_skill_inventory.py` that parses the SKILL.md catalog and asserts it lists every CLI command exported by `cli/main.py` (cheap structural guard against future drift)
 - [x] write the inventory test to cover both directions: every CLI command appears in SKILL.md, and every SKILL.md command exists in the CLI (catches both omissions and stale entries)
 - [x] run `pytest tests/test_skill_inventory.py` and full `pytest` — must pass before Task 8
@@ -156,7 +156,7 @@ Reference chats the user wants to verify against:
 
 ### Task 9: Update CLAUDE.md with the "always update the skill" rule
 
-- [x] add a new section (between `## Config` and `## Common commands`) titled `## Updating CLI/HTTP` stating: "When you add or change a CLI command or HTTP endpoint, update `skills/telegram-planfix-assistant/SKILL.md` and re-sync it to `~/.claude/skills/telegram-planfix-assistant/SKILL.md` in the same change. Update the Commands section in `README.md` too. The `tests/test_skill_inventory.py` guard will fail otherwise."
+- [x] add a new section (between `## Config` and `## Common commands`) titled `## Updating CLI/HTTP` stating: "When you add or change a CLI command or HTTP endpoint, update `skills/telegram-assistant/SKILL.md` and re-sync it to `~/.claude/skills/telegram-assistant/SKILL.md` in the same change. Update the Commands section in `README.md` too. The `tests/test_skill_inventory.py` guard will fail otherwise."
 - [x] sanity-check the rule wording reads cleanly in the existing CLAUDE.md flow
 - [x] no automated test; verify by reading the rendered file
 - [x] run `pytest` and `ruff check src tests` — must pass before Task 10
@@ -176,17 +176,17 @@ Reference chats the user wants to verify against:
 - Manual verification against the user's reference chats (requires authorized session at `data/sessions/expertizemeAssistant/session.session`):
 
   ```
-  telegram-planfix-assistant groups get-layout --chat-id -1003915612716   # expect: list
-  telegram-planfix-assistant groups get-layout --chat-id -1003911170598   # expect: tabs
+  telegram-assistant groups get-layout --chat-id -1003915612716   # expect: list
+  telegram-assistant groups get-layout --chat-id -1003911170598   # expect: tabs
   ```
 
 - Round-trip check on a disposable test forum (not the reference chats unless user OKs):
 
   ```
-  telegram-planfix-assistant groups set-layout --chat-id <test-chat> --layout tabs
-  telegram-planfix-assistant groups get-layout --chat-id <test-chat>      # expect: tabs
-  telegram-planfix-assistant groups set-layout --chat-id <test-chat> --layout list
-  telegram-planfix-assistant groups get-layout --chat-id <test-chat>      # expect: list
+  telegram-assistant groups set-layout --chat-id <test-chat> --layout tabs
+  telegram-assistant groups get-layout --chat-id <test-chat>      # expect: tabs
+  telegram-assistant groups set-layout --chat-id <test-chat> --layout list
+  telegram-assistant groups get-layout --chat-id <test-chat>      # expect: list
   ```
 
 - HTTP smoke (once uvicorn is running):

@@ -10,14 +10,14 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.folders import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.folders import (
     FolderChat,
     FolderSnapshot,
 )
-from telegram_planfix_assistant.http_api import create_app
-from telegram_planfix_assistant.messages import (
+from telegram_assistant.http_api import create_app
+from telegram_assistant.messages import (
     MassSendRequest,
     MessageSendFailed,
     MessageSendNeedsReview,
@@ -27,12 +27,12 @@ from telegram_planfix_assistant.messages import (
     redact_message_text,
     send_message,
 )
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
 )
-from telegram_planfix_assistant.topics import TopicSummary
-from telegram_planfix_assistant.worker.queue import FloodWaitError
+from telegram_assistant.topics import TopicSummary
+from telegram_assistant.worker.queue import FloodWaitError
 
 
 class FakeMessageBackend:
@@ -632,7 +632,7 @@ def _patch_cli_message_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 

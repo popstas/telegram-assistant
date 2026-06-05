@@ -73,6 +73,7 @@
 
 ### Task
 
+- Add HTTP MCP server (Google OAuth); scope reads in access control
 - Add scheduled msgs, mute, folder-remove, reactions, forward, get-recent
 - Support sending media (photos, videos, files)
 - Make Planfix an optional plugin, not core

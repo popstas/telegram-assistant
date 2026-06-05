@@ -7,8 +7,8 @@ from typing import Any
 
 import pytest
 
-from telegram_planfix_assistant.config.models import AlertsConfig
-from telegram_planfix_assistant.observability import (
+from telegram_assistant.config.models import AlertsConfig
+from telegram_assistant.observability import (
     AlertEmitter,
     AlertEvent,
     AlertType,

@@ -1,7 +1,7 @@
 # TODO
 
-- [ ] Rename project `telegram-planfix-assistant` → `telegram-assistant` (decouple name from Planfix).
-  Rename surface: package/dir `src/telegram_planfix_assistant/` → `src/telegram_assistant/`, CLI entrypoint `telegram-planfix-assistant` → `telegram-assistant`, `pyproject.toml` name + script, Docker image/compose, README/CLAUDE.md/SKILL.md/docs, skill dir `skills/telegram-planfix-assistant/` (+ re-sync to `~/.claude/skills/`), config/session paths. Keep `data/` layout. Update `tests/test_skill_inventory.py` expectations. Check repo dir + git remote rename separately.
+- [x] Rename project `telegram-planfix-assistant` → `telegram-assistant` (decouple name from Planfix).
+  Done: package `src/telegram_assistant/`, CLI entrypoint, `pyproject.toml`, Docker image/compose, all docs + history, skill dir `skills/telegram-assistant/` (+ global `~/.claude/skills/` symlink). Still pending out-of-band: rename the GitHub repo / git remote and the local repo dir; regenerate `skills-lock.json` `computedHash` via the skills tool.
 - [ ] Make Planfix an optional **plugin**, not a core dependency (`telegram-assistant` is broader than Planfix).
   Decouple Planfix-specific bits from the generic core: `planfix_task_id` idempotency keys, the `/task <id>` auto-command, `@planfix_bot` welcome/reply cleanup (`groups/service.py:37,470-501`), `group_title_postfix`, and any Planfix config. Move them behind an optional/toggleable plugin (config flag, default off) so the core works with zero Planfix knowledge; keep current behavior available when the plugin is enabled. Ties into the rename above. Settle the plugin boundary/interface and config shape.
 - [ ] Add an integration/agent-setup layer — an `INTEGRATION.md` guide (à la [obsidian-agent-base/INTEGRATION.md](https://github.com/popstas/obsidian-agent-base/blob/main/INTEGRATION.md)) that lets Claude Code wire this assistant into another project.

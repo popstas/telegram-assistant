@@ -17,7 +17,7 @@ import pytest
 SKILL_PATH = (
     Path(__file__).resolve().parent.parent
     / "skills"
-    / "telegram-planfix-assistant"
+    / "telegram-assistant"
     / "SKILL.md"
 )
 
@@ -175,7 +175,7 @@ def test_temp_csv_paths_are_under_tmp(skill_text: str) -> None:
         if end == -1:
             end = len(skill_text)
         body = skill_text[start:end]
-        assert "/tmp/telegram-planfix-assistant" in body, (
+        assert "/tmp/telegram-assistant" in body, (
             f"scenario {scenario!r} must reference a /tmp/telegram-"
             "planfix-assistant-* temp file"
         )
@@ -192,7 +192,7 @@ def test_auth_scenario_does_not_collect_credentials(skill_text: str) -> None:
     # the human runs it themselves and the agent does not ask for codes
     # or passwords in chat.
     lowered = body.lower()
-    assert "telegram-planfix-assistant auth" in body
+    assert "telegram-assistant auth" in body
     assert (
         "does not run" in lowered
         or "themselves" in lowered

@@ -5,9 +5,9 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli.main import app as cli_app
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.http_api import create_app
+from telegram_assistant.cli.main import app as cli_app
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.http_api import create_app
 
 
 def _client(minimal_config_yaml: str) -> TestClient:
@@ -78,7 +78,7 @@ def test_cli_exposes_required_subcommand_groups() -> None:
 
 
 def test_cli_version_command() -> None:
-    from telegram_planfix_assistant import __version__
+    from telegram_assistant import __version__
 
     runner = CliRunner()
     result = runner.invoke(cli_app, ["version"])

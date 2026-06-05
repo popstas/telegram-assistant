@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# End-to-end test against a running telegram-planfix-assistant server.
+# End-to-end test against a running telegram-assistant server.
 #
-# Prerequisites (manual, see Task 17 in docs/plans/20260518-telegram-planfix-assistant-mvp.md):
+# Prerequisites (manual, see Task 17 in docs/plans/20260518-telegram-assistant-mvp.md):
 #   1. data/config.yml exists with valid api_id / api_hash / bearer_token.
 #   2. data/sessions/expertizemeAssistant/session.session is an authorized
-#      Telethon session for the test account (use `telegram-planfix-assistant auth`
+#      Telethon session for the test account (use `telegram-assistant auth`
 #      to create one if missing).
 #   3. The test account is a member of a Telegram folder called "Clients" that
 #      contains a chat named "Client chat test".
 #   4. The server is running locally on the port from data/config.yml
 #      (default 8085), e.g.:
-#        uvicorn telegram_planfix_assistant.http_api:create_app --factory --port 8085
+#        uvicorn telegram_assistant.http_api:create_app --factory --port 8085
 #
 # What this script verifies:
 #   - GET  /health

@@ -15,20 +15,20 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from telegram_planfix_assistant.cli import main as cli_main
-from telegram_planfix_assistant.config import load_config_from_text
-from telegram_planfix_assistant.folders import (
+from telegram_assistant.cli import main as cli_main
+from telegram_assistant.config import load_config_from_text
+from telegram_assistant.folders import (
     FolderChat,
     FolderSnapshot,
 )
-from telegram_planfix_assistant.groups import (
+from telegram_assistant.groups import (
     GroupCreateFailed,
     GroupCreateNeedsReview,
     GroupCreateRequest,
     create_group,
 )
-from telegram_planfix_assistant.http_api import create_app
-from telegram_planfix_assistant.persistence import (
+from telegram_assistant.http_api import create_app
+from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
 )
@@ -735,7 +735,7 @@ async def test_create_group_layout_failure_does_not_fail_create(
     request = GroupCreateRequest(title="Acme", planfix_task_id=4, skip_reserve=True)
 
     with caplog.at_level(
-        _logging.WARNING, logger="telegram_planfix_assistant.groups.service"
+        _logging.WARNING, logger="telegram_assistant.groups.service"
     ):
         result, op = await create_group(
             backend=backend,
@@ -761,7 +761,7 @@ async def test_create_group_layout_flood_wait_promotes_to_needs_review(
     not be silently dropped to a warning log. The chat is already live, but the
     operator still needs to know Telegram is throttling this account.
     """
-    from telegram_planfix_assistant.worker.queue import FloodWaitError
+    from telegram_assistant.worker.queue import FloodWaitError
 
     config = _config_with_layout(minimal_config_yaml, "tabs")
     backend = FakeGroupBackend(
@@ -852,7 +852,7 @@ async def test_create_group_permissions_failure_recorded_in_skipped(
 async def test_create_group_permissions_flood_wait_promotes_to_needs_review(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:
-    from telegram_planfix_assistant.worker.queue import FloodWaitError
+    from telegram_assistant.worker.queue import FloodWaitError
 
     config = _config(minimal_config_yaml)
     backend = FakeGroupBackend(
@@ -1101,7 +1101,7 @@ async def test_stale_completed_op_dropped_and_recreated_when_chat_gone(
 async def test_flood_wait_during_existence_check_needs_review(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:
-    from telegram_planfix_assistant.worker.queue import FloodWaitError
+    from telegram_assistant.worker.queue import FloodWaitError
 
     config = _config(minimal_config_yaml)
     backend1 = FakeGroupBackend(chat_id=-555)
@@ -1138,7 +1138,7 @@ async def test_flood_wait_during_existence_check_needs_review(
 def test_delete_operation_removes_row_and_index(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:
-    from telegram_planfix_assistant.persistence import idempotency
+    from telegram_assistant.persistence import idempotency
 
     store = OperationStore(tmp_path / "del.db")
     begin = store.begin_operation(
@@ -1296,7 +1296,7 @@ def _patch_cli_backends(
             return None
 
     def _factory(config_path: Path | None) -> Any:
-        from telegram_planfix_assistant.config import load_config
+        from telegram_assistant.config import load_config
 
         config = load_config(config_path)
 

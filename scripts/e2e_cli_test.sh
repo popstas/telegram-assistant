@@ -29,7 +29,7 @@ need() {
     }
 }
 need jq
-need telegram-planfix-assistant
+need telegram-assistant
 
 if ss -tlnp 2>/dev/null | grep -q ':8085 '; then
     echo "uvicorn is still bound to :8085 — stop it before running CLI tests" >&2
@@ -43,13 +43,13 @@ step() {
 }
 
 step "CLI: health"
-telegram-planfix-assistant health
+telegram-assistant health
 
 step "CLI: folders inspect --folder-name '${FOLDER}'"
-telegram-planfix-assistant folders inspect --folder-name "${FOLDER}" | jq .
+telegram-assistant folders inspect --folder-name "${FOLDER}" | jq .
 
 step "CLI: topics create --chat-name '${CHAT_TITLE}' --topic-name '${SINGLE_TOPIC_NAME}'"
-cli_topic_json=$(telegram-planfix-assistant topics create \
+cli_topic_json=$(telegram-assistant topics create \
     --chat-name "${CHAT_TITLE}" \
     --folder-name "${FOLDER}" \
     --topic-name "${SINGLE_TOPIC_NAME}")
@@ -63,33 +63,33 @@ if [[ -z "${chat_id}" || -z "${topic_id}" ]]; then
 fi
 
 step "CLI: topics create (idempotent re-call)"
-telegram-planfix-assistant topics create \
+telegram-assistant topics create \
     --chat-name "${CHAT_TITLE}" \
     --folder-name "${FOLDER}" \
     --topic-name "${SINGLE_TOPIC_NAME}" | jq '{telegram_topic_id, replayed}'
 
 step "CLI: messages send (targeted) into '${SINGLE_TOPIC_NAME}'"
-telegram-planfix-assistant messages send \
+telegram-assistant messages send \
     --chat-name "${CHAT_TITLE}" \
     --folder-name "${FOLDER}" \
     --topic-name "${SINGLE_TOPIC_NAME}" \
     --text "cli targeted ping"
 
 step "CLI: messages send (mass mode) to folder '${FOLDER}', topic 'Topic 1'"
-telegram-planfix-assistant messages send \
+telegram-assistant messages send \
     --folder-name "${FOLDER}" \
     --topic-name "Topic 1" \
     --text "cli mass ping" \
     --mass | jq '{mode, sent, skipped, items}'
 
 step "CLI: topics close --topic-name '${SINGLE_TOPIC_NAME}'"
-telegram-planfix-assistant topics close \
+telegram-assistant topics close \
     --chat-name "${CHAT_TITLE}" \
     --folder-name "${FOLDER}" \
     --topic-name "${SINGLE_TOPIC_NAME}" --reason "e2e CLI close"
 
 step "CLI: topics close (idempotent re-close)"
-telegram-planfix-assistant topics close \
+telegram-assistant topics close \
     --chat-name "${CHAT_TITLE}" \
     --folder-name "${FOLDER}" \
     --topic-name "${SINGLE_TOPIC_NAME}" --reason "e2e CLI re-close"
@@ -98,12 +98,12 @@ step "CLI: members bulk-remove --dry-run (no destructive side-effect)"
 remove_tmp=$(mktemp --suffix=.csv)
 trap 'rm -f "${remove_tmp}"' EXIT
 printf 'user\n%s\n' "${USER_TO_REMOVE}" > "${remove_tmp}"
-telegram-planfix-assistant members bulk-remove \
+telegram-assistant members bulk-remove \
     --chat-id "${chat_id}" \
     --file "${remove_tmp}" --dry-run | jq '{operation_status, dry_run, items}'
 
 step "CLI: operations status --operation-id ${op_id}"
-telegram-planfix-assistant operations status --operation-id "${op_id}" | jq .
+telegram-assistant operations status --operation-id "${op_id}" | jq .
 
 echo
 echo "cli e2e flow completed — review the responses above and the chats on Telegram"
