@@ -5,6 +5,7 @@
 
 ### Features
 
+- Document access control, log access decisions, extend error taxonomy
 - Wire entity resolver, authorizer, and read op into CLI and HTTP
 - Promote get-recent-messages to a first-class read op
 - Add access-control config and authorizer enforced in the domain layer
