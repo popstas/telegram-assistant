@@ -9,7 +9,15 @@ description = "Telegram automation service (MTProto/Telethon) with an optional P
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }
-authors = [{ name = "Stanislav Popov" }]
+authors = [{ name = "Stanislav Popov", email = "popstas@gmail.com" }]
+keywords = ["telegram", "telethon", "automation", "mtproto", "planfix"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "Framework :: FastAPI",
+    "Topic :: Communications :: Chat",
+    "Operating System :: OS Independent",
+    "License :: Other/Proprietary License",
+]
 dependencies = [
     "telethon>=1.36,<2.0",
     "fastapi>=0.115,<1.0",
@@ -30,10 +38,18 @@ dev = [
     "ruff>=0.5,<1.0",
     "git-cliff>=2.0.0",
     "pre-commit>=3.7,<5.0",
+    "build>=1.2,<2.0",
+    "twine>=5.0,<7.0",
+    "bump-my-version>=0.28,<1.0",
 ]
 
 [project.scripts]
 telegram-assistant = "telegram_assistant.cli.main:app"
+
+[project.urls]
+Homepage = "https://github.com/popstas/telegram-assistant"
+Repository = "https://github.com/popstas/telegram-assistant"
+"Bug Tracker" = "https://github.com/popstas/telegram-assistant/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -50,3 +66,27 @@ target-version = "py312"
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
 ignore = ["E501"]
+
+# Version bumping: `bump-my-version bump patch|minor|major` updates both files,
+# commits as `chore(release): vX.Y.Z`, and creates the `vX.Y.Z` tag. Pushing the
+# tag triggers .github/workflows/release.yml (GitHub release + PyPI publish).
+[tool.bumpversion]
+current_version = "0.2.0"
+allow_dirty = false
+commit = true
+message = "chore(release): v{new_version}"
+tag = true
+tag_name = "v{new_version}"
+tag_message = "v{new_version}"
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = '''name = "telegram-assistant"
+version = "{current_version}"'''
+replace = '''name = "telegram-assistant"
+version = "{new_version}"'''
+
+[[tool.bumpversion.files]]
+filename = "src/telegram_assistant/__init__.py"
+search = '__version__ = "{current_version}"'
+replace = '__version__ = "{new_version}"'
