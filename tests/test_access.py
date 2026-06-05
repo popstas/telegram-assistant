@@ -7,12 +7,16 @@ validation of :class:`AccessRule` (exactly one target) is covered too.
 
 from __future__ import annotations
 
+import io
+import json
+
 import pytest
 
 from telegram_assistant.access import AccessDenied, AccessLevel, Authorizer
 from telegram_assistant.config.models import AccessConfig, AccessRule
 from telegram_assistant.entities import ResolvedEntity
 from telegram_assistant.folders import FolderChat, FolderSnapshot
+from telegram_assistant.observability import configure_logging
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -245,3 +249,58 @@ async def test_denied_carries_required_and_matched_metadata() -> None:
     assert exc.required_level is AccessLevel.WRITE
     assert exc.granted_level is AccessLevel.READ
     assert exc.matched_rule == "all"
+
+
+# ---------------------------------------------------------------------------
+# Observability: access decisions are logged (Task 5)
+# ---------------------------------------------------------------------------
+
+
+def _capture_access_log(buf: io.StringIO) -> list[dict]:
+    records = []
+    for line in buf.getvalue().strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        records.append(json.loads(line))
+    return records
+
+
+@pytest.mark.asyncio
+async def test_denied_chat_emits_structured_log_line() -> None:
+    buf = io.StringIO()
+    configure_logging(level="DEBUG", stream=buf, force=True)
+    auth = Authorizer(AccessConfig(rules=[AccessRule(all=True, permission="read")]))
+    with pytest.raises(AccessDenied):
+        await auth.require(7, AccessLevel.WRITE)
+    denied = [
+        r for r in _capture_access_log(buf) if r.get("event") == "access_denied"
+    ]
+    assert denied, "expected an access_denied log line"
+    record = denied[-1]
+    assert record["chat_ref"] == 7
+    assert record["telegram_chat_id"] == 7
+    assert record["required_level"] == "write"
+    assert record["granted_level"] == "read"
+    assert record["matched_rule"] == "all"
+
+
+@pytest.mark.asyncio
+async def test_denied_folder_emits_structured_log_line() -> None:
+    buf = io.StringIO()
+    configure_logging(level="DEBUG", stream=buf, force=True)
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder="Clients", permission="write")]),
+        folder_backend=FakeFolderBackend([_clients_folder()]),
+    )
+    with pytest.raises(AccessDenied):
+        await auth.require_folder("Other", AccessLevel.WRITE)
+    denied = [
+        r for r in _capture_access_log(buf) if r.get("event") == "access_denied"
+    ]
+    assert denied, "expected an access_denied log line for the folder"
+    record = denied[-1]
+    assert record["chat_ref"] == "folder:Other"
+    assert record["required_level"] == "write"
+    assert record["granted_level"] is None
+    assert record["matched_rule"] is None

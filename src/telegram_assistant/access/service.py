@@ -27,12 +27,15 @@ import enum
 from typing import TYPE_CHECKING
 
 from telegram_assistant.config.models import AccessConfig
+from telegram_assistant.observability.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids import cycles
     from collections.abc import Iterable
 
     from telegram_assistant.entities.service import EntityResolver
     from telegram_assistant.folders.service import FolderBackend
+
+_log = get_logger(__name__)
 
 
 class AccessLevel(enum.IntEnum):
@@ -193,12 +196,28 @@ class Authorizer:
             memberships = set(folder_memberships)
         granted, matched = self._effective_chat_level(chat_id, memberships)
         if granted is None or granted < level:
+            _log.warning(
+                "access_denied",
+                chat_ref=chat_id,
+                telegram_chat_id=chat_id,
+                required_level=level.name.lower(),
+                granted_level=granted.name.lower() if granted else None,
+                matched_rule=matched,
+            )
             raise AccessDenied(
                 chat_ref=chat_id,
                 required_level=level,
                 granted_level=granted,
                 matched_rule=matched,
             )
+        _log.debug(
+            "access_granted",
+            chat_ref=chat_id,
+            telegram_chat_id=chat_id,
+            required_level=level.name.lower(),
+            granted_level=granted.name.lower(),
+            matched_rule=matched,
+        )
 
     async def require_folder(self, folder_name: str, level: AccessLevel) -> None:
         """Raise :class:`AccessDenied` unless ``folder_name`` is granted ``level``.
@@ -220,12 +239,26 @@ class Authorizer:
             best = folder_level
             matched = f"folder:{folder_name}"
         if best is None or best < level:
+            _log.warning(
+                "access_denied",
+                chat_ref=f"folder:{folder_name}",
+                required_level=level.name.lower(),
+                granted_level=best.name.lower() if best else None,
+                matched_rule=matched,
+            )
             raise AccessDenied(
                 chat_ref=f"folder:{folder_name}",
                 required_level=level,
                 granted_level=best,
                 matched_rule=matched,
             )
+        _log.debug(
+            "access_granted",
+            chat_ref=f"folder:{folder_name}",
+            required_level=level.name.lower(),
+            granted_level=best.name.lower(),
+            matched_rule=matched,
+        )
 
 
 __all__ = [

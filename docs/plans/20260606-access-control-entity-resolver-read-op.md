@@ -164,12 +164,12 @@ there is a real read operation to protect:
 
 ### Task 5: Update error taxonomy, observability, and the documentation guards
 
-- [ ] Add the access-denied category to the `docs/init-plan.md` error taxonomy (§Ошибки)
-- [ ] Log access decisions in observability (denied: chat ref, required level, matched rule or none)
-- [ ] Update `skills/telegram-assistant/SKILL.md` and re-sync it to `~/.claude/skills/...`, and
+- [x] Add the access-denied category to the `docs/init-plan.md` error taxonomy (§Ошибки)
+- [x] Log access decisions in observability (denied: chat ref, required level, matched rule or none)
+- [x] Update `skills/telegram-assistant/SKILL.md` and re-sync it to `~/.claude/skills/...`, and
   update the `README.md` Commands section for `messages recent`, `--entity`, and the `access:` config
-- [ ] write/adjust tests including the `tests/test_skill_inventory.py` guard
-- [ ] run project tests - must pass before next task
+- [x] write/adjust tests including the `tests/test_skill_inventory.py` guard
+- [x] run project tests - must pass before next task
 
 ### Task 6: Verify acceptance criteria
 
