@@ -7,6 +7,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
+from telegram_assistant.access import AccessDenied
+from telegram_assistant.folders import FolderBackend
+from telegram_assistant.http_api.access import (
+    build_authorizer,
+    translate_access_error,
+)
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.members import (
     BulkMemberAddFailed,
@@ -100,6 +106,13 @@ def _store_or_503(request: Request) -> OperationStore:
     return store
 
 
+def _folder_backend_optional(request: Request) -> FolderBackend | None:
+    factory = getattr(request.app.state, "folder_backend_factory", None)
+    if factory is None:
+        return None
+    return factory(request)
+
+
 def _worker_queue_for_request(request: Request) -> WorkerQueue:
     store = _store_or_503(request)
     config = getattr(request.app.state, "config", None)
@@ -148,13 +161,19 @@ def build_router() -> APIRouter:
             operation_id=body.operation_id,
         )
 
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
         try:
             result, op = await bulk_add_members(
                 backend=backend,
                 store=store,
                 queue=queue,
                 request=domain_request,
+                authorizer=authorizer,
             )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
         except BulkMemberAddPending as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -237,13 +256,19 @@ def build_router() -> APIRouter:
                 detail=str(exc),
             ) from exc
 
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
         try:
             result, op = await bulk_remove_members(
                 backend=backend,
                 store=store,
                 queue=queue,
                 request=domain_request,
+                authorizer=authorizer,
             )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
         except BulkMemberRemovePending as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

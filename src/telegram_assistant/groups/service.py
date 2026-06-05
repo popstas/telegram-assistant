@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from telegram_assistant.access.service import AccessLevel, Authorizer
 from telegram_assistant.config.models import TelegramConfig, TopicsLayout
 from telegram_assistant.folders.service import (
     FolderBackend,
@@ -498,6 +499,7 @@ async def create_group(
     config: TelegramConfig,
     request: GroupCreateRequest,
     plugins: PluginRegistry | None = None,
+    authorizer: Authorizer | None = None,
 ) -> tuple[GroupCreateResult, OperationRecord]:
     """Create a group, or replay the saved result for the same idempotency key.
 
@@ -515,6 +517,16 @@ async def create_group(
         plugins = PluginRegistry()
     if not request.title.strip() and request.external_ref is None:
         raise ValueError("group create requires external_ref or non-empty title")
+
+    # Group create is gated by WRITE on the destination folder (the place the
+    # new chat will land). Checked up front so a denied create never reaches the
+    # operation store or Telegram. ``skip_folder`` creates an unplaced chat with
+    # no destination to gate on.
+    if authorizer is not None and not request.skip_folder:
+        target_folder_name = (
+            request.folder_name or config.default_chat_folder.folder_name
+        )
+        await authorizer.require_folder(target_folder_name, AccessLevel.WRITE)
 
     key = idempotency.group_create_key(
         external_ref=request.external_ref, title=request.title

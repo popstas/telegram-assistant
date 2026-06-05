@@ -53,11 +53,18 @@ Top-level:
 `messages` — send messages and service commands:
 
 - `messages send` — send a message or service command (targeted or folder-wide mass mode).
+- `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5).
+
+Most chat-targeting commands accept `--entity` (a numeric id with/without `-100`, `@username`, `t.me`/invite link, phone, or exact title) as a flexible alternative to `--chat-id`/`--chat-name`.
 
 `folders` — inspect and manage chat folders:
 
 - `folders inspect` — inspect a chat folder and list its chats.
 - `folders add-chat` — move an existing chat into a folder.
+
+### Access control
+
+`telegram.access` in `data/config.yml` gates which chats/folders this instance may read or write. Omitting it means allow-all (backward compatible); once present it is deny-by-default, `write` implies `read`, and rules combine as a union with the highest level winning. Denials surface as a non-zero CLI exit (code 3) and `HTTP 403` on the API.
 
 `operations` — inspect and retry queued operations:
 

@@ -183,6 +183,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
+| `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
 | `folders` | `add-chat` | Move an existing chat into a folder. | `telegram-assistant folders add-chat ...` |
 | `operations` | `status` | Read-only: show queue status for a previously created operation. | `telegram-assistant operations status ...` |
@@ -197,6 +198,22 @@ from `data/config.yml`; **Temp file** = whether `/tmp/...` is needed;
 **Automation** = what the agent does without asking; **Confirmation** =
 when a real (non-dry-run) call is allowed; **Typical errors** = error
 messages the agent must surface verbatim instead of paraphrasing.
+
+Most chat-targeting commands (`messages send`, `messages recent`,
+`topics create`/`close`/`bulk-create`, `members bulk-add`/`bulk-remove`,
+`folders add-chat`) also accept `--entity` as a flexible alternative to
+`--chat-id` / `--chat-name`. `--entity` takes a numeric id (with or
+without the `-100` prefix), an `@username`, a `t.me` / invite link, a
+phone, or an exact chat title; exactly one of `--chat-id` / `--chat-name`
+/ `--entity` is allowed per call. When the resolver cannot resolve the
+reference the CLI exits with code 2 (`EntityNotFoundError` /
+`AmbiguousEntityError`) — surface the message and ask, do not guess.
+
+If the project configures `telegram.access` in `data/config.yml`, every
+chat-scoped command is gated (read vs write). When the policy does not
+permit a chat or destination folder the CLI exits with code 3 and prints
+`access denied ...`. The agent surfaces that verbatim and stops — it never
+edits `data/config.yml` to widen access on its own.
 
 #### `auth` / `login`
 
@@ -391,6 +408,24 @@ messages the agent must surface verbatim instead of paraphrasing.
   `--mass cannot be combined with --chat-id or --chat-name`,
   `mass mode requires --topic-name (and --folder-name resolves the
   folder)`, `MessageSendNeedsReview`.
+
+#### `messages` / `recent`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  optional `--limit` (count of recent messages).
+- Required flags: exactly one chat reference.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: read-only — run immediately when the human asks «покажи
+  последние сообщения чата X» / «что писали в X». No `--dry-run`.
+  `--limit` defaults to 5; pass it through only when the human names a
+  count.
+- Confirmation: not required (read-only). Still READ-gated by the
+  `telegram.access` policy — if the chat is not permitted the CLI exits
+  non-zero with `access denied`; surface that and stop.
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity
+  must be supplied`, `access denied ...` (exit code 3), entity
+  not-found / ambiguous (exit code 2).
 
 #### `folders` / `inspect`
 
@@ -688,6 +723,26 @@ Request: «Напомни во всех чатах Planfix clients в топик
    would actually happen.
 4. Require an explicit confirmation that names the chat count before
    re-running without `--dry-run`.
+
+### `messages recent`
+
+Request: «Покажи последние сообщения в чате Клиент / проект.»
+
+1. Resource/action: `messages` / `recent`. Read-only, no dry-run, no
+   confirmation.
+2. Run (default limit 5; add `--limit N` only if the human names a
+   count):
+
+   ```bash
+   telegram-assistant messages recent \
+     --chat-name "Клиент / проект"
+   ```
+
+   `--entity` works too, e.g. `--entity @member_username` or
+   `--entity -1001234567890`.
+3. Return the recent messages verbatim. If the CLI exits with `access
+   denied` (code 3) or an entity error (code 2), surface the message
+   and stop.
 
 ### `folders inspect`
 

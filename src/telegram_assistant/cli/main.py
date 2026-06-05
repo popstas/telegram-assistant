@@ -130,6 +130,92 @@ def _load_config_or_exit(config_path: Path | None):
         raise typer.Exit(code=2) from exc
 
 
+# Exit code reserved for a loud access-control denial, kept distinct from the
+# generic validation (2) and unexpected-failure (1) codes so callers can tell
+# "the policy forbids this" apart from "the request was malformed".
+ACCESS_DENIED_EXIT_CODE = 3
+
+
+def _raise_for_access_or_entity_error(exc: BaseException) -> None:
+    """Translate access/entity-resolution errors into clear CLI exits.
+
+    * :class:`AccessDenied` → a loud non-zero exit (``ACCESS_DENIED_EXIT_CODE``)
+    * entity not-found / ambiguous → exit code 2 with the resolver's message
+
+    Anything else is left for the caller's generic handler.
+    """
+    from telegram_assistant.access import AccessDenied
+    from telegram_assistant.entities import (
+        AmbiguousEntityError,
+        EntityNotFoundError,
+    )
+
+    if isinstance(exc, AccessDenied):
+        typer.echo(f"access denied: {exc}", err=True)
+        raise typer.Exit(code=ACCESS_DENIED_EXIT_CODE) from exc
+    if isinstance(exc, (AmbiguousEntityError, EntityNotFoundError)):
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+
+def _cli_authorizer(config, *, resolver=None, folder_backend=None):
+    """Build an :class:`Authorizer` from loaded config for a CLI invocation.
+
+    No-op sentinel when ``telegram.access`` is unset (allow-all). When a policy
+    is present the caller must supply a resolver (for ``chat`` rules) and/or a
+    folder backend (for ``folder`` rules) as needed.
+    """
+    from telegram_assistant.access import Authorizer
+
+    return Authorizer(
+        config.telegram.access, resolver=resolver, folder_backend=folder_backend
+    )
+
+
+async def _cli_resolve_chat_and_authorizer(
+    *,
+    manager,
+    config,
+    folder_backend,
+    chat_id=None,
+    chat_name=None,
+    entity=None,
+    folder_name=None,
+    folder_id=None,
+):
+    """Resolve a chat reference (id / name / entity) and build the authorizer.
+
+    A Telethon-backed resolver is only constructed when ``--entity`` is used or
+    a policy with ``chat`` rules is configured, so the common allow-all path
+    never needs the live client. Returns ``(resolved_chat_id, authorizer)``.
+    """
+    from telegram_assistant.folders import resolve_chat_in_folder
+
+    resolver = None
+    if config.telegram.access is not None or entity is not None:
+        from telegram_assistant.entities import TelethonEntityResolver
+
+        resolver = TelethonEntityResolver(await manager.get_client())
+
+    if entity is not None:
+        resolved_chat_id = (await resolver.resolve(entity)).chat_id
+    elif chat_id is not None:
+        resolved_chat_id = chat_id
+    else:
+        resolved = await resolve_chat_in_folder(
+            folder_backend,
+            folder_name=folder_name or "",
+            chat_name=chat_name or "",
+            folder_id=folder_id,
+        )
+        resolved_chat_id = resolved.chat_id
+
+    authorizer = _cli_authorizer(
+        config, resolver=resolver, folder_backend=folder_backend
+    )
+    return resolved_chat_id, authorizer
+
+
 @app.command("health")
 def health_cmd(
     config_path: Path | None = typer.Option(  # noqa: B008
@@ -503,6 +589,16 @@ def groups_create(
     async def _run() -> dict[str, object]:
         try:
             group_backend, folder_backend = await open_backends()
+            # Group create is gated by WRITE on the *destination folder*; the
+            # authorizer only needs a resolver when the policy has chat rules.
+            resolver = None
+            if config.telegram.access is not None:
+                from telegram_assistant.entities import TelethonEntityResolver
+
+                resolver = TelethonEntityResolver(await manager.get_client())
+            authorizer = _cli_authorizer(
+                config, resolver=resolver, folder_backend=folder_backend
+            )
             result, op = await create_group(
                 backend=group_backend,
                 folder_backend=folder_backend,
@@ -510,6 +606,7 @@ def groups_create(
                 config=config.telegram,
                 request=request,
                 plugins=plugins,
+                authorizer=authorizer,
             )
             payload = result.to_dict()
             payload["operation_id"] = op.id
@@ -527,6 +624,7 @@ def groups_create(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
         typer.echo(f"groups create failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -726,6 +824,12 @@ def topics_create(
         "--chat-name",
         help="Chat title (resolved within --folder-name).",
     ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
     folder_name: str | None = typer.Option(
         None,
         "--folder-name",
@@ -768,7 +872,6 @@ def topics_create(
     """Create a single forum topic in an existing supergroup."""
     from telegram_assistant.folders import (
         FolderError,
-        resolve_chat_in_folder,
     )
     from telegram_assistant.plugins import build_registry
     from telegram_assistant.topics import (
@@ -780,9 +883,10 @@ def topics_create(
     )
     from telegram_assistant.topics.service import _first_message
 
-    if (chat_id is None) == (chat_name is None):
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
         typer.echo(
-            "exactly one of --chat-id or --chat-name must be supplied", err=True
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
         )
         raise typer.Exit(code=2)
 
@@ -808,16 +912,16 @@ def topics_create(
         async def _resolve() -> tuple[int, list, str | None]:
             try:
                 topic_backend, folder_backend = await open_backends()
-                if chat_id is not None:
-                    resolved_chat_id = chat_id
-                else:
-                    resolved = await resolve_chat_in_folder(
-                        folder_backend,
-                        folder_name=resolved_folder_name or "",
-                        chat_name=chat_name or "",
-                        folder_id=effective_folder_id,
-                    )
-                    resolved_chat_id = resolved.chat_id
+                resolved_chat_id, _ = await _cli_resolve_chat_and_authorizer(
+                    manager=manager,
+                    config=config,
+                    folder_backend=folder_backend,
+                    chat_id=chat_id,
+                    chat_name=chat_name,
+                    entity=entity,
+                    folder_name=resolved_folder_name,
+                    folder_id=effective_folder_id,
+                )
                 list_error: str | None = None
                 try:
                     summaries = list(
@@ -839,6 +943,7 @@ def topics_create(
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
         except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
             typer.echo(f"topics create failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
@@ -894,16 +999,16 @@ def topics_create(
     async def _run() -> dict[str, object]:
         try:
             topic_backend, folder_backend = await open_backends()
-            if chat_id is not None:
-                resolved_chat_id = chat_id
-            else:
-                resolved = await resolve_chat_in_folder(
-                    folder_backend,
-                    folder_name=resolved_folder_name or "",
-                    chat_name=chat_name or "",
-                    folder_id=effective_folder_id,
-                )
-                resolved_chat_id = resolved.chat_id
+            resolved_chat_id, authorizer = await _cli_resolve_chat_and_authorizer(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
 
             request = TopicCreateRequest(
                 telegram_chat_id=resolved_chat_id,
@@ -916,6 +1021,7 @@ def topics_create(
                 store=store,
                 request=request,
                 plugins=plugins,
+                authorizer=authorizer,
             )
             payload = result.to_dict()
             payload["operation_id"] = op.id
@@ -936,6 +1042,7 @@ def topics_create(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
         typer.echo(f"topics create failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -1021,6 +1128,12 @@ def topics_bulk_create(
         "--chat-name",
         help="Chat title (resolved within --folder-name).",
     ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
     folder_name: str | None = typer.Option(
         None,
         "--folder-name",
@@ -1064,7 +1177,6 @@ def topics_bulk_create(
     """Bulk-create topics from a CSV or JSON file."""
     from telegram_assistant.folders import (
         FolderError,
-        resolve_chat_in_folder,
     )
     from telegram_assistant.plugins import build_registry
     from telegram_assistant.topics import (
@@ -1077,9 +1189,10 @@ def topics_bulk_create(
     )
     from telegram_assistant.worker.queue import WorkerQueue
 
-    if (chat_id is None) == (chat_name is None):
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
         typer.echo(
-            "exactly one of --chat-id or --chat-name must be supplied", err=True
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
         )
         raise typer.Exit(code=2)
     if file is None:
@@ -1111,16 +1224,16 @@ def topics_bulk_create(
         async def _resolve_bulk() -> tuple[int, list, str | None]:
             try:
                 topic_backend, folder_backend = await open_backends()
-                if chat_id is not None:
-                    resolved_chat_id = chat_id
-                else:
-                    resolved = await resolve_chat_in_folder(
-                        folder_backend,
-                        folder_name=resolved_folder_name or "",
-                        chat_name=chat_name or "",
-                        folder_id=effective_folder_id,
-                    )
-                    resolved_chat_id = resolved.chat_id
+                resolved_chat_id, _ = await _cli_resolve_chat_and_authorizer(
+                    manager=manager,
+                    config=config,
+                    folder_backend=folder_backend,
+                    chat_id=chat_id,
+                    chat_name=chat_name,
+                    entity=entity,
+                    folder_name=resolved_folder_name,
+                    folder_id=effective_folder_id,
+                )
                 list_error: str | None = None
                 try:
                     summaries = list(
@@ -1142,6 +1255,7 @@ def topics_bulk_create(
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
         except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
             typer.echo(f"topics bulk-create failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
@@ -1232,16 +1346,16 @@ def topics_bulk_create(
     async def _run() -> dict[str, object]:
         try:
             topic_backend, folder_backend = await open_backends()
-            if chat_id is not None:
-                resolved_chat_id = chat_id
-            else:
-                resolved = await resolve_chat_in_folder(
-                    folder_backend,
-                    folder_name=resolved_folder_name or "",
-                    chat_name=chat_name or "",
-                    folder_id=effective_folder_id,
-                )
-                resolved_chat_id = resolved.chat_id
+            resolved_chat_id, authorizer = await _cli_resolve_chat_and_authorizer(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
 
             req = BulkTopicCreateRequest(
                 telegram_chat_id=resolved_chat_id,
@@ -1262,6 +1376,7 @@ def topics_bulk_create(
                 queue=queue,
                 request=req,
                 plugins=plugins,
+                authorizer=authorizer,
             )
             payload = result.to_dict()
             payload["operation_status"] = op.status.value
@@ -1285,6 +1400,7 @@ def topics_bulk_create(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
         typer.echo(f"topics bulk-create failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -1312,6 +1428,12 @@ def topics_close(
         None,
         "--chat-name",
         help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
     ),
     folder_name: str | None = typer.Option(
         None,
@@ -1345,7 +1467,6 @@ def topics_close(
     """Close an existing forum topic (the topic and its history are kept)."""
     from telegram_assistant.folders import (
         FolderError,
-        resolve_chat_in_folder,
     )
     from telegram_assistant.topics import (
         AmbiguousTopicNameError,
@@ -1358,9 +1479,10 @@ def topics_close(
         resolve_topic_id_by_name,
     )
 
-    if (chat_id is None) == (chat_name is None):
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
         typer.echo(
-            "exactly one of --chat-id or --chat-name must be supplied", err=True
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
         )
         raise typer.Exit(code=2)
     if (topic_id is None) == (topic_name is None):
@@ -1384,16 +1506,16 @@ def topics_close(
         async def _resolve_close() -> tuple[int, int, bool, str | None]:
             try:
                 topic_backend, folder_backend = await open_backends()
-                if chat_id is not None:
-                    resolved_chat_id = chat_id
-                else:
-                    resolved = await resolve_chat_in_folder(
-                        folder_backend,
-                        folder_name=resolved_folder_name or "",
-                        chat_name=chat_name or "",
-                        folder_id=effective_folder_id,
-                    )
-                    resolved_chat_id = resolved.chat_id
+                resolved_chat_id, _ = await _cli_resolve_chat_and_authorizer(
+                    manager=manager,
+                    config=config,
+                    folder_backend=folder_backend,
+                    chat_id=chat_id,
+                    chat_name=chat_name,
+                    entity=entity,
+                    folder_name=resolved_folder_name,
+                    folder_id=effective_folder_id,
+                )
 
                 summaries = list(
                     await topic_backend.list_topics(chat_id=resolved_chat_id)
@@ -1437,6 +1559,7 @@ def topics_close(
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
         except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
             typer.echo(f"topics close failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
@@ -1475,16 +1598,16 @@ def topics_close(
     async def _run() -> dict[str, object]:
         try:
             topic_backend, folder_backend = await open_backends()
-            if chat_id is not None:
-                resolved_chat_id = chat_id
-            else:
-                resolved = await resolve_chat_in_folder(
-                    folder_backend,
-                    folder_name=resolved_folder_name or "",
-                    chat_name=chat_name or "",
-                    folder_id=effective_folder_id,
-                )
-                resolved_chat_id = resolved.chat_id
+            resolved_chat_id, authorizer = await _cli_resolve_chat_and_authorizer(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
 
             if topic_id is not None:
                 effective_topic_id = topic_id
@@ -1501,7 +1624,10 @@ def topics_close(
                 reason=reason,
             )
             result, op = await close_topic(
-                backend=topic_backend, store=store, request=request
+                backend=topic_backend,
+                store=store,
+                request=request,
+                authorizer=authorizer,
             )
             payload = result.to_dict()
             payload["operation_id"] = op.id
@@ -1525,6 +1651,7 @@ def topics_close(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
         typer.echo(f"topics close failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -1622,6 +1749,12 @@ def members_bulk_add(
         "--chat-name",
         help="Chat title (resolved within --folder-name).",
     ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
     folder_name: str | None = typer.Option(
         None,
         "--folder-name",
@@ -1675,7 +1808,6 @@ def members_bulk_add(
     """Bulk-add members to an existing supergroup, optionally promoting to admin."""
     from telegram_assistant.folders import (
         FolderError,
-        resolve_chat_in_folder,
     )
     from telegram_assistant.members import (
         BulkMemberAddFailed,
@@ -1690,9 +1822,10 @@ def members_bulk_add(
     from telegram_assistant.plugins import build_registry
     from telegram_assistant.worker.queue import WorkerQueue
 
-    if (chat_id is None) == (chat_name is None):
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
         typer.echo(
-            "exactly one of --chat-id or --chat-name must be supplied", err=True
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
         )
         raise typer.Exit(code=2)
 
@@ -1753,15 +1886,17 @@ def members_bulk_add(
         async def _resolve_add() -> int:
             try:
                 _, folder_backend = await open_backends()
-                if chat_id is not None:
-                    return chat_id
-                resolved = await resolve_chat_in_folder(
-                    folder_backend,
-                    folder_name=resolved_folder_name or "",
-                    chat_name=chat_name or "",
+                resolved_chat_id, _ = await _cli_resolve_chat_and_authorizer(
+                    manager=manager,
+                    config=config,
+                    folder_backend=folder_backend,
+                    chat_id=chat_id,
+                    chat_name=chat_name,
+                    entity=entity,
+                    folder_name=resolved_folder_name,
                     folder_id=effective_folder_id,
                 )
-                return resolved.chat_id
+                return resolved_chat_id
             finally:
                 try:
                     await manager.disconnect()
@@ -1774,6 +1909,7 @@ def members_bulk_add(
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
         except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
             typer.echo(f"members bulk-add failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
@@ -1847,16 +1983,16 @@ def members_bulk_add(
     async def _run() -> dict[str, object]:
         try:
             member_backend, folder_backend = await open_backends()
-            if chat_id is not None:
-                resolved_chat_id = chat_id
-            else:
-                resolved = await resolve_chat_in_folder(
-                    folder_backend,
-                    folder_name=resolved_folder_name or "",
-                    chat_name=chat_name or "",
-                    folder_id=effective_folder_id,
-                )
-                resolved_chat_id = resolved.chat_id
+            resolved_chat_id, authorizer = await _cli_resolve_chat_and_authorizer(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
 
             try:
                 items = tuple(
@@ -1877,6 +2013,7 @@ def members_bulk_add(
                 store=store,
                 queue=queue,
                 request=req,
+                authorizer=authorizer,
             )
             payload = result.to_dict()
             payload["operation_status"] = op.status.value
@@ -1900,6 +2037,7 @@ def members_bulk_add(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
         typer.echo(f"members bulk-add failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -1966,6 +2104,12 @@ def members_bulk_remove(
         "--chat-name",
         help="Chat title (resolved within --folder-name).",
     ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
     folder_name: str | None = typer.Option(
         None,
         "--folder-name",
@@ -2029,7 +2173,6 @@ def members_bulk_remove(
     """Bulk-remove members from a supergroup (kick or permanently ban)."""
     from telegram_assistant.folders import (
         FolderError,
-        resolve_chat_in_folder,
     )
     from telegram_assistant.members import (
         BulkMemberRemoveFailed,
@@ -2045,9 +2188,10 @@ def members_bulk_remove(
     from telegram_assistant.plugins import build_registry
     from telegram_assistant.worker.queue import WorkerQueue
 
-    if (chat_id is None) == (chat_name is None):
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
         typer.echo(
-            "exactly one of --chat-id or --chat-name must be supplied", err=True
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
         )
         raise typer.Exit(code=2)
 
@@ -2116,19 +2260,23 @@ def members_bulk_remove(
         effective_folder_id = folder_id
 
     if dry_run:
-        if chat_id is not None:
+        if chat_id is not None and entity is None:
             resolved_chat_id = chat_id
         else:
             async def _resolve_chat() -> int:
                 try:
                     _, folder_backend = await open_backends()
-                    resolved = await resolve_chat_in_folder(
-                        folder_backend,
-                        folder_name=resolved_folder_name or "",
-                        chat_name=chat_name or "",
+                    resolved_id, _ = await _cli_resolve_chat_and_authorizer(
+                        manager=manager,
+                        config=config,
+                        folder_backend=folder_backend,
+                        chat_id=chat_id,
+                        chat_name=chat_name,
+                        entity=entity,
+                        folder_name=resolved_folder_name,
                         folder_id=effective_folder_id,
                     )
-                    return resolved.chat_id
+                    return resolved_id
                 finally:
                     try:
                         await manager.disconnect()
@@ -2141,6 +2289,7 @@ def members_bulk_remove(
                 typer.echo(str(exc), err=True)
                 raise typer.Exit(code=2) from exc
             except Exception as exc:
+                _raise_for_access_or_entity_error(exc)
                 typer.echo(f"members bulk-remove failed: {exc}", err=True)
                 raise typer.Exit(code=1) from exc
 
@@ -2200,16 +2349,16 @@ def members_bulk_remove(
     async def _run() -> dict[str, object]:
         try:
             member_backend, folder_backend = await open_backends()
-            if chat_id is not None:
-                resolved_chat_id = chat_id
-            else:
-                resolved = await resolve_chat_in_folder(
-                    folder_backend,
-                    folder_name=resolved_folder_name or "",
-                    chat_name=chat_name or "",
-                    folder_id=effective_folder_id,
-                )
-                resolved_chat_id = resolved.chat_id
+            resolved_chat_id, authorizer = await _cli_resolve_chat_and_authorizer(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
 
             try:
                 items = tuple(
@@ -2231,6 +2380,7 @@ def members_bulk_remove(
                 store=store,
                 queue=queue,
                 request=req,
+                authorizer=authorizer,
             )
             payload = result.to_dict()
             payload["operation_status"] = op.status.value
@@ -2256,6 +2406,7 @@ def members_bulk_remove(
     except typer.Exit:
         raise
     except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
         typer.echo(f"members bulk-remove failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -2310,6 +2461,12 @@ def messages_send(
         None,
         "--chat-name",
         help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, t.me/invite link, "
+        "phone, or exact title) resolved via the shared resolver (targeted send).",
     ),
     folder_name: str | None = typer.Option(
         None,
@@ -2379,23 +2536,26 @@ def messages_send(
         resolve_topic_id_by_name,
     )
 
-    if mass and (chat_id is not None or chat_name is not None):
+    if mass and (chat_id is not None or chat_name is not None or entity is not None):
         typer.echo(
-            "--mass cannot be combined with --chat-id or --chat-name; "
+            "--mass cannot be combined with --chat-id, --chat-name, or --entity; "
             "mass mode sends to every chat in --folder-name that has --topic-name.",
             err=True,
         )
         raise typer.Exit(code=2)
-    is_mass = mass or (chat_id is None and chat_name is None)
+    targeted_refs = sum(
+        [chat_id is not None, chat_name is not None, entity is not None]
+    )
+    is_mass = mass or targeted_refs == 0
     if is_mass and topic_name is None:
         typer.echo(
             "mass mode requires --topic-name (and --folder-name resolves the folder)",
             err=True,
         )
         raise typer.Exit(code=2)
-    if not is_mass and (chat_id is not None) == (chat_name is not None):
+    if not is_mass and targeted_refs != 1:
         typer.echo(
-            "targeted send requires exactly one of --chat-id or --chat-name",
+            "targeted send requires exactly one of --chat-id, --chat-name, or --entity",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -2512,9 +2672,19 @@ def messages_send(
                         "folder_id": snapshot.folder_id,
                     }
                 # Targeted send.
-                if chat_id is not None:
+                if entity is not None:
+                    from telegram_assistant.entities import (
+                        TelethonEntityResolver,
+                    )
+
+                    resolved_entity = await TelethonEntityResolver(
+                        await manager.get_client()
+                    ).resolve(entity)
+                    rch_id = resolved_entity.chat_id
+                    rch_name: str | None = resolved_entity.title
+                elif chat_id is not None:
                     rch_id = chat_id
-                    rch_name: str | None = None
+                    rch_name = None
                 else:
                     resolved = await resolve_chat_in_folder(
                         folder_backend,
@@ -2553,6 +2723,7 @@ def messages_send(
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
         except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
             typer.echo(f"messages send failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
@@ -2630,6 +2801,18 @@ def messages_send(
             topic_backend, folder_backend = await open_backends()
             message_backend = topic_backend
 
+            # Build a resolver only when the policy or --entity actually needs
+            # one, so the common allow-all/no-entity path never touches the
+            # Telethon client beyond what backend resolution already did.
+            resolver = None
+            if config.telegram.access is not None or entity is not None:
+                from telegram_assistant.entities import TelethonEntityResolver
+
+                resolver = TelethonEntityResolver(await manager.get_client())
+            authorizer = _cli_authorizer(
+                config, resolver=resolver, folder_backend=folder_backend
+            )
+
             if is_mass:
                 req = MassSendRequest(
                     folder_name=resolved_folder_name or "",
@@ -2644,15 +2827,21 @@ def messages_send(
                     folder_backend=folder_backend,
                     store=store,
                     request=req,
+                    authorizer=authorizer,
                 )
                 payload = result.to_dict()
                 payload["mode"] = "mass"
                 return payload
 
             # Targeted send.
-            if chat_id is not None:
+            if entity is not None:
+                assert resolver is not None  # built above when entity is set
+                resolved_entity = await resolver.resolve(entity)
+                resolved_chat_id = resolved_entity.chat_id
+                resolved_chat_name: str | None = resolved_entity.title
+            elif chat_id is not None:
                 resolved_chat_id = chat_id
-                resolved_chat_name: str | None = None
+                resolved_chat_name = None
             else:
                 resolved = await resolve_chat_in_folder(
                     folder_backend,
@@ -2682,7 +2871,10 @@ def messages_send(
                 topic_name=resolved_topic_name,
             )
             result_single, op = await send_message(
-                backend=message_backend, store=store, request=req_single
+                backend=message_backend,
+                store=store,
+                request=req_single,
+                authorizer=authorizer,
             )
             payload = result_single.to_dict()
             payload["operation_id"] = op.id
@@ -2711,7 +2903,161 @@ def messages_send(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
         typer.echo(f"messages send failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _build_message_read_backends(config_path: Path | None):
+    """Open the Telethon-backed read + folder backends + resolver for reads.
+
+    Mirrors :func:`_build_message_backends` but returns the read backend used
+    by the get-recent op plus a shared entity resolver so ``--entity`` works.
+    Tests monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.entities import TelethonEntityResolver
+        from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonMessageReadBackend,
+        )
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonMessageReadBackend(client),
+            TelethonFolderBackend(client),
+            TelethonEntityResolver(client),
+        )
+
+    return config, manager, _open
+
+
+@messages_app.command("recent")
+def messages_recent(
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id to read.",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, t.me/invite link, "
+        "phone, or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    limit: int = typer.Option(
+        5,
+        "--limit",
+        help="Maximum number of recent messages to return (default 5).",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Read the most recent messages from a chat (READ-gated)."""
+    from telegram_assistant.folders import (
+        FolderError,
+        resolve_chat_in_folder,
+    )
+    from telegram_assistant.messages import get_recent_messages
+
+    refs = sum([chat_id is not None, chat_name is not None, entity is not None])
+    if refs != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if limit <= 0:
+        typer.echo("--limit must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_message_read_backends(config_path)
+
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _run() -> dict[str, object]:
+        try:
+            read_backend, folder_backend, resolver = await open_backends()
+            if entity is not None:
+                resolved_chat_id = (await resolver.resolve(entity)).chat_id
+            elif chat_id is not None:
+                resolved_chat_id = chat_id
+            else:
+                resolved = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=resolved_folder_name or "",
+                    chat_name=chat_name or "",
+                    folder_id=effective_folder_id,
+                )
+                resolved_chat_id = resolved.chat_id
+
+            authorizer = _cli_authorizer(
+                config, resolver=resolver, folder_backend=folder_backend
+            )
+            messages = await get_recent_messages(
+                backend=read_backend,
+                chat_id=resolved_chat_id,
+                limit=limit,
+                authorizer=authorizer,
+            )
+            return {
+                "telegram_chat_id": resolved_chat_id,
+                "limit": limit,
+                "count": len(messages),
+                "messages": [m.to_dict() for m in messages],
+            }
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"messages recent failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
@@ -2832,6 +3178,12 @@ def folders_add_chat(
         "--chat-id",
         help="Numeric Telegram chat id.",
     ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
     folder_id: int | None = typer.Option(
         None,
         "--folder-id",
@@ -2858,9 +3210,10 @@ def folders_add_chat(
         resolve_folder,
     )
 
-    if (chat_id is None) == (chat_name is None):
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
         typer.echo(
-            "exactly one of --chat-id or --chat-name must be supplied", err=True
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
         )
         raise typer.Exit(code=2)
 
@@ -2879,7 +3232,16 @@ def folders_add_chat(
                     folder_name=resolved_name,
                     folder_id=effective_fid,
                 )
-                if chat_id is not None:
+                if entity is not None:
+                    from telegram_assistant.entities import (
+                        TelethonEntityResolver,
+                    )
+
+                    resolved_entity = await TelethonEntityResolver(
+                        await manager.get_client()
+                    ).resolve(entity)
+                    chat = await backend.resolve_chat(resolved_entity.chat_id)
+                elif chat_id is not None:
                     chat = await backend.resolve_chat(chat_id)
                 else:
                     chat = await resolve_chat_in_folder(
@@ -2908,6 +3270,7 @@ def folders_add_chat(
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
         except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
             typer.echo(f"folders add-chat failed: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
@@ -2952,9 +3315,26 @@ def folders_add_chat(
 
     async def _run() -> dict[str, object]:
         try:
+            from telegram_assistant.access import Authorizer
+
             backend = await open_backend()
-            if chat_id is not None:
-                chat_ref: str | int = chat_id
+            # ``_config`` may be ``None`` when a test injects a bare backend
+            # factory; derive the access policy defensively.
+            access_cfg = (
+                getattr(_config.telegram, "access", None)
+                if _config is not None
+                else None
+            )
+            resolver = None
+            if access_cfg is not None or entity is not None:
+                from telegram_assistant.entities import TelethonEntityResolver
+
+                resolver = TelethonEntityResolver(await manager.get_client())
+            if entity is not None:
+                assert resolver is not None
+                chat_ref: str | int = (await resolver.resolve(entity)).chat_id
+            elif chat_id is not None:
+                chat_ref = chat_id
             else:
                 # chat_name -> chat_id resolution shares the same code path as
                 # the HTTP endpoint so ambiguous names fail loudly the same way.
@@ -2965,11 +3345,15 @@ def folders_add_chat(
                     folder_id=effective_fid,
                 )
                 chat_ref = resolved.chat_id
+            authorizer = Authorizer(
+                access_cfg, resolver=resolver, folder_backend=backend
+            )
             return await add_chat_to_folder(
                 backend,
                 folder_name=resolved_name,
                 chat_ref=chat_ref,
                 folder_id=effective_fid,
+                authorizer=authorizer,
             )
         finally:
             try:
@@ -2983,6 +3367,7 @@ def folders_add_chat(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
         typer.echo(f"folders add-chat failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 

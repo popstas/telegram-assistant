@@ -3,8 +3,22 @@
 
 ## Unreleased
 
+### Features
+
+- Verify access control, entity resolver, and read op acceptance criteria
+- Document access control, log access decisions, extend error taxonomy
+- Wire entity resolver, authorizer, and read op into CLI and HTTP
+- Promote get-recent-messages to a first-class read op
+- Add access-control config and authorizer enforced in the domain layer
+- Add shared entity resolver
+
+### Bug Fixes
+
+- review: Normalize marked chat ids in access gate and resolver
+
 ### Documentation
 
+- Adopt access-control plan into ralphex format
 - Pin e2e approach in access-control draft (extend e2e scripts)
 - Draft plan for access control + entity resolver + read op
 - Add AGENTS.md documenting the release workflow

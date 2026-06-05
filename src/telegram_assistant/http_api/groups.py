@@ -7,6 +7,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 
+from telegram_assistant.access import AccessDenied
 from telegram_assistant.folders import FolderBackend, FolderError
 from telegram_assistant.groups import (
     GroupBackend,
@@ -21,6 +22,10 @@ from telegram_assistant.groups import (
     create_group,
     get_topics_layout,
     set_topics_layout,
+)
+from telegram_assistant.http_api.access import (
+    build_authorizer,
+    translate_access_error,
 )
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.persistence.store import OperationStore
@@ -126,6 +131,7 @@ def build_router() -> APIRouter:
             skip_folder=body.skip_folder,
         )
 
+        authorizer = build_authorizer(request, folder_backend=folder_backend)
         try:
             result, op = await create_group(
                 backend=backend,
@@ -134,7 +140,10 @@ def build_router() -> APIRouter:
                 config=config.telegram,
                 request=domain_request,
                 plugins=request.app.state.plugin_registry,
+                authorizer=authorizer,
             )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
         except GroupCreatePending as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,

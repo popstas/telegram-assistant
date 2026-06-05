@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 TopicsLayout = Literal["list", "tabs"]
+AccessPermission = Literal["read", "write"]
 
 
 class DefaultChatFolderConfig(BaseModel):
@@ -41,6 +48,58 @@ class TelegramDefaults(BaseModel):
     )
 
 
+class AccessRule(BaseModel):
+    """A single read/write grant for the technical account.
+
+    Exactly one *target* must be set per rule:
+
+    * ``chat`` — an entity reference (numeric id, ``@username``, link, phone, or
+      exact title) resolved via the shared entity resolver;
+    * ``folder`` — a Telegram chat-folder name (every chat in it inherits the
+      grant);
+    * ``all: true`` — a wildcard matching every chat.
+
+    ``permission`` is ``write`` by default; ``write`` implies ``read``. Rules
+    combine as a union with highest-level-wins, so a wildcard ``all`` +
+    ``read`` baseline can coexist with targeted ``write`` rules.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    chat: str | int | None = None
+    folder: str | None = None
+    all: bool = False
+    permission: AccessPermission = "write"
+
+    @model_validator(mode="after")
+    def _exactly_one_target(self) -> AccessRule:
+        targets = [
+            self.chat is not None,
+            self.folder is not None,
+            bool(self.all),
+        ]
+        set_count = sum(targets)
+        if set_count != 1:
+            raise ValueError(
+                "each access rule must set exactly one target of "
+                "'chat' / 'folder' / 'all: true'"
+            )
+        return self
+
+
+class AccessConfig(BaseModel):
+    """The read/write access policy.
+
+    Absent (``telegram.access is None``) means allow-all (backward compatible).
+    Present means deny-by-default: only chats granted by a matching rule may be
+    touched, at the granted level.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    rules: list[AccessRule] = Field(default_factory=list)
+
+
 class TelegramConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -52,6 +111,13 @@ class TelegramConfig(BaseModel):
     reserve_members: list[str] = Field(default_factory=list)
     default_chat_folder: DefaultChatFolderConfig
     defaults: TelegramDefaults = Field(default_factory=TelegramDefaults)
+    access: AccessConfig | None = Field(
+        default=None,
+        description=(
+            "Read/write access policy. None (omitted) means allow-all; "
+            "present means deny-by-default with write implying read."
+        ),
+    )
     proxy_url: str | None = Field(
         default=None,
         description=(

@@ -24,6 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from telegram_assistant.access.service import AccessDenied, AccessLevel, Authorizer
 from telegram_assistant.folders import (
     FolderBackend,
     resolve_folder,
@@ -92,6 +93,46 @@ class MessageBackend(Protocol):
     async def send_message(
         self, *, chat_id: int, text: str, topic_id: int | None = None
     ) -> int:
+        ...
+
+
+@dataclass(frozen=True)
+class RecentMessage:
+    """One message returned by the get-recent read op.
+
+    ``sender`` is the sender's ``@username`` when known (``None`` otherwise);
+    ``date`` is an ISO-8601 timestamp string (``None`` when the backend can't
+    supply one); ``reply_to`` is the replied-to message id; ``text`` is the
+    message body or, for media-only messages, a short media summary.
+    """
+
+    id: int
+    sender: str | None
+    date: str | None
+    reply_to: int | None
+    text: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "sender": self.sender,
+            "date": self.date,
+            "reply_to": self.reply_to,
+            "text": self.text,
+        }
+
+
+class MessageReadBackend(Protocol):
+    """Telethon-facing surface needed to read recent messages.
+
+    Production wires this to a Telethon adapter; tests inject a fake. The op
+    that consumes it (:func:`get_recent_messages`) is the canonical READ-level
+    operation the access gate protects.
+    """
+
+    async def get_recent_messages(
+        self, *, chat_id: int, limit: int = 5
+    ) -> list[RecentMessage]:
         ...
 
 
@@ -178,6 +219,7 @@ async def send_message(
     backend: MessageBackend,
     store: OperationStore,
     request: SendMessageRequest,
+    authorizer: Authorizer | None = None,
 ) -> tuple[SendMessageResult, OperationRecord]:
     """Send a single message (or service command), or replay the saved result.
 
@@ -187,9 +229,16 @@ async def send_message(
     * ``failed``       → raise :class:`MessageSendFailed`
     * ``needs_review`` → raise :class:`MessageSendNeedsReview`
     * ``pending``      → raise :class:`MessageSendPending`
+
+    Sending is a WRITE op: when an ``authorizer`` is supplied it must grant
+    WRITE on the target chat or :class:`AccessDenied` is raised before any
+    operation row is created.
     """
     if not request.text or not request.text.strip():
         raise ValueError("send_message requires non-empty text")
+
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
 
     key = idempotency.message_send_key(
         telegram_chat_id=request.telegram_chat_id,
@@ -247,6 +296,33 @@ async def send_message(
     )
     op = store.complete_operation(operation_id, result.to_dict())
     return result, op
+
+
+# ---------------------------------------------------------------------------
+# Get recent (read op)
+# ---------------------------------------------------------------------------
+
+
+async def get_recent_messages(
+    *,
+    backend: MessageReadBackend,
+    chat_id: int,
+    limit: int = 5,
+    authorizer: Authorizer | None = None,
+) -> list[RecentMessage]:
+    """Return up to ``limit`` recent messages for ``chat_id``, newest first.
+
+    This is a READ op: when an ``authorizer`` is supplied it must grant READ on
+    the target chat or :class:`AccessDenied` is raised before any Telegram call.
+    ``limit`` defaults to 5 and must be positive.
+    """
+    if limit <= 0:
+        raise ValueError("get_recent_messages requires a positive limit")
+
+    if authorizer is not None:
+        await authorizer.require(chat_id, AccessLevel.READ)
+
+    return await backend.get_recent_messages(chat_id=chat_id, limit=limit)
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +435,7 @@ async def mass_send_message(
     folder_backend: FolderBackend,
     store: OperationStore,
     request: MassSendRequest,
+    authorizer: Authorizer | None = None,
 ) -> MassSendResult:
     """Send ``request.text`` to every chat in ``folder_name`` that has the
     matching ``topic_name``.
@@ -385,6 +462,30 @@ async def mass_send_message(
     service = is_service_command(request.text)
 
     for chat in snapshot.chats:
+        # Mass send is WRITE per resolved chat. Chats the policy doesn't permit
+        # to write are recorded as skipped with reason=access_denied rather than
+        # aborting the whole run, so a partial allowlist still delivers to the
+        # chats it covers.
+        if authorizer is not None:
+            try:
+                await authorizer.require(
+                    chat.chat_id,
+                    AccessLevel.WRITE,
+                    folder_memberships=[snapshot.folder_name],
+                )
+            except AccessDenied:
+                skipped += 1
+                items.append(
+                    MassSendItemResult(
+                        status="skipped",
+                        telegram_chat_id=chat.chat_id,
+                        chat_name=chat.title,
+                        topic_name=request.topic_name,
+                        reason="access_denied",
+                    )
+                )
+                continue
+
         try:
             match = await _match_topic(
                 topic_backend=topic_backend,
@@ -516,11 +617,14 @@ __all__ = [
     "MassSendRequest",
     "MassSendResult",
     "MessageBackend",
+    "MessageReadBackend",
     "MessageSendFailed",
     "MessageSendNeedsReview",
     "MessageSendPending",
+    "RecentMessage",
     "SendMessageRequest",
     "SendMessageResult",
+    "get_recent_messages",
     "is_service_command",
     "mass_send_message",
     "redact_message_text",

@@ -47,6 +47,11 @@ there is a real read operation to protect:
 - Run the project test suite after each Task before proceeding.
 - e2e (real account) is added in the surfaces task by extending the existing `scripts/e2e_*.sh`.
 
+## Progress Tracking
+
+- Mark completed items with `[x]` immediately when done.
+- Update this plan if implementation deviates from the original scope.
+
 ## Technical Details
 
 ### Entity resolver
@@ -64,16 +69,26 @@ there is a real read operation to protect:
 
 ### Access control
 
-- Config (`config/models.py`): `AccessRule` (`extra="forbid"`, exactly one of `chat`/`folder`;
-  `permission: read|write` default `write`); `AccessConfig` (`rules: list[AccessRule]`);
-  `TelegramConfig.access: AccessConfig | None = None` (None ⇒ allow-all). `config/loader.py` template
-  gains a commented `access:` example so the generated default stays allow-all.
+- Config (`config/models.py`): `AccessRule` (`extra="forbid"`, exactly one target of
+  `chat` / `folder` / `all: true` (wildcard, every chat); `permission: read|write` default `write`);
+  `AccessConfig` (`rules: list[AccessRule]`); `TelegramConfig.access: AccessConfig | None = None`
+  (None ⇒ allow-all). `config/loader.py` template gains a commented `access:` example so the
+  generated default stays allow-all.
+- **Rules combine as a union, highest level wins.** The effective level for a chat is the max
+  `AccessLevel` across every matching rule (wildcard `all`, any folder it belongs to, an explicit
+  `chat` rule), and `write` implies `read`. So one config can simultaneously express: (1) a wildcard
+  `all` + `permission: read` rule → read every chat; (2) per-`chat` / per-`folder` `permission: write`
+  rules → write to selected usernames/folders; (3) a `folder` `permission: write` rule → manage
+  members and topics for that folder (member add/remove and topic create/close are WRITE-level ops).
+  These layer on top of the read-all baseline without conflict.
 - `access/service.py`: `AccessLevel` enum (`READ < WRITE`); `AccessDenied(RuntimeError)` carrying
   chat ref + required level; `Authorizer` built per request from `AccessConfig` + an `EntityResolver`
-  + a folder backend. It lazily builds an index — `chat_levels: dict[int, AccessLevel]` (rule chat
-  refs resolved via the resolver) and `folder_levels: dict[str, AccessLevel]` — and exposes
-  `require(chat_id, level, *, folder_memberships)` and `require_folder(folder_name, level)`. When
-  config `access is None`, the authorizer is a no-op sentinel (`require` returns immediately).
+  + a folder backend. It lazily builds an index — `default_level: AccessLevel | None` (from wildcard
+  `all` rules), `chat_levels: dict[int, AccessLevel]` (rule chat refs resolved via the resolver), and
+  `folder_levels: dict[str, AccessLevel]` — and exposes `require(chat_id, level, *, folder_memberships)`
+  (granting the max of the wildcard default, the chat's folder levels, and any explicit chat level)
+  and `require_folder(folder_name, level)`. When config `access is None`, the authorizer is a no-op
+  sentinel (`require` returns immediately).
 - Enforcement matrix (in the domain services, not just CLI): send / member add+remove / topic
   create+close / folder add+remove → WRITE on resolved chat; group create → WRITE on destination
   folder; mass-send folder mode → WRITE per-resolved-chat (unpermitted chats become `skipped` with
@@ -89,77 +104,87 @@ there is a real read operation to protect:
 
 ### Task 1: Build the shared entity resolver
 
-- [ ] Add `entities/` module with `EntityRef`, `ResolvedEntity`, the `EntityResolver` protocol, and
+- [x] Add `entities/` module with `EntityRef`, `ResolvedEntity`, the `EntityResolver` protocol, and
   `AmbiguousEntityError` / `EntityNotFoundError`
-- [ ] Implement `TelethonEntityResolver` with the full resolution order (numeric variants → peer
+- [x] Implement `TelethonEntityResolver` with the full resolution order (numeric variants → peer
   types → dialog scan by id → `client.get_entity()` for usernames/links/phones → title dialog scan)
-- [ ] Add a per-request resolution cache and translate `FloodWaitError` instead of swallowing it
-- [ ] Keep numeric `chat_id` resolution working unchanged (backward compatible)
-- [ ] write tests for the resolver (numeric variants, `@username`, link, title ambiguity → error,
+- [x] Add a per-request resolution cache and translate `FloodWaitError` instead of swallowing it
+- [x] Keep numeric `chat_id` resolution working unchanged (backward compatible)
+- [x] write tests for the resolver (numeric variants, `@username`, link, title ambiguity → error,
   not-found)
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 2: Add the access-control config and authorizer, enforced in the domain layer
 
-- [ ] Add `AccessRule` / `AccessConfig` to `config/models.py` and `TelegramConfig.access`
-  (None ⇒ allow-all); validate exactly one of `chat`/`folder` per rule
-- [ ] Add a commented `access:` example to the `config/loader.py` template (default stays allow-all)
-- [ ] Add `access/service.py` with `AccessLevel`, `AccessDenied`, and `Authorizer` (chat + folder
-  index, `require` / `require_folder`, no-op sentinel when `access is None`)
-- [ ] Thread an optional `authorizer` into the domain services and enforce the matrix: WRITE for
+- [x] Add `AccessRule` / `AccessConfig` to `config/models.py` and `TelegramConfig.access`
+  (None ⇒ allow-all); validate exactly one target of `chat` / `folder` / `all` per rule
+- [x] Add a commented `access:` example to the `config/loader.py` template (default stays allow-all);
+  show a combined config: a wildcard `all: read` rule plus per-`chat`/`folder` `write` rules
+- [x] Add `access/service.py` with `AccessLevel`, `AccessDenied`, and `Authorizer` (wildcard default
+  + chat + folder index with union/highest-level-wins resolution, `require` / `require_folder`, no-op
+  sentinel when `access is None`)
+- [x] Thread an optional `authorizer` into the domain services and enforce the matrix: WRITE for
   send / members / topics / folders, WRITE on destination folder for group create, READ where
   applicable; mass-send marks unpermitted chats `skipped` reason `access_denied`
-- [ ] write tests for the authorizer (chat rule, folder rule, read vs write, write-implies-read,
-  allow-all when None, deny-by-default when present, create-by-folder) and per-service deny/allow
-- [ ] run project tests - must pass before next task
+- [x] write tests for the authorizer (chat rule, folder rule, wildcard `all` rule, read vs write,
+  write-implies-read, union of read-all baseline + targeted write rules, allow-all when None,
+  deny-by-default when present, create-by-folder) and per-service deny/allow
+- [x] run project tests - must pass before next task
 
 ### Task 3: Promote get-recent-messages to a first-class read op
 
-- [ ] Move `get_recent_messages` into `messages/` as a domain op with a `MessageReadBackend`
+- [x] Move `get_recent_messages` into `messages/` as a domain op with a `MessageReadBackend`
   protocol and a `RecentMessage` shape (id, sender, date, reply_to, text/media summary), default
   limit 5
-- [ ] Gate the read op behind READ-level authorization
-- [ ] write tests for the read op (limit default/override, READ-denied path)
-- [ ] run project tests - must pass before next task
+- [x] Gate the read op behind READ-level authorization
+- [x] write tests for the read op (limit default/override, READ-denied path)
+- [x] run project tests - must pass before next task
 
 ### Task 4: Wire the resolver, authorizer, and read op into CLI and HTTP
 
-- [ ] CLI (`cli/main.py`): accept `--entity` (resolved via the resolver) alongside existing
+- [x] CLI (`cli/main.py`): accept `--entity` (resolved via the resolver) alongside existing
   `--chat-id`/`--chat-name` across messages/groups/topics/members/folders; add
   `messages recent [--entity] [--limit 5]`; build the `Authorizer` + resolver from loaded config
-- [ ] Map `AccessDenied` to a clear CLI non-zero exit and entity ambiguity/not-found to clear messages
-- [ ] HTTP (`http_api/*`): add an entity field to request bodies, add `GET /telegram/messages/recent`,
-  build authorizer/resolver from `app.state` via the factory pattern (None → 503), and add
-  `AccessDenied → 403` plus entity errors → 404/409 to the error translators
-- [ ] Extend the existing `scripts/e2e_*.sh` (real account, idempotent): allowlist permitting only
-  folder `Clients` / chat `Client chat test`, then assert a permitted send succeeds, a non-listed
-  chat returns access-denied (403 / non-zero exit), `messages recent` returns ≤5, and the resolver
-  works via `@username` and exact title against `Client chat test`
-- [ ] write tests for CLI exit codes and HTTP 403 / entity-error responses
-- [ ] run project tests - must pass before next task
+  (shared `_cli_resolve_chat_and_authorizer` / `_cli_authorizer` helpers wired into messages
+  send+recent, topics create/close/bulk-create, members bulk-add/bulk-remove, folders add-chat,
+  and groups create — destination-folder gating)
+- [x] Map `AccessDenied` to a clear CLI non-zero exit (`ACCESS_DENIED_EXIT_CODE = 3`) and entity
+  ambiguity/not-found to exit code 2 with the resolver's message (`_raise_for_access_or_entity_error`)
+- [x] HTTP (`http_api/*`): add an entity field to request bodies (messages/topics/folders), add
+  `GET /telegram/messages/recent`, build authorizer/resolver from `app.state` via the factory
+  pattern (None → 503; new `resolver_factory` + `message_read_backend_factory`), and add
+  `AccessDenied → 403` plus entity errors → 404/409 via the shared `http_api/access.py` translators
+- [x] Extend the existing `scripts/e2e_cli_test.sh` (real account, idempotent): allowlist permitting
+  only folder `Clients`, then assert a permitted read succeeds, a non-listed chat (`@me`) returns
+  access-denied (non-zero exit), `messages recent` returns ≤5, and the resolver works via exact
+  title and numeric id
+- [x] write tests for CLI exit codes (`tests/test_cli_access.py`) and HTTP 403 / entity-error
+  responses (`tests/test_http_access.py`)
+- [x] run project tests - must pass before next task
 
 ### Task 5: Update error taxonomy, observability, and the documentation guards
 
-- [ ] Add the access-denied category to the `docs/init-plan.md` error taxonomy (§Ошибки)
-- [ ] Log access decisions in observability (denied: chat ref, required level, matched rule or none)
-- [ ] Update `skills/telegram-assistant/SKILL.md` and re-sync it to `~/.claude/skills/...`, and
+- [x] Add the access-denied category to the `docs/init-plan.md` error taxonomy (§Ошибки)
+- [x] Log access decisions in observability (denied: chat ref, required level, matched rule or none)
+- [x] Update `skills/telegram-assistant/SKILL.md` and re-sync it to `~/.claude/skills/...`, and
   update the `README.md` Commands section for `messages recent`, `--entity`, and the `access:` config
-- [ ] write/adjust tests including the `tests/test_skill_inventory.py` guard
-- [ ] run project tests - must pass before next task
+- [x] write/adjust tests including the `tests/test_skill_inventory.py` guard
+- [x] run project tests - must pass before next task
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented (resolver accepts every ref form; access
+- [x] verify all requirements from Overview are implemented (resolver accepts every ref form; access
   gate enforces read/write in the domain layer with allow-all when unconfigured and deny-by-default
   when present; get-recent is a first-class READ op)
-- [ ] run full project test suite
-- [ ] run project linter (`ruff check src tests`) - all issues must be fixed
+- [x] run full project test suite
+- [x] run project linter (`ruff check src tests`) - all issues must be fixed
 
 ## Post-Completion
 
 *Items requiring manual intervention - no checkboxes, informational only*
 
-- Run the live e2e scripts (`scripts/e2e_*.sh`) against an authorized Telethon session with folder
-  `Clients` / chat `Client chat test` — these mutate the real test account and are not run by `pytest`.
+- Run the live e2e scripts (`scripts/e2e_*.sh`) against an authorized Telethon session with the
+  configured `default_chat_folder.folder_name` set to `Clients` (containing chat `Client chat test`)
+  — these mutate the real test account and are not run by `pytest`.
 - Delete the source draft `docs/draft-access-control-entity-resolver.md` once this plan is adopted.
 - Install the `ralphex` CLI to execute this plan.

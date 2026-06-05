@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field, model_validator
 
+from telegram_assistant.access import AccessDenied, AccessLevel
 from telegram_assistant.folders import (
     AmbiguousChatNameError,
     ChatNotFoundError,
@@ -15,6 +16,11 @@ from telegram_assistant.folders import (
     FolderIdMismatchError,
     FolderNotFoundError,
     resolve_chat_in_folder,
+)
+from telegram_assistant.http_api.access import (
+    build_authorizer,
+    resolve_entity_chat_id,
+    translate_access_error,
 )
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.persistence.store import OperationStore
@@ -40,10 +46,30 @@ from telegram_assistant.topics import (
 from telegram_assistant.worker.queue import WorkerQueue
 
 
+def _validate_chat_ref(
+    *,
+    telegram_chat_id: int | None,
+    chat_name: str | None,
+    entity: str | int | None,
+    folder_name: str | None,
+) -> None:
+    """Shared chat-reference shape check: exactly one of id / name / entity."""
+    refs = sum(
+        [telegram_chat_id is not None, chat_name is not None, entity is not None]
+    )
+    if refs != 1:
+        raise ValueError(
+            "provide exactly one of telegram_chat_id, chat_name, or entity"
+        )
+    if chat_name is not None and folder_name is None:
+        raise ValueError("chat_name requires folder_name")
+
+
 class TopicCreateBody(BaseModel):
     topic_name: str = Field(..., min_length=1)
     telegram_chat_id: int | None = None
     chat_name: str | None = None
+    entity: str | int | None = None
     folder_name: str | None = None
     folder_id: int | None = None
     # Generic idempotency anchor. ``planfix_task_id`` is a backward-compat alias.
@@ -57,30 +83,31 @@ class TopicCreateBody(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_chat_ref(self) -> TopicCreateBody:
-        if (self.telegram_chat_id is None) == (self.chat_name is None):
-            raise ValueError(
-                "provide exactly one of telegram_chat_id or chat_name"
-            )
-        if self.chat_name is not None and self.folder_name is None:
-            raise ValueError("chat_name requires folder_name")
+        _validate_chat_ref(
+            telegram_chat_id=self.telegram_chat_id,
+            chat_name=self.chat_name,
+            entity=self.entity,
+            folder_name=self.folder_name,
+        )
         return self
 
 
 class TopicCloseBody(BaseModel):
     telegram_chat_id: int | None = None
     chat_name: str | None = None
+    entity: str | int | None = None
     folder_name: str | None = None
     folder_id: int | None = None
     reason: str | None = None
 
     @model_validator(mode="after")
     def _exactly_one_chat_ref(self) -> TopicCloseBody:
-        if (self.telegram_chat_id is None) == (self.chat_name is None):
-            raise ValueError(
-                "provide exactly one of telegram_chat_id or chat_name"
-            )
-        if self.chat_name is not None and self.folder_name is None:
-            raise ValueError("chat_name requires folder_name")
+        _validate_chat_ref(
+            telegram_chat_id=self.telegram_chat_id,
+            chat_name=self.chat_name,
+            entity=self.entity,
+            folder_name=self.folder_name,
+        )
         return self
 
 
@@ -100,6 +127,7 @@ class BulkTopicCreateBody(BaseModel):
     items: list[BulkTopicItemBody] = Field(..., min_length=1)
     telegram_chat_id: int | None = None
     chat_name: str | None = None
+    entity: str | int | None = None
     folder_name: str | None = None
     folder_id: int | None = None
     continue_on_error: bool = True
@@ -107,12 +135,12 @@ class BulkTopicCreateBody(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_chat_ref(self) -> BulkTopicCreateBody:
-        if (self.telegram_chat_id is None) == (self.chat_name is None):
-            raise ValueError(
-                "provide exactly one of telegram_chat_id or chat_name"
-            )
-        if self.chat_name is not None and self.folder_name is None:
-            raise ValueError("chat_name requires folder_name")
+        _validate_chat_ref(
+            telegram_chat_id=self.telegram_chat_id,
+            chat_name=self.chat_name,
+            entity=self.entity,
+            folder_name=self.folder_name,
+        )
         return self
 
 
@@ -175,10 +203,13 @@ async def _resolve_chat_id_generic(
     *,
     telegram_chat_id: int | None,
     chat_name: str | None,
+    entity: str | int | None = None,
     folder_name: str | None,
     folder_id: int | None,
     request: Request,
 ) -> int:
+    if entity is not None:
+        return await resolve_entity_chat_id(request, entity)
     if telegram_chat_id is not None:
         return telegram_chat_id
     folder_backend = _folder_backend_optional(request)
@@ -199,12 +230,24 @@ async def _resolve_chat_id_generic(
     return chat.chat_id
 
 
+async def _enforce_write(request: Request, chat_id: int) -> None:
+    """Require WRITE on ``chat_id`` for the active policy, raising 403 on deny."""
+    authorizer = build_authorizer(
+        request, folder_backend=_folder_backend_optional(request)
+    )
+    try:
+        await authorizer.require(chat_id, AccessLevel.WRITE)
+    except AccessDenied as exc:
+        raise translate_access_error(exc) from exc
+
+
 async def _resolve_chat_id(
     body: TopicCreateBody, request: Request
 ) -> int:
     return await _resolve_chat_id_generic(
         telegram_chat_id=body.telegram_chat_id,
         chat_name=body.chat_name,
+        entity=body.entity,
         folder_name=body.folder_name,
         folder_id=body.folder_id,
         request=request,
@@ -246,6 +289,7 @@ def build_router() -> APIRouter:
         backend = _topic_backend_or_503(request)
         store = _store_or_503(request)
         chat_id = await _resolve_chat_id(body, request)
+        await _enforce_write(request, chat_id)
 
         domain_request = TopicCreateRequest(
             telegram_chat_id=chat_id,
@@ -296,10 +340,12 @@ def build_router() -> APIRouter:
         chat_id = await _resolve_chat_id_generic(
             telegram_chat_id=body.telegram_chat_id,
             chat_name=body.chat_name,
+            entity=body.entity,
             folder_name=body.folder_name,
             folder_id=body.folder_id,
             request=request,
         )
+        await _enforce_write(request, chat_id)
         queue = _worker_queue_for_request(request)
 
         domain_request = BulkTopicCreateRequest(
@@ -363,10 +409,12 @@ def build_router() -> APIRouter:
         chat_id = await _resolve_chat_id_generic(
             telegram_chat_id=body.telegram_chat_id,
             chat_name=body.chat_name,
+            entity=body.entity,
             folder_name=body.folder_name,
             folder_id=body.folder_id,
             request=request,
         )
+        await _enforce_write(request, chat_id)
 
         domain_request = TopicCloseRequest(
             telegram_chat_id=chat_id,
