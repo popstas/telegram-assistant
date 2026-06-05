@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Documentation
+
+- Add AGENTS.md documenting the release workflow
+
 ### Task
 
 - Mark PyPI publishing done (v0.2.1 live)
