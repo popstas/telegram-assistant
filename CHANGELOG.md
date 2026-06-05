@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## v0.2.1 - 2026-06-05
 
 ### Miscellaneous
 
