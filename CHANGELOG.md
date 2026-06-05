@@ -73,5 +73,6 @@
 
 ### Task
 
+- Add integration/agent-setup layer (INTEGRATION.md)
 - Add project rename (telegram-planfix-assistant -> telegram-?)
 
