@@ -5,6 +5,7 @@
 
 ### Features
 
+- Promote get-recent-messages to a first-class read op
 - Add access-control config and authorizer enforced in the domain layer
 - Add shared entity resolver
 

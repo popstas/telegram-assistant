@@ -142,19 +142,25 @@ there is a real read operation to protect:
 
 ### Task 4: Wire the resolver, authorizer, and read op into CLI and HTTP
 
-- [ ] CLI (`cli/main.py`): accept `--entity` (resolved via the resolver) alongside existing
+- [x] CLI (`cli/main.py`): accept `--entity` (resolved via the resolver) alongside existing
   `--chat-id`/`--chat-name` across messages/groups/topics/members/folders; add
   `messages recent [--entity] [--limit 5]`; build the `Authorizer` + resolver from loaded config
-- [ ] Map `AccessDenied` to a clear CLI non-zero exit and entity ambiguity/not-found to clear messages
-- [ ] HTTP (`http_api/*`): add an entity field to request bodies, add `GET /telegram/messages/recent`,
-  build authorizer/resolver from `app.state` via the factory pattern (None → 503), and add
-  `AccessDenied → 403` plus entity errors → 404/409 to the error translators
-- [ ] Extend the existing `scripts/e2e_*.sh` (real account, idempotent): allowlist permitting only
-  folder `Clients` / chat `Client chat test`, then assert a permitted send succeeds, a non-listed
-  chat returns access-denied (403 / non-zero exit), `messages recent` returns ≤5, and the resolver
-  works via `@username` and exact title against `Client chat test`
-- [ ] write tests for CLI exit codes and HTTP 403 / entity-error responses
-- [ ] run project tests - must pass before next task
+  (shared `_cli_resolve_chat_and_authorizer` / `_cli_authorizer` helpers wired into messages
+  send+recent, topics create/close/bulk-create, members bulk-add/bulk-remove, folders add-chat,
+  and groups create — destination-folder gating)
+- [x] Map `AccessDenied` to a clear CLI non-zero exit (`ACCESS_DENIED_EXIT_CODE = 3`) and entity
+  ambiguity/not-found to exit code 2 with the resolver's message (`_raise_for_access_or_entity_error`)
+- [x] HTTP (`http_api/*`): add an entity field to request bodies (messages/topics/folders), add
+  `GET /telegram/messages/recent`, build authorizer/resolver from `app.state` via the factory
+  pattern (None → 503; new `resolver_factory` + `message_read_backend_factory`), and add
+  `AccessDenied → 403` plus entity errors → 404/409 via the shared `http_api/access.py` translators
+- [x] Extend the existing `scripts/e2e_cli_test.sh` (real account, idempotent): allowlist permitting
+  only folder `Clients`, then assert a permitted read succeeds, a non-listed chat (`@me`) returns
+  access-denied (non-zero exit), `messages recent` returns ≤5, and the resolver works via exact
+  title and numeric id
+- [x] write tests for CLI exit codes (`tests/test_cli_access.py`) and HTTP 403 / entity-error
+  responses (`tests/test_http_access.py`)
+- [x] run project tests - must pass before next task
 
 ### Task 5: Update error taxonomy, observability, and the documentation guards
 

@@ -11,6 +11,7 @@ from fastapi import APIRouter, FastAPI, Request
 
 from telegram_assistant import __version__
 from telegram_assistant.config import AppConfig, load_config
+from telegram_assistant.entities import EntityResolver
 from telegram_assistant.folders import FolderBackend
 from telegram_assistant.groups import GroupBackend
 from telegram_assistant.health import collect_health, default_database_path
@@ -21,7 +22,7 @@ from telegram_assistant.http_api.members import build_router as build_members_ro
 from telegram_assistant.http_api.messages import build_router as build_messages_router
 from telegram_assistant.http_api.topics import build_router as build_topics_router
 from telegram_assistant.members import MemberAddBackend, MemberRemoveBackend
-from telegram_assistant.messages import MessageBackend
+from telegram_assistant.messages import MessageBackend, MessageReadBackend
 from telegram_assistant.observability.logging import configure_logging
 from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.plugins import build_registry
@@ -36,6 +37,8 @@ TopicBackendFactory = Callable[[Request], TopicBackend | None]
 MemberBackendFactory = Callable[[Request], MemberAddBackend | None]
 MemberRemoveBackendFactory = Callable[[Request], MemberRemoveBackend | None]
 MessageBackendFactory = Callable[[Request], MessageBackend | None]
+MessageReadBackendFactory = Callable[[Request], MessageReadBackend | None]
+ResolverFactory = Callable[[Request], EntityResolver | None]
 
 
 def _build_health_router() -> APIRouter:
@@ -173,6 +176,53 @@ def _default_group_backend_factory(
     return _factory
 
 
+def _default_message_read_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> MessageReadBackendFactory:
+    """Build a Telethon-backed message-read backend factory for the get-recent op.
+
+    Mirrors :func:`_default_folder_backend_factory`: returns ``None`` until a
+    Telethon client is available so the read endpoint can return 503.
+    """
+
+    def _factory(_request: Request) -> MessageReadBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonMessageReadBackend,
+        )
+
+        return TelethonMessageReadBackend(client)
+
+    return _factory
+
+
+def _default_resolver_factory(
+    session_manager: TelethonSessionManager | None,
+) -> ResolverFactory:
+    """Build a Telethon-backed entity-resolver factory.
+
+    Mirrors :func:`_default_folder_backend_factory`: returns ``None`` until a
+    Telethon client is available so callers needing entity resolution can
+    return 503 rather than silently 500.
+    """
+
+    def _factory(_request: Request) -> EntityResolver | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.entities import TelethonEntityResolver
+
+        return TelethonEntityResolver(client)
+
+    return _factory
+
+
 def create_app(
     config: AppConfig | None = None,
     *,
@@ -184,6 +234,8 @@ def create_app(
     member_backend_factory: MemberBackendFactory | None = None,
     member_remove_backend_factory: MemberRemoveBackendFactory | None = None,
     message_backend_factory: MessageBackendFactory | None = None,
+    message_read_backend_factory: MessageReadBackendFactory | None = None,
+    resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
 ) -> FastAPI:
     """Build a FastAPI instance.
@@ -302,10 +354,20 @@ def create_app(
         else _default_member_backend_factory(session_manager)
     )
     app.state.member_remove_backend_factory = member_remove_backend_factory
+    app.state.resolver_factory = (
+        resolver_factory
+        if resolver_factory is not None
+        else _default_resolver_factory(session_manager)
+    )
     # When no dedicated message backend is supplied, the messages router falls
     # back to the topic backend factory at request time (the production
     # Telethon adapter for topics already implements `send_message`).
     app.state.message_backend_factory = message_backend_factory
+    app.state.message_read_backend_factory = (
+        message_read_backend_factory
+        if message_read_backend_factory is not None
+        else _default_message_read_backend_factory(session_manager)
+    )
     if operation_store is not None:
         app.state.operation_store = operation_store
     else:

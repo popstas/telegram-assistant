@@ -183,6 +183,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
+| `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
 | `folders` | `add-chat` | Move an existing chat into a folder. | `telegram-assistant folders add-chat ...` |
 | `operations` | `status` | Read-only: show queue status for a previously created operation. | `telegram-assistant operations status ...` |

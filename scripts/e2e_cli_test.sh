@@ -105,5 +105,66 @@ telegram-assistant members bulk-remove \
 step "CLI: operations status --operation-id ${op_id}"
 telegram-assistant operations status --operation-id "${op_id}" | jq .
 
+# --- get-recent read op + entity resolver ----------------------------------
+
+step "CLI: messages recent --chat-name '${CHAT_TITLE}' (default limit 5)"
+recent_json=$(telegram-assistant messages recent \
+    --chat-name "${CHAT_TITLE}" \
+    --folder-name "${FOLDER}")
+echo "${recent_json}" | jq '{telegram_chat_id, limit, count}'
+recent_count=$(echo "${recent_json}" | jq -r '.count')
+if [[ "${recent_count}" -gt 5 ]]; then
+    echo "messages recent returned ${recent_count} > 5 with the default limit" >&2
+    exit 1
+fi
+
+step "CLI: messages recent --entity '${CHAT_TITLE}' (exact-title resolver, --limit 3)"
+telegram-assistant messages recent \
+    --entity "${CHAT_TITLE}" \
+    --limit 3 | jq '{telegram_chat_id, limit, count}'
+
+step "CLI: messages recent --entity '${chat_id}' (numeric resolver)"
+telegram-assistant messages recent --entity "${chat_id}" --limit 1 \
+    | jq '{telegram_chat_id, count}'
+
+# --- access allowlist (deny-by-default) ------------------------------------
+# Derive a config that allows WRITE only on folder "${FOLDER}"; everything
+# else is denied. A permitted read succeeds; an unlisted chat (Saved Messages
+# via @me) returns a loud access-denied non-zero exit.
+
+step "CLI: access allowlist — derive a folder-scoped policy"
+acl_config=$(mktemp --suffix=.yml)
+trap 'rm -f "${remove_tmp}" "${acl_config}"' EXIT
+: "${SOURCE_CONFIG:=data/config.yml}"
+python3 - "${FOLDER}" "${acl_config}" "${SOURCE_CONFIG}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+folder, out, src = sys.argv[1], sys.argv[2], sys.argv[3]
+data = yaml.safe_load(Path(src).read_text(encoding="utf-8"))
+data["telegram"]["access"] = {
+    "rules": [{"folder": folder, "permission": "write"}]
+}
+Path(out).write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+print(f"wrote allowlist config to {out}")
+PY
+
+step "CLI: access allowlist — permitted read (chat in '${FOLDER}') succeeds"
+telegram-assistant messages recent \
+    --chat-name "${CHAT_TITLE}" \
+    --folder-name "${FOLDER}" \
+    --config "${acl_config}" | jq '{telegram_chat_id, count}'
+
+step "CLI: access allowlist — unlisted chat (@me) must be denied (non-zero exit)"
+if telegram-assistant messages recent \
+        --entity "@me" \
+        --config "${acl_config}" >/dev/null 2>&1; then
+    echo "expected access-denied for an unlisted chat, but the call succeeded" >&2
+    exit 1
+fi
+echo "ok: unlisted chat was denied as expected"
+
 echo
 echo "cli e2e flow completed — review the responses above and the chats on Telegram"

@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field, model_validator
 
+from telegram_assistant.access import AccessDenied
 from telegram_assistant.folders import (
     AmbiguousChatNameError,
     ChatNotFoundError,
@@ -18,12 +19,18 @@ from telegram_assistant.folders import (
     inspect_folder,
     resolve_chat_in_folder,
 )
+from telegram_assistant.http_api.access import (
+    build_authorizer,
+    resolve_entity_chat_id,
+    translate_access_error,
+)
 from telegram_assistant.http_api.auth import BearerAuth
 
 
 class AddChatRequest(BaseModel):
     chat_id: int | None = None
     chat_name: str | None = None
+    entity: str | int | None = None
     folder_id: int | None = Field(
         default=None,
         description="Optional cross-check against the resolved folder id.",
@@ -31,8 +38,13 @@ class AddChatRequest(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_chat_ref(self) -> AddChatRequest:
-        if (self.chat_id is None) == (self.chat_name is None):
-            raise ValueError("provide exactly one of chat_id or chat_name")
+        refs = sum(
+            [self.chat_id is not None, self.chat_name is not None, self.entity is not None]
+        )
+        if refs != 1:
+            raise ValueError(
+                "provide exactly one of chat_id, chat_name, or entity"
+            )
         return self
 
 
@@ -106,10 +118,15 @@ def build_router() -> APIRouter:
         request: Request,
     ) -> dict[str, Any]:
         backend = _backend_or_503(request)
+        if body.entity is not None:
+            chat_ref: str | int = await resolve_entity_chat_id(request, body.entity)
+        elif body.chat_id is not None:
+            chat_ref = body.chat_id
+        else:
+            chat_ref = None  # type: ignore[assignment]
+        authorizer = build_authorizer(request, folder_backend=backend)
         try:
-            if body.chat_id is not None:
-                chat_ref: str | int = body.chat_id
-            else:
+            if chat_ref is None:
                 # chat_name -> chat_id via folder membership lookup
                 resolved = await resolve_chat_in_folder(
                     backend,
@@ -123,7 +140,10 @@ def build_router() -> APIRouter:
                 folder_name=folder_name,
                 chat_ref=chat_ref,
                 folder_id=body.folder_id,
+                authorizer=authorizer,
             )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
         except HTTPException:
             raise
         except Exception as exc:
