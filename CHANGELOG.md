@@ -5,6 +5,7 @@
 
 ### Features
 
+- Make Planfix an optional plugin; generic external_ref idempotency anchor
 - Verify acceptance criteria for first-day fixes
 - Clean up service messages after group creation
 - Verify chat existence before replaying group_create
