@@ -73,6 +73,7 @@
 
 ### Task
 
+- Add scheduled msgs, mute, folder-remove, reactions, forward, get-recent
 - Support sending media (photos, videos, files)
 - Make Planfix an optional plugin, not core
 - Settle rename target -> telegram-assistant
