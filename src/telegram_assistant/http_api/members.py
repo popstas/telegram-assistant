@@ -189,13 +189,16 @@ def build_router() -> APIRouter:
         queue = _worker_queue_for_request(request)
 
         # Mirror the CLI's protected-account guard so an authenticated caller
-        # can't accidentally (or deliberately) kick the reserve admins or the
-        # @planfix_bot service account that the integration relies on. The
-        # caller must pass `force: true` to remove protected accounts.
+        # can't accidentally (or deliberately) kick the reserve admins or any
+        # plugin-protected service account (e.g. the Planfix bot). The caller
+        # must pass `force: true` to remove protected accounts.
         if not body.force:
             config = getattr(request.app.state, "config", None)
             if config is not None and getattr(config, "telegram", None) is not None:
-                protected = protected_user_set(config=config.telegram)
+                protected = protected_user_set(
+                    config=config.telegram,
+                    plugins=request.app.state.plugin_registry,
+                )
                 blocked: list[str] = []
                 for it in body.items:
                     try:

@@ -39,7 +39,7 @@ def test_log_line_is_json_with_context_fields() -> None:
     bind_request_context(
         operation_id="op-1",
         request_id="req-1",
-        planfix_task_id="42",
+        external_ref="42",
         chat_name="Client chat",
         topic_name="Topic 1",
         telegram_chat_id=-1001,
@@ -54,7 +54,7 @@ def test_log_line_is_json_with_context_fields() -> None:
     assert record["event"] == "topic_created"
     assert record["operation_id"] == "op-1"
     assert record["request_id"] == "req-1"
-    assert record["planfix_task_id"] == "42"
+    assert record["external_ref"] == "42"
     assert record["chat_name"] == "Client chat"
     assert record["topic_name"] == "Topic 1"
     assert record["telegram_chat_id"] == -1001

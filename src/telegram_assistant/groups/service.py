@@ -1,18 +1,19 @@
 """Group-creation domain shared by HTTP, CLI, and worker.
 
 The :func:`create_group` function is the single source of truth for the
-"create a Telegram supergroup for a Planfix client" workflow. It orchestrates
-the supergroup creation, member/admin/reserve population, invite-link creation,
-folder placement, and optional ``/task <id>`` service message.
+"create a Telegram supergroup" workflow. It orchestrates the supergroup
+creation, member/admin/reserve population, invite-link creation, and folder
+placement. Integration-specific side effects (e.g. a ``/task <id>`` service
+message) are delegated to the optional plugin layer via
+:meth:`PluginRegistry.after_group_create`, so the core stays integration-free.
 
 Idempotency is anchored at the persistence layer: the operation key is derived
-from ``planfix_task_id`` if present, otherwise the exact ``title``. A replay of
-a completed call returns the saved result without touching Telegram.
+from ``external_ref`` if present, otherwise the exact ``title``. A replay of a
+completed call returns the saved result without touching Telegram.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -31,14 +32,10 @@ from telegram_assistant.persistence.models import (
     OperationStatus,
 )
 from telegram_assistant.persistence.store import OperationStore
+from telegram_assistant.plugins import PluginRegistry
 from telegram_assistant.worker.queue import FloodWaitError
 
 logger = logging.getLogger(__name__)
-
-PLANFIX_BOT_USERNAME = "@planfix_bot"
-
-# How often to poll for @planfix_bot's reply during Planfix-message cleanup.
-_TASK_REPLY_POLL_INTERVAL = 1.0
 
 
 class GroupError(RuntimeError):
@@ -88,7 +85,7 @@ class GroupCreateRequest:
     """Input shape shared by HTTP, CLI, and tests."""
 
     title: str
-    planfix_task_id: int | str | None = None
+    external_ref: int | str | None = None
     about: str | None = None
     admins: Sequence[str] = ()
     members: Sequence[str] = ()
@@ -105,7 +102,7 @@ class GroupCreateRequest:
     def to_payload(self) -> dict[str, Any]:
         return {
             "title": self.title,
-            "planfix_task_id": self.planfix_task_id,
+            "external_ref": self.external_ref,
             "about": self.about,
             "admins": list(self.admins),
             "members": list(self.members),
@@ -131,7 +128,7 @@ class GroupCreateResult:
 
     telegram_chat_id: int
     title: str
-    planfix_task_id: int | str | None
+    external_ref: int | str | None
     invite_link: str | None
     folder_id: int | None
     folder_name: str | None
@@ -147,7 +144,7 @@ class GroupCreateResult:
         return {
             "telegram_chat_id": self.telegram_chat_id,
             "title": self.title,
-            "planfix_task_id": self.planfix_task_id,
+            "external_ref": self.external_ref,
             "invite_link": self.invite_link,
             "folder_id": self.folder_id,
             "folder_name": self.folder_name,
@@ -165,7 +162,8 @@ class GroupCreateResult:
         return cls(
             telegram_chat_id=int(payload["telegram_chat_id"]),
             title=str(payload["title"]),
-            planfix_task_id=payload.get("planfix_task_id"),
+            # Legacy records persisted ``planfix_task_id``; accept both on read.
+            external_ref=payload.get("external_ref", payload.get("planfix_task_id")),
             invite_link=payload.get("invite_link"),
             folder_id=payload.get("folder_id"),
             folder_name=payload.get("folder_name"),
@@ -287,6 +285,7 @@ async def _execute_create(
     folder_backend: FolderBackend | None,
     request: GroupCreateRequest,
     config: TelegramConfig,
+    plugins: PluginRegistry,
 ) -> GroupCreateResult:
     enable_topics = (
         request.enable_topics
@@ -299,10 +298,10 @@ async def _execute_create(
         else config.defaults.create_invite_link
     )
 
-    # The postfix is a presentation concern only: it lands on the Telegram
-    # title but never enters the idempotency key (keyed on raw request.title),
-    # so Planfix replays of the same task still match.
-    effective_title = f"{request.title}{config.defaults.group_title_postfix}"
+    # A plugin-provided postfix is a presentation concern only: it lands on the
+    # Telegram title but never enters the idempotency key (keyed on raw
+    # request.title), so replays of the same external_ref still match.
+    effective_title = f"{request.title}{plugins.title_postfix()}"
 
     chat_id = await backend.create_supergroup(
         title=effective_title,
@@ -464,46 +463,21 @@ async def _execute_create(
         folder_id = snapshot.folder_id
         folder_name = snapshot.folder_name
 
-    task_message_sent = False
-    task_message_id: int | None = None
-    if request.planfix_task_id is not None:
-        bot_in_group = any(
-            u.lstrip("@").lower() == PLANFIX_BOT_USERNAME.lstrip("@").lower()
-            for u in members_added
-        )
-        if bot_in_group:
-            try:
-                task_message_id = await backend.send_message(
-                    chat_id=chat_id, text=f"/task {request.planfix_task_id}"
-                )
-                task_message_sent = True
-            except Exception as exc:
-                skipped.append(
-                    {"step": "task_message", "reason": str(exc)}
-                )
-
-    # Best-effort cleanup of the chat's service noise: @planfix_bot's welcome
-    # message, our `/task` command, and the bot's reply to it. Only runs when
-    # the command actually went out (bot present) and the operator hasn't
-    # disabled it. Any failure is recorded in `skipped` and never fails the
-    # create — the chat already exists and this is purely cosmetic.
-    if (
-        config.defaults.cleanup_planfix_messages
-        and task_message_sent
-        and task_message_id is not None
-    ):
-        await _cleanup_planfix_messages(
-            backend=backend,
-            chat_id=chat_id,
-            task_message_id=task_message_id,
-            wait_seconds=config.defaults.task_reply_wait_seconds,
-            skipped=skipped,
-        )
+    # Delegate post-create side effects (service messages, welcome cleanup) to
+    # the active plugins. With no plugin enabled this is a no-op and the core
+    # stays integration-free. Best-effort: failures land in `skipped`.
+    task_message_sent = await plugins.after_group_create(
+        backend=backend,
+        chat_id=chat_id,
+        external_ref=request.external_ref,
+        members_added=members_added,
+        skipped=skipped,
+    )
 
     return GroupCreateResult(
         telegram_chat_id=chat_id,
         title=effective_title,
-        planfix_task_id=request.planfix_task_id,
+        external_ref=request.external_ref,
         invite_link=invite_link,
         folder_id=folder_id,
         folder_name=folder_name,
@@ -516,88 +490,6 @@ async def _execute_create(
     )
 
 
-async def _cleanup_planfix_messages(
-    *,
-    backend: GroupBackend,
-    chat_id: int,
-    task_message_id: int,
-    wait_seconds: int,
-    skipped: list[dict[str, Any]],
-) -> None:
-    """Delete @planfix_bot's welcome message, our `/task` command, and the
-    bot's reply to it.
-
-    Polls ``get_recent_messages`` up to ``wait_seconds`` for the bot reply
-    (a bot message replying to ``task_message_id``). Whether or not the reply
-    arrives, the welcome message and the command are still deleted; a missing
-    reply is recorded in ``skipped`` rather than failing the create. Every
-    backend error here (including a throttle) is best-effort: the chat already
-    exists and cleanup is cosmetic.
-    """
-    bot_handle = PLANFIX_BOT_USERNAME.lstrip("@").lower()
-
-    def _is_bot(msg: dict[str, Any]) -> bool:
-        sender = str(msg.get("sender_username") or "").lstrip("@").lower()
-        return sender == bot_handle
-
-    messages: list[dict[str, Any]] = []
-    reply_id: int | None = None
-    elapsed = 0.0
-    while True:
-        try:
-            messages = list(
-                await backend.get_recent_messages(chat_id=chat_id, limit=20)
-            )
-        except Exception as exc:
-            skipped.append({"step": "cleanup_get_messages", "reason": str(exc)})
-            return
-        reply = next(
-            (
-                m
-                for m in messages
-                if _is_bot(m) and m.get("reply_to_msg_id") == task_message_id
-            ),
-            None,
-        )
-        if reply is not None:
-            reply_id = int(reply["id"])
-            break
-        if elapsed >= wait_seconds:
-            break
-        await asyncio.sleep(_TASK_REPLY_POLL_INTERVAL)
-        elapsed += _TASK_REPLY_POLL_INTERVAL
-
-    if reply_id is None:
-        skipped.append(
-            {
-                "step": "cleanup_bot_reply",
-                "reason": "bot reply did not arrive within wait window",
-            }
-        )
-
-    # The welcome message is any bot message that is not the reply we just
-    # matched. Collect those, then the command, then the reply — deduped.
-    to_delete: list[int] = [
-        int(m["id"]) for m in messages if _is_bot(m) and int(m["id"]) != reply_id
-    ]
-    to_delete.append(task_message_id)
-    if reply_id is not None:
-        to_delete.append(reply_id)
-
-    seen: set[int] = set()
-    unique: list[int] = []
-    for mid in to_delete:
-        if mid in seen:
-            continue
-        seen.add(mid)
-        unique.append(mid)
-
-    try:
-        await backend.delete_messages(chat_id=chat_id, message_ids=unique)
-    except Exception as exc:
-        skipped.append({"step": "cleanup_delete", "reason": str(exc)})
-
-
 async def create_group(
     *,
     backend: GroupBackend,
@@ -605,6 +497,7 @@ async def create_group(
     store: OperationStore,
     config: TelegramConfig,
     request: GroupCreateRequest,
+    plugins: PluginRegistry | None = None,
 ) -> tuple[GroupCreateResult, OperationRecord]:
     """Create a group, or replay the saved result for the same idempotency key.
 
@@ -618,11 +511,13 @@ async def create_group(
     * new row → run the live workflow, transition to `completed`/`failed`/
       `needs_review` depending on the outcome
     """
-    if not request.title.strip() and request.planfix_task_id is None:
-        raise ValueError("group create requires planfix_task_id or non-empty title")
+    if plugins is None:
+        plugins = PluginRegistry()
+    if not request.title.strip() and request.external_ref is None:
+        raise ValueError("group create requires external_ref or non-empty title")
 
     key = idempotency.group_create_key(
-        planfix_task_id=request.planfix_task_id, title=request.title
+        external_ref=request.external_ref, title=request.title
     )
     begin = store.begin_operation(
         operation_type=idempotency.GROUP_CREATE,
@@ -686,6 +581,7 @@ async def create_group(
             folder_backend=folder_backend,
             request=request,
             config=config,
+            plugins=plugins,
         )
     except FolderPeerFailureError as exc:
         op = store.mark_needs_review(operation_id, str(exc))

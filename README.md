@@ -89,9 +89,6 @@ telegram:
     enable_topics: true
     create_invite_link: true
     topics_layout: "list"        # "list" | "tabs" — applied after groups create
-    group_title_postfix: ""      # appended to the Telegram chat title at creation
-    cleanup_planfix_messages: false  # delete welcome / /task / bot-reply after creation (opt-in)
-    task_reply_wait_seconds: 5       # how long to poll for @planfix_bot's /task reply
     default_member_permissions:
       create_topics: true        # let ordinary members create forum topics
       pin_messages: true         # let ordinary members pin messages
@@ -99,11 +96,27 @@ telegram:
 
 `topics_layout` controls how the forum opens after `groups create`: `"list"` shows topics as a vertical list (Telegram's default), `"tabs"` shows them as horizontal tabs. The CLI `groups create --topics-layout` and `groups set-layout --layout` flags, and the `POST /telegram/groups` / `POST /telegram/groups/layout` bodies (`topics_layout`), override the default per call.
 
-`group_title_postfix` is appended to the Telegram chat title at creation time (e.g. a shared suffix Planfix scenarios would otherwise add). It is deliberately kept out of the idempotency key, so a Planfix replay still matches on the raw title.
-
 `default_member_permissions` sets the new group's default banned rights so ordinary members can `create_topics` and `pin_messages`. Other default rights are left untouched.
 
-`cleanup_planfix_messages` (default `false`, opt-in) deletes @planfix_bot's welcome message, the `/task <id>` service command, and the bot's reply to it after the group is populated, so the chat starts clean. `task_reply_wait_seconds` is how long the worker polls for the bot's reply before deleting only the welcome + command. All cleanup is best-effort: failures are recorded in the operation's `skipped` list and never fail the create.
+### Idempotency anchor
+
+Group/topic creation is idempotent on a generic `external_ref` (CLI `--external-ref`, HTTP `external_ref`). For backward compatibility the CLI `--planfix-task-id` flag and the HTTP `planfix_task_id` field are accepted as aliases that map onto `external_ref`. With no `external_ref`, groups key on the exact title and topics key on `chat_id + topic_name`.
+
+### Planfix plugin (optional, off by default)
+
+Planfix-specific behavior lives behind an opt-in plugin. With it disabled the core has **zero Planfix knowledge** — `external_ref` still anchors idempotency, but there is no `/task <id>` service message, no `@planfix_bot` welcome cleanup, and `@planfix_bot` is not treated as a protected account. Enable it under `plugins`:
+
+```yaml
+plugins:
+  planfix:
+    enabled: true                 # turn on Planfix-specific behavior
+    bot_username: "@planfix_bot"  # group member that receives the /task command
+    group_title_postfix: ""       # appended to the Telegram chat title at creation
+    cleanup_messages: false       # delete welcome / /task / bot-reply after creation (opt-in)
+    task_reply_wait_seconds: 5    # how long to poll for the bot's /task reply
+```
+
+When enabled and `external_ref` is set on a group whose members include `bot_username`, the plugin sends `/task <external_ref>` after creation. `group_title_postfix` is appended to the Telegram chat title at creation time but deliberately kept out of the idempotency key, so a replay of the same `external_ref` still matches on the raw title. `cleanup_messages` (default `false`) deletes the bot's welcome message, the `/task <id>` command, and the bot's reply to it; `task_reply_wait_seconds` is how long to poll for that reply before deleting only the welcome + command. All cleanup is best-effort: failures are recorded in the operation's `skipped` list and never fail the create.
 
 See `docs/plans/20260518-telegram-assistant-mvp.md` for the full configuration schema and feature scope.
 

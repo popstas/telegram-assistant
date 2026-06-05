@@ -1,7 +1,6 @@
 """Group-creation domain shared by HTTP, CLI, and the worker."""
 
 from telegram_assistant.groups.service import (
-    PLANFIX_BOT_USERNAME,
     GroupBackend,
     GroupCreateFailed,
     GroupCreateNeedsReview,
@@ -20,7 +19,6 @@ from telegram_assistant.groups.service import (
 )
 
 __all__ = [
-    "PLANFIX_BOT_USERNAME",
     "GroupBackend",
     "GroupCreateFailed",
     "GroupCreateNeedsReview",

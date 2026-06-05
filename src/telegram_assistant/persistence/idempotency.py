@@ -20,11 +20,11 @@ MESSAGE_SEND = "message_send"
 FOLDER_ADD_CHAT = "folder_add_chat"
 
 
-def group_create_key(*, planfix_task_id: int | str | None, title: str | None) -> str:
-    if planfix_task_id is not None and str(planfix_task_id).strip():
-        return f"{GROUP_CREATE}:planfix_task_id={planfix_task_id}"
+def group_create_key(*, external_ref: int | str | None, title: str | None) -> str:
+    if external_ref is not None and str(external_ref).strip():
+        return f"{GROUP_CREATE}:external_ref={external_ref}"
     if title is None or not title.strip():
-        raise ValueError("group_create requires planfix_task_id or title")
+        raise ValueError("group_create requires external_ref or title")
     return f"{GROUP_CREATE}:title={title.strip()}"
 
 
@@ -38,15 +38,15 @@ def group_layout_set_key(*, telegram_chat_id: int | str, layout: str) -> str:
 
 def topic_create_key(
     *,
-    planfix_task_id: int | str | None,
+    external_ref: int | str | None,
     telegram_chat_id: int | str | None,
     topic_name: str | None,
 ) -> str:
-    if planfix_task_id is not None and str(planfix_task_id).strip():
-        return f"{TOPIC_CREATE}:planfix_task_id={planfix_task_id}"
+    if external_ref is not None and str(external_ref).strip():
+        return f"{TOPIC_CREATE}:external_ref={external_ref}"
     if telegram_chat_id is None or topic_name is None or not str(topic_name).strip():
         raise ValueError(
-            "topic_create requires planfix_task_id, or telegram_chat_id + topic_name"
+            "topic_create requires external_ref, or telegram_chat_id + topic_name"
         )
     return f"{TOPIC_CREATE}:chat={telegram_chat_id}:name={topic_name.strip()}"
 
@@ -71,10 +71,10 @@ def message_send_key(
 ) -> str:
     """Key for a single message send.
 
-    Messages have no intrinsic Planfix anchor (a single Planfix task may send
-    many messages over its lifetime), so the caller-supplied ``operation_id``
-    is the only stable idempotency anchor. When no ``operation_id`` is given,
-    a fresh UUID is minted so each call is independent.
+    Messages have no intrinsic external anchor (a single workflow may send many
+    messages over its lifetime), so the caller-supplied ``operation_id`` is the
+    only stable idempotency anchor. When no ``operation_id`` is given, a fresh
+    UUID is minted so each call is independent.
     """
     if operation_id is not None and str(operation_id).strip():
         oid = str(operation_id).strip()

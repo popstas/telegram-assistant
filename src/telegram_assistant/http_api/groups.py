@@ -34,6 +34,8 @@ class LayoutSetBody(BaseModel):
 
 class GroupCreateBody(BaseModel):
     title: str = Field(..., min_length=1)
+    # Generic idempotency anchor. ``planfix_task_id`` is a backward-compat alias.
+    external_ref: int | str | None = None
     planfix_task_id: int | str | None = None
     about: str | None = None
     admins: list[str] = Field(default_factory=list)
@@ -47,6 +49,10 @@ class GroupCreateBody(BaseModel):
     folder_name: str | None = None
     folder_id: int | None = None
     skip_folder: bool = False
+
+    @property
+    def effective_external_ref(self) -> int | str | None:
+        return self.external_ref if self.external_ref is not None else self.planfix_task_id
 
 
 def _backends_or_503(
@@ -105,7 +111,7 @@ def build_router() -> APIRouter:
 
         domain_request = GroupCreateRequest(
             title=body.title,
-            planfix_task_id=body.planfix_task_id,
+            external_ref=body.effective_external_ref,
             about=body.about,
             admins=body.admins,
             members=body.members,
@@ -127,6 +133,7 @@ def build_router() -> APIRouter:
                 store=store,
                 config=config.telegram,
                 request=domain_request,
+                plugins=request.app.state.plugin_registry,
             )
         except GroupCreatePending as exc:
             raise HTTPException(

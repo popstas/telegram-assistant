@@ -24,6 +24,7 @@ from telegram_assistant.members import MemberAddBackend, MemberRemoveBackend
 from telegram_assistant.messages import MessageBackend
 from telegram_assistant.observability.logging import configure_logging
 from telegram_assistant.persistence.store import OperationStore
+from telegram_assistant.plugins import build_registry
 from telegram_assistant.telegram_client.session import (
     TelethonSessionManager,
 )
@@ -277,6 +278,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.config = config
+    app.state.plugin_registry = build_registry(config)
     app.state.session_manager = session_manager
     app.state.database_path = database_path
     app.state.folder_backend_factory = (

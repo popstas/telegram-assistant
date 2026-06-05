@@ -36,19 +36,9 @@ class TelegramDefaults(BaseModel):
     enable_topics: bool = True
     create_invite_link: bool = True
     topics_layout: TopicsLayout = "list"
-    # Appended to the Telegram chat title at creation time. Kept out of the
-    # idempotency key so Planfix replays still match on the raw title.
-    group_title_postfix: str = ""
     default_member_permissions: DefaultMemberPermissions = Field(
         default_factory=DefaultMemberPermissions
     )
-    # Opt-in: after creation, delete @planfix_bot's welcome message, our
-    # `/task <id>` command, and the bot's reply to it so the new chat starts
-    # clean. Off by default since it deletes messages in the live chat.
-    cleanup_planfix_messages: bool = False
-    # How long to poll for @planfix_bot's reply to the `/task` command before
-    # giving up and deleting only the welcome + command messages.
-    task_reply_wait_seconds: int = Field(default=5, ge=0)
 
 
 class TelegramConfig(BaseModel):
@@ -57,7 +47,7 @@ class TelegramConfig(BaseModel):
     api_id: int
     api_hash: str = Field(..., min_length=1)
     session_path: str = Field(..., min_length=1)
-    main_account_label: str = Field(default="planfix-assistant-main", min_length=1)
+    main_account_label: str = Field(default="telegram-assistant-main", min_length=1)
     reserve_admins: list[str] = Field(default_factory=list)
     reserve_members: list[str] = Field(default_factory=list)
     default_chat_folder: DefaultChatFolderConfig
@@ -157,6 +147,38 @@ class AlertsConfig(BaseModel):
     error_rate_threshold: float = Field(default=0.5, gt=0.0, le=1.0)
 
 
+class PlanfixPluginConfig(BaseModel):
+    """Config for the optional Planfix integration plugin (off by default).
+
+    When ``enabled`` is false the core has zero Planfix behavior: ``external_ref``
+    still anchors idempotency generically, but the ``/task <id>`` service
+    message, ``@planfix_bot`` welcome/reply cleanup, and ``@planfix_bot``
+    protected-account guard are all inactive.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    # The Planfix service-bot account. Used to decide whether to send the
+    # `/task` message (must be a group member) and as a protected account.
+    bot_username: str = Field(default="@planfix_bot", min_length=1)
+    # Appended to a new group's Telegram title. Kept out of the idempotency key
+    # so replays still match on the raw title.
+    group_title_postfix: str = ""
+    # Opt-in: after creation, delete the bot's welcome message, our `/task <id>`
+    # command, and the bot's reply to it so the new chat starts clean.
+    cleanup_messages: bool = False
+    # How long to poll for the bot's reply to the `/task` command before giving
+    # up and deleting only the welcome + command messages.
+    task_reply_wait_seconds: int = Field(default=5, ge=0)
+
+
+class PluginsConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    planfix: PlanfixPluginConfig = Field(default_factory=PlanfixPluginConfig)
+
+
 class AppConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -165,3 +187,4 @@ class AppConfig(BaseModel):
     queue: QueueConfig = Field(default_factory=QueueConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
+    plugins: PluginsConfig = Field(default_factory=PluginsConfig)

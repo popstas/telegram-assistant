@@ -60,53 +60,53 @@ def test_bootstrap_creates_parent_directory(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_group_create_key_uses_planfix_task_id_when_present() -> None:
+def test_group_create_key_uses_external_ref_when_present() -> None:
     assert (
-        idempotency.group_create_key(planfix_task_id=42, title="anything")
-        == "group_create:planfix_task_id=42"
+        idempotency.group_create_key(external_ref=42, title="anything")
+        == "group_create:external_ref=42"
     )
 
 
 def test_group_create_key_falls_back_to_title() -> None:
     assert (
-        idempotency.group_create_key(planfix_task_id=None, title="  Client A  ")
+        idempotency.group_create_key(external_ref=None, title="  Client A  ")
         == "group_create:title=Client A"
     )
 
 
 def test_group_create_key_requires_one_of_inputs() -> None:
     with pytest.raises(ValueError):
-        idempotency.group_create_key(planfix_task_id=None, title=None)
+        idempotency.group_create_key(external_ref=None, title=None)
     with pytest.raises(ValueError):
-        idempotency.group_create_key(planfix_task_id="", title="")
+        idempotency.group_create_key(external_ref="", title="")
 
 
-def test_topic_create_key_uses_planfix_task_id() -> None:
+def test_topic_create_key_uses_external_ref() -> None:
     assert (
         idempotency.topic_create_key(
-            planfix_task_id="t-77", telegram_chat_id=10, topic_name="ignored"
+            external_ref="t-77", telegram_chat_id=10, topic_name="ignored"
         )
-        == "topic_create:planfix_task_id=t-77"
+        == "topic_create:external_ref=t-77"
     )
 
 
 def test_topic_create_key_falls_back_to_chat_plus_name() -> None:
     assert (
         idempotency.topic_create_key(
-            planfix_task_id=None, telegram_chat_id=-100123, topic_name="Q1 planning"
+            external_ref=None, telegram_chat_id=-100123, topic_name="Q1 planning"
         )
         == "topic_create:chat=-100123:name=Q1 planning"
     )
 
 
-def test_topic_create_key_requires_chat_and_name_when_no_task_id() -> None:
+def test_topic_create_key_requires_chat_and_name_when_no_external_ref() -> None:
     with pytest.raises(ValueError):
         idempotency.topic_create_key(
-            planfix_task_id=None, telegram_chat_id=None, topic_name="x"
+            external_ref=None, telegram_chat_id=None, topic_name="x"
         )
     with pytest.raises(ValueError):
         idempotency.topic_create_key(
-            planfix_task_id=None, telegram_chat_id=1, topic_name=None
+            external_ref=None, telegram_chat_id=1, topic_name=None
         )
 
 

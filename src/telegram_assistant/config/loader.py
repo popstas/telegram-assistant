@@ -13,21 +13,20 @@ CWD_CONFIG_PATH = Path("data/config.yml")
 USER_CONFIG_PATH = Path.home() / ".config" / "telegram-assistant" / "config.yml"
 
 DEFAULT_CONFIG_TEMPLATE = """\
-# Telegram-Planfix Assistant config. Replace REPLACE_ME values before first run.
+# Telegram Assistant config. Replace REPLACE_ME values before first run.
 # See docs/plans/completed/20260518-telegram-assistant-mvp.md for the full spec.
 
 telegram:
   api_id: 0                       # REPLACE_ME — int from https://my.telegram.org
   api_hash: "REPLACE_ME"          # REPLACE_ME — string from https://my.telegram.org
   # proxy_url: "socks5://user:pass@host:1080"  # optional; supports socks5/socks4/http/https
-  session_path: "~/.config/telegram-assistant/sessions/planfix-assistant-main/session.session"
-  main_account_label: planfix-assistant-main
+  session_path: "~/.config/telegram-assistant/sessions/telegram-assistant-main/session.session"
+  main_account_label: telegram-assistant-main
   reserve_admins:
     - "@reserve_account"
-  reserve_members:
-    - "@planfix_bot"
+  reserve_members: []
   default_chat_folder:
-    folder_name: "Planfix clients"  # must already exist in your Telegram account
+    folder_name: "Clients"          # must already exist in your Telegram account
   defaults:
     enable_topics: true
     create_invite_link: true
@@ -46,6 +45,16 @@ queue:
 logging:
   level: INFO
   # telethon_level: WARNING  # uncomment to control Telethon's own log level
+
+# Optional integrations. Off by default; with planfix disabled the core has
+# zero Planfix knowledge (external_ref still anchors idempotency generically).
+# plugins:
+#   planfix:
+#     enabled: true                 # turn on Planfix-specific behavior
+#     bot_username: "@planfix_bot"  # group member that receives the /task command
+#     group_title_postfix: ""       # appended to new group titles (out of idempotency key)
+#     cleanup_messages: false       # delete the bot's welcome/reply + the /task command
+#     task_reply_wait_seconds: 5    # how long to wait for the bot reply before cleanup
 """
 
 

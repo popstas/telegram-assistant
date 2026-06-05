@@ -78,6 +78,7 @@
 
 ### Task
 
+- Rename complete (remote+dir+code merged); drop leftover item
 - Settle Planfix-plugin design; clear completed rename item
 - Add HTTP MCP server (Google OAuth); scope reads in access control
 - Add scheduled msgs, mute, folder-remove, reactions, forward, get-recent

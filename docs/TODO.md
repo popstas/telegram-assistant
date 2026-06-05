@@ -1,6 +1,6 @@
 # TODO
 
-- [ ] Make Planfix an optional **plugin**, not a core dependency (`telegram-assistant` is broader than Planfix).
+- [x] Make Planfix an optional **plugin**, not a core dependency (`telegram-assistant` is broader than Planfix).
   Decouple Planfix-specific bits from the generic core so the core has **zero Planfix knowledge**; keep current behavior available when the plugin is enabled.
   **Settled design:**
   - **Mechanism:** in-tree **hook protocol**. Core defines a `Plugin` protocol with hook points: `idempotency_anchor`, `first_message`, `post_create_cleanup`, `protected_accounts`, `title_postfix`. One bundled `PlanfixPlugin` implements it; activated by config flag `plugins.planfix.enabled` (default **off**). Core imports nothing from the plugin.

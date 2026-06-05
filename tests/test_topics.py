@@ -12,6 +12,7 @@ from typer.testing import CliRunner
 
 from telegram_assistant.cli import main as cli_main
 from telegram_assistant.config import load_config_from_text
+from telegram_assistant.config.models import PlanfixPluginConfig
 from telegram_assistant.folders import (
     FolderChat,
     FolderSnapshot,
@@ -21,6 +22,8 @@ from telegram_assistant.persistence import (
     OperationStatus,
     OperationStore,
 )
+from telegram_assistant.plugins import PluginRegistry
+from telegram_assistant.plugins.planfix import PlanfixPlugin
 from telegram_assistant.topics import (
     TopicCreateFailed,
     TopicCreateNeedsReview,
@@ -28,6 +31,11 @@ from telegram_assistant.topics import (
     create_topic,
 )
 from telegram_assistant.worker.queue import FloodWaitError
+
+
+def _planfix_plugins() -> PluginRegistry:
+    """Registry with the Planfix plugin enabled, for /task-behavior tests."""
+    return PluginRegistry([PlanfixPlugin(PlanfixPluginConfig(enabled=True))])
 
 # ---------------------------------------------------------------------------
 # Fakes
@@ -107,10 +115,12 @@ async def test_create_topic_task_id_branch_sends_task_command(
     request = TopicCreateRequest(
         telegram_chat_id=-100,
         topic_name="Client request",
-        planfix_task_id=42,
+        external_ref=42,
     )
 
-    result, op = await create_topic(backend=backend, store=store, request=request)
+    result, op = await create_topic(
+        backend=backend, store=store, request=request, plugins=_planfix_plugins()
+    )
 
     assert op.status is OperationStatus.COMPLETED
     assert result.telegram_topic_id == 555
@@ -160,7 +170,7 @@ async def test_create_topic_idempotent_by_planfix_task_id(
     request = TopicCreateRequest(
         telegram_chat_id=-100,
         topic_name="Initial",
-        planfix_task_id=7,
+        external_ref=7,
     )
     first, op1 = await create_topic(
         backend=backend1, store=store, request=request
@@ -175,7 +185,7 @@ async def test_create_topic_idempotent_by_planfix_task_id(
         request=TopicCreateRequest(
             telegram_chat_id=-100,
             topic_name="Different name",
-            planfix_task_id=7,
+            external_ref=7,
         ),
     )
     assert second.replayed is True
@@ -214,7 +224,7 @@ async def test_create_topic_failure_records_failed(
     request = TopicCreateRequest(
         telegram_chat_id=-100,
         topic_name="Doomed",
-        planfix_task_id=9,
+        external_ref=9,
     )
 
     with pytest.raises(RuntimeError):
@@ -233,10 +243,10 @@ async def test_create_topic_first_message_failure_is_non_fatal(
     request = TopicCreateRequest(
         telegram_chat_id=-100,
         topic_name="Created but silent",
-        planfix_task_id=33,
+        external_ref=33,
     )
     result, op = await create_topic(
-        backend=backend, store=store, request=request
+        backend=backend, store=store, request=request, plugins=_planfix_plugins()
     )
     assert op.status is OperationStatus.COMPLETED
     assert result.telegram_topic_id == 555
@@ -267,7 +277,7 @@ async def test_create_topic_flood_wait_marks_needs_review_not_failed(
     request = TopicCreateRequest(
         telegram_chat_id=-100,
         topic_name="FloodWaiting",
-        planfix_task_id=77,
+        external_ref=77,
     )
 
     with pytest.raises(TopicCreateNeedsReview):

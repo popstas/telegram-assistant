@@ -1,7 +1,6 @@
 """Member-management domain shared by HTTP, CLI, and the worker."""
 
 from telegram_assistant.members.service import (
-    PLANFIX_BOT_USERNAME,
     BulkMemberAddFailed,
     BulkMemberAddNeedsReview,
     BulkMemberAddPending,
@@ -30,7 +29,6 @@ from telegram_assistant.members.service import (
 )
 
 __all__ = [
-    "PLANFIX_BOT_USERNAME",
     "BulkMemberAddFailed",
     "BulkMemberAddNeedsReview",
     "BulkMemberAddPending",

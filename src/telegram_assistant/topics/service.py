@@ -6,12 +6,12 @@ topic creation, first-message logic, and idempotency.
 
 Idempotency keys (per the plan's Technical Details):
 
-* ``planfix_task_id`` when present
+* ``external_ref`` when present
 * ``telegram_chat_id + topic_name`` otherwise
 
 First-message logic, in order:
 
-* ``/task {planfix_task_id}`` when ``planfix_task_id`` is set
+* a plugin-provided service message (e.g. ``/task {external_ref}``) when one applies
 * otherwise ``message`` if provided
 * otherwise duplicate the topic name
 """
@@ -30,6 +30,7 @@ from telegram_assistant.persistence.models import (
     OperationStatus,
 )
 from telegram_assistant.persistence.store import OperationStore
+from telegram_assistant.plugins import PluginRegistry
 from telegram_assistant.worker.queue import (
     BulkItemSpec,
     FloodWaitError,
@@ -102,14 +103,14 @@ class TopicCreateRequest:
 
     telegram_chat_id: int
     topic_name: str
-    planfix_task_id: int | str | None = None
+    external_ref: int | str | None = None
     message: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "telegram_chat_id": self.telegram_chat_id,
             "topic_name": self.topic_name,
-            "planfix_task_id": self.planfix_task_id,
+            "external_ref": self.external_ref,
             "message": self.message,
         }
 
@@ -121,7 +122,7 @@ class TopicCreateResult:
     telegram_chat_id: int
     telegram_topic_id: int
     topic_name: str
-    planfix_task_id: int | str | None
+    external_ref: int | str | None
     first_message_kind: str
     first_message_text: str | None
     telegram_message_id: int | None
@@ -132,7 +133,7 @@ class TopicCreateResult:
             "telegram_chat_id": self.telegram_chat_id,
             "telegram_topic_id": self.telegram_topic_id,
             "topic_name": self.topic_name,
-            "planfix_task_id": self.planfix_task_id,
+            "external_ref": self.external_ref,
             "first_message_kind": self.first_message_kind,
             "first_message_text": self.first_message_text,
             "telegram_message_id": self.telegram_message_id,
@@ -145,7 +146,8 @@ class TopicCreateResult:
             telegram_chat_id=int(payload["telegram_chat_id"]),
             telegram_topic_id=int(payload["telegram_topic_id"]),
             topic_name=str(payload["topic_name"]),
-            planfix_task_id=payload.get("planfix_task_id"),
+            # Legacy records persisted ``planfix_task_id``; accept both on read.
+            external_ref=payload.get("external_ref", payload.get("planfix_task_id")),
             first_message_kind=str(payload.get("first_message_kind", "")),
             first_message_text=payload.get("first_message_text"),
             telegram_message_id=(
@@ -190,17 +192,19 @@ class TopicBackend(Protocol):
 def _first_message(
     *,
     request: TopicCreateRequest,
+    plugins: PluginRegistry,
 ) -> tuple[str, str]:
     """Decide which first message to send and return ``(kind, text)``.
 
     Returns one of three branches:
 
-    * ``("task", "/task <id>")`` when ``planfix_task_id`` is set
+    * ``("task", <plugin message>)`` when a plugin provides a service message
     * ``("message", <message>)`` when an explicit ``message`` is provided
     * ``("topic_name", <topic_name>)`` otherwise
     """
-    if request.planfix_task_id is not None:
-        return "task", f"/task {request.planfix_task_id}"
+    task = plugins.topic_first_message(external_ref=request.external_ref)
+    if task is not None:
+        return "task", task
     if request.message is not None and request.message.strip():
         return "message", request.message
     return "topic_name", request.topic_name
@@ -210,12 +214,13 @@ async def _execute_create(
     *,
     backend: TopicBackend,
     request: TopicCreateRequest,
+    plugins: PluginRegistry,
 ) -> TopicCreateResult:
     topic_id = await backend.create_topic(
         chat_id=request.telegram_chat_id, name=request.topic_name
     )
 
-    kind, text = _first_message(request=request)
+    kind, text = _first_message(request=request, plugins=plugins)
     message_id: int | None = None
     try:
         message_id = await backend.send_message(
@@ -238,7 +243,7 @@ async def _execute_create(
         telegram_chat_id=request.telegram_chat_id,
         telegram_topic_id=topic_id,
         topic_name=request.topic_name,
-        planfix_task_id=request.planfix_task_id,
+        external_ref=request.external_ref,
         first_message_kind=kind,
         first_message_text=text,
         telegram_message_id=message_id,
@@ -250,6 +255,7 @@ async def create_topic(
     backend: TopicBackend,
     store: OperationStore,
     request: TopicCreateRequest,
+    plugins: PluginRegistry | None = None,
 ) -> tuple[TopicCreateResult, OperationRecord]:
     """Create a forum topic, or replay the saved result for the same key.
 
@@ -260,11 +266,13 @@ async def create_topic(
     * `needs_review`  → raise :class:`TopicCreateNeedsReview`
     * `pending`       → raise :class:`TopicCreatePending`
     """
+    if plugins is None:
+        plugins = PluginRegistry()
     if not request.topic_name.strip():
         raise ValueError("topic create requires non-empty topic_name")
 
     key = idempotency.topic_create_key(
-        planfix_task_id=request.planfix_task_id,
+        external_ref=request.external_ref,
         telegram_chat_id=request.telegram_chat_id,
         topic_name=request.topic_name,
     )
@@ -291,7 +299,9 @@ async def create_topic(
 
     operation_id = begin.operation.id
     try:
-        result = await _execute_create(backend=backend, request=request)
+        result = await _execute_create(
+            backend=backend, request=request, plugins=plugins
+        )
     except FloodWaitError as exc:
         # FLOOD_WAIT is transient — don't burn the idempotency key on `failed`
         # (terminal) because the next caller would be stuck. Marking
@@ -320,13 +330,13 @@ class BulkTopicItem:
     """One row inside a bulk topic-create request."""
 
     topic_name: str
-    planfix_task_id: int | str | None = None
+    external_ref: int | str | None = None
     message: str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
             "topic_name": self.topic_name,
-            "planfix_task_id": self.planfix_task_id,
+            "external_ref": self.external_ref,
             "message": self.message,
         }
 
@@ -360,7 +370,7 @@ class BulkTopicItemResult:
 
     status: str
     topic_name: str
-    planfix_task_id: int | str | None
+    external_ref: int | str | None
     telegram_topic_id: int | None = None
     first_message_kind: str | None = None
     first_message_text: str | None = None
@@ -371,7 +381,7 @@ class BulkTopicItemResult:
         return {
             "status": self.status,
             "topic_name": self.topic_name,
-            "planfix_task_id": self.planfix_task_id,
+            "external_ref": self.external_ref,
             "telegram_topic_id": self.telegram_topic_id,
             "first_message_kind": self.first_message_kind,
             "first_message_text": self.first_message_text,
@@ -443,14 +453,14 @@ def _build_item_result(
         return BulkTopicItemResult(
             status=status,
             topic_name=item_input.topic_name,
-            planfix_task_id=item_input.planfix_task_id,
+            external_ref=item_input.external_ref,
         )
     if record.status is OperationStatus.COMPLETED:
         payload = record.result_payload or {}
         return BulkTopicItemResult(
             status=status,
             topic_name=item_input.topic_name,
-            planfix_task_id=item_input.planfix_task_id,
+            external_ref=item_input.external_ref,
             telegram_topic_id=(
                 int(payload["telegram_topic_id"])
                 if payload.get("telegram_topic_id") is not None
@@ -467,7 +477,7 @@ def _build_item_result(
     return BulkTopicItemResult(
         status=status,
         topic_name=item_input.topic_name,
-        planfix_task_id=item_input.planfix_task_id,
+        external_ref=item_input.external_ref,
         error=record.error,
     )
 
@@ -516,6 +526,7 @@ async def bulk_create_topics(
     store: OperationStore,
     queue: WorkerQueue,
     request: BulkTopicCreateRequest,
+    plugins: PluginRegistry | None = None,
 ) -> tuple[BulkTopicCreateResult, OperationRecord]:
     """Create many forum topics under one parent operation.
 
@@ -525,10 +536,12 @@ async def bulk_create_topics(
     ``bulk_item_key(parent_op.id, topic_create_key(...))`` so a restart
     resumes exactly where the previous run left off.
 
-    Per-item first-message logic mirrors :func:`create_topic`: ``/task <id>``
-    when ``planfix_task_id`` is set, else the explicit ``message``, else the
-    topic name itself.
+    Per-item first-message logic mirrors :func:`create_topic`: a plugin-provided
+    service message (e.g. ``/task <id>``) when one applies, else the explicit
+    ``message``, else the topic name itself.
     """
+    if plugins is None:
+        plugins = PluginRegistry()
     if not request.items:
         raise ValueError("bulk topic create requires at least one item")
     for it in request.items:
@@ -548,7 +561,7 @@ async def bulk_create_topics(
     specs: list[BulkItemSpec] = []
     for it in request.items:
         per_key = idempotency.topic_create_key(
-            planfix_task_id=it.planfix_task_id,
+            external_ref=it.external_ref,
             telegram_chat_id=request.telegram_chat_id,
             topic_name=it.topic_name,
         )
@@ -561,7 +574,7 @@ async def bulk_create_topics(
                 payload={
                     "telegram_chat_id": request.telegram_chat_id,
                     "topic_name": it.topic_name,
-                    "planfix_task_id": it.planfix_task_id,
+                    "external_ref": it.external_ref,
                     "message": it.message,
                 },
             )
@@ -601,7 +614,8 @@ async def bulk_create_topics(
         item_request = TopicCreateRequest(
             telegram_chat_id=int(payload["telegram_chat_id"]),
             topic_name=str(payload["topic_name"]),
-            planfix_task_id=payload.get("planfix_task_id"),
+            # Legacy persisted specs used ``planfix_task_id``; accept both.
+            external_ref=payload.get("external_ref", payload.get("planfix_task_id")),
             message=payload.get("message"),
         )
         # Bypass create_topic() here: a FLOOD_WAIT from the backend must
@@ -609,7 +623,9 @@ async def bulk_create_topics(
         # `except Exception` would mark the per-topic operation `failed`
         # instead. Calling the executor directly keeps the queue in charge
         # of FLOOD_WAIT handling.
-        result = await _execute_create(backend=backend, request=item_request)
+        result = await _execute_create(
+            backend=backend, request=item_request, plugins=plugins
+        )
         return result.to_dict()
 
     item_records = await queue.run_bulk(

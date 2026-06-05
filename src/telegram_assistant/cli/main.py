@@ -39,7 +39,7 @@ def _apply_logging_from_config(config_path: Path | None) -> None:
 
 app = typer.Typer(
     name="telegram-assistant",
-    help="Telegram automation service for the Planfix integration.",
+    help="Telegram automation service (MTProto/Telethon).",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -210,10 +210,15 @@ def _build_group_backends(config_path: Path | None):
 @groups_app.command("create")
 def groups_create(
     title: str = typer.Option(..., "--title", help="Group title."),
+    external_ref: str | None = typer.Option(
+        None,
+        "--external-ref",
+        help="External reference; used as the primary idempotency key when set.",
+    ),
     planfix_task_id: str | None = typer.Option(
         None,
         "--planfix-task-id",
-        help="Planfix task id; used as the primary idempotency key when set.",
+        help="Backward-compat alias for --external-ref (Planfix task id).",
     ),
     about: str | None = typer.Option(
         None,
@@ -289,7 +294,7 @@ def groups_create(
         exists=False,
     ),
 ) -> None:
-    """Create a Telegram supergroup for a Planfix client."""
+    """Create a Telegram supergroup."""
     from telegram_assistant.folders import (
         FolderError,
         resolve_folder,
@@ -302,12 +307,15 @@ def groups_create(
         create_group,
     )
     from telegram_assistant.groups.service import (
-        PLANFIX_BOT_USERNAME,
         _dedupe,
         _resolved_reserves,
     )
+    from telegram_assistant.plugins import build_registry
 
     config, manager, store, open_backends = _build_group_backends(config_path)
+    plugins = build_registry(config)
+    # Generic external_ref wins; --planfix-task-id remains a backward-compat alias.
+    effective_ref = external_ref if external_ref is not None else planfix_task_id
 
     if topics_layout is not None and topics_layout not in ("list", "tabs"):
         typer.echo(
@@ -331,7 +339,7 @@ def groups_create(
 
     request = GroupCreateRequest(
         title=title,
-        planfix_task_id=planfix_task_id,
+        external_ref=effective_ref,
         about=about,
         admins=list(admin or []),
         members=list(member or []),
@@ -347,16 +355,14 @@ def groups_create(
     )
 
     if dry_run:
-        if not request.title.strip() and request.planfix_task_id is None:
+        if not request.title.strip() and request.external_ref is None:
             typer.echo(
-                "group create requires planfix_task_id or non-empty title",
+                "group create requires external_ref or non-empty title",
                 err=True,
             )
             raise typer.Exit(code=2)
 
-        effective_title = (
-            f"{request.title}{config.telegram.defaults.group_title_postfix}"
-        )
+        effective_title = f"{request.title}{plugins.title_postfix()}"
         enable_topics_eff = (
             request.enable_topics
             if request.enable_topics is not None
@@ -389,9 +395,9 @@ def groups_create(
             ]
         )
         planned_admins = _dedupe([*request.admins, *reserve_admins_eff])
-        planfix_bot_in_members = any(
-            u.lstrip("@").lower() == PLANFIX_BOT_USERNAME.lstrip("@").lower()
-            for u in planned_members
+        # Preview any plugin-provided service message (e.g. Planfix's /task).
+        plugin_first_message = plugins.group_first_message(
+            external_ref=request.external_ref, members_added=planned_members
         )
 
         folder_payload: dict[str, object] | None = None
@@ -453,20 +459,20 @@ def groups_create(
             planned_actions.append(
                 f"place chat into folder {folder_payload['folder_name']!r}"
             )
-        if request.planfix_task_id is not None and planfix_bot_in_members:
+        if plugin_first_message is not None:
             planned_actions.append(
-                f"send '/task {request.planfix_task_id}' service message"
+                f"send {plugin_first_message!r} service message"
             )
-        if request.planfix_task_id is not None and not planfix_bot_in_members:
+        elif request.external_ref is not None and plugins.active:
             warnings.append(
-                "planfix_task_id is set but @planfix_bot is not in the planned member list; "
-                "the '/task <id>' service message will be skipped"
+                "external_ref is set but no plugin will send a service message "
+                "for this group (e.g. the required bot is not a planned member)"
             )
 
         resolved: dict[str, object] = {
             "title": request.title,
             "effective_title": effective_title,
-            "planfix_task_id": request.planfix_task_id,
+            "external_ref": request.external_ref,
             "enable_topics": enable_topics_eff,
             "topics_layout": topics_layout_eff if enable_topics_eff else None,
             "create_invite_link": create_link_eff,
@@ -503,6 +509,7 @@ def groups_create(
                 store=store,
                 config=config.telegram,
                 request=request,
+                plugins=plugins,
             )
             payload = result.to_dict()
             payload["operation_id"] = op.id
@@ -730,10 +737,15 @@ def topics_create(
         "--folder-id",
         help="Optional folder id cross-check.",
     ),
+    external_ref: str | None = typer.Option(
+        None,
+        "--external-ref",
+        help="External reference; primary idempotency key and plugin service-message trigger.",
+    ),
     planfix_task_id: str | None = typer.Option(
         None,
         "--planfix-task-id",
-        help="Planfix task id; primary idempotency key and `/task <id>` trigger.",
+        help="Backward-compat alias for --external-ref (Planfix task id).",
     ),
     message: str | None = typer.Option(
         None,
@@ -758,6 +770,7 @@ def topics_create(
         FolderError,
         resolve_chat_in_folder,
     )
+    from telegram_assistant.plugins import build_registry
     from telegram_assistant.topics import (
         TopicCreateFailed,
         TopicCreateNeedsReview,
@@ -774,6 +787,9 @@ def topics_create(
         raise typer.Exit(code=2)
 
     config, manager, store, open_backends = _build_topic_backends(config_path)
+    plugins = build_registry(config)
+    # Generic external_ref wins; --planfix-task-id remains a backward-compat alias.
+    effective_ref = external_ref if external_ref is not None else planfix_task_id
 
     if chat_name is not None:
         resolved_folder_name, default_fid, _ = _resolve_folder_name(
@@ -831,10 +847,10 @@ def topics_create(
         request_preview = TopicCreateRequest(
             telegram_chat_id=resolved_chat_id,
             topic_name=topic_name,
-            planfix_task_id=planfix_task_id,
+            external_ref=effective_ref,
             message=message,
         )
-        kind, text = _first_message(request=request_preview)
+        kind, text = _first_message(request=request_preview, plugins=plugins)
         warnings: list[str] = []
         if list_error is not None:
             warnings.append(
@@ -853,7 +869,7 @@ def topics_create(
         resolved_payload: dict[str, object] = {
             "telegram_chat_id": resolved_chat_id,
             "topic_name": topic_name,
-            "planfix_task_id": planfix_task_id,
+            "external_ref": effective_ref,
             "first_message_kind": kind,
             "first_message_text": text,
             "existing_topic_ids": existing_ids,
@@ -892,11 +908,14 @@ def topics_create(
             request = TopicCreateRequest(
                 telegram_chat_id=resolved_chat_id,
                 topic_name=topic_name,
-                planfix_task_id=planfix_task_id,
+                external_ref=effective_ref,
                 message=message,
             )
             result, op = await create_topic(
-                backend=topic_backend, store=store, request=request
+                backend=topic_backend,
+                store=store,
+                request=request,
+                plugins=plugins,
             )
             payload = result.to_dict()
             payload["operation_id"] = op.id
@@ -924,11 +943,11 @@ def topics_create(
 
 
 def _parse_bulk_topics_csv(path: Path) -> list[dict[str, object]]:
-    """Read a `planfix_task_id,topic_name,message` CSV into bulk items.
+    """Read an `external_ref,topic_name,message` CSV into bulk items.
 
-    ``planfix_task_id`` and ``message`` may be empty per row; ``topic_name``
-    is required. Lines starting with ``#`` and blank rows are ignored so
-    operators can keep notes alongside the data.
+    ``external_ref`` (legacy alias ``planfix_task_id``) and ``message`` may be
+    empty per row; ``topic_name`` is required. Lines starting with ``#`` and
+    blank rows are ignored so operators can keep notes alongside the data.
     """
     import csv
 
@@ -944,14 +963,14 @@ def _parse_bulk_topics_csv(path: Path) -> list[dict[str, object]]:
             name = (row.get("topic_name") or "").strip()
             if not name:
                 continue
-            task = (row.get("planfix_task_id") or "").strip() or None
+            ref = (row.get("external_ref") or row.get("planfix_task_id") or "").strip() or None
             message = row.get("message")
             if message is not None:
                 message = message.strip() or None
             out.append(
                 {
                     "topic_name": name,
-                    "planfix_task_id": task,
+                    "external_ref": ref,
                     "message": message,
                 }
             )
@@ -961,7 +980,10 @@ def _parse_bulk_topics_csv(path: Path) -> list[dict[str, object]]:
 
 
 def _parse_bulk_topics_json(path: Path) -> list[dict[str, object]]:
-    """Read a JSON list of `{topic_name, planfix_task_id?, message?}`."""
+    """Read a JSON list of `{topic_name, external_ref?, message?}`.
+
+    ``planfix_task_id`` is accepted as a backward-compat alias for ``external_ref``.
+    """
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, list):
         raise typer.BadParameter("JSON file must contain a top-level list")
@@ -972,10 +994,13 @@ def _parse_bulk_topics_json(path: Path) -> list[dict[str, object]]:
         name = str(entry.get("topic_name") or "").strip()
         if not name:
             raise typer.BadParameter("each entry needs a non-empty topic_name")
+        ref = entry.get("external_ref")
+        if ref is None:
+            ref = entry.get("planfix_task_id")
         out.append(
             {
                 "topic_name": name,
-                "planfix_task_id": entry.get("planfix_task_id"),
+                "external_ref": ref,
                 "message": entry.get("message"),
             }
         )
@@ -1010,7 +1035,7 @@ def topics_bulk_create(
     file: Path | None = typer.Option(  # noqa: B008
         None,
         "--file",
-        help="CSV (planfix_task_id,topic_name,message) or JSON list of items.",
+        help="CSV (external_ref,topic_name,message) or JSON list of items.",
         exists=False,
     ),
     operation_id: str | None = typer.Option(
@@ -1041,6 +1066,7 @@ def topics_bulk_create(
         FolderError,
         resolve_chat_in_folder,
     )
+    from telegram_assistant.plugins import build_registry
     from telegram_assistant.topics import (
         BulkTopicCreateFailed,
         BulkTopicCreateNeedsReview,
@@ -1070,6 +1096,7 @@ def topics_bulk_create(
     )
 
     config, manager, store, open_backends = _build_topic_backends(config_path)
+    plugins = build_registry(config)
 
     if chat_name is not None:
         resolved_folder_name, default_fid, _ = _resolve_folder_name(
@@ -1123,7 +1150,7 @@ def topics_bulk_create(
             existing_titles.setdefault(t.title, []).append(t.topic_id)
 
         seen_names: dict[str, int] = {}
-        seen_task_ids: dict[str, int] = {}
+        seen_refs: dict[str, int] = {}
         items_out: list[dict[str, object]] = []
         warnings: list[str] = []
         if list_error is not None:
@@ -1133,19 +1160,17 @@ def topics_bulk_create(
             )
         for idx, it in enumerate(raw_items):
             name = str(it["topic_name"])
-            task = it.get("planfix_task_id")
-            task_key = str(task) if task is not None else None
+            ref = it.get("external_ref")
+            ref_key = str(ref) if ref is not None else None
             dup_in_file_name = name in seen_names
-            dup_in_file_task = (
-                task_key is not None and task_key in seen_task_ids
-            )
+            dup_in_file_ref = ref_key is not None and ref_key in seen_refs
             existing_ids = list(existing_titles.get(name, []))
             row: dict[str, object] = {
                 "topic_name": name,
-                "planfix_task_id": task,
+                "external_ref": ref,
                 "message": it.get("message"),
                 "duplicate_topic_name_in_file": dup_in_file_name,
-                "duplicate_planfix_task_id_in_file": dup_in_file_task,
+                "duplicate_external_ref_in_file": dup_in_file_ref,
                 "existing_topic_ids": existing_ids,
             }
             if dup_in_file_name:
@@ -1153,10 +1178,10 @@ def topics_bulk_create(
                     f"row {idx + 1}: duplicate topic_name {name!r} "
                     f"(first at row {seen_names[name] + 1})"
                 )
-            if dup_in_file_task:
+            if dup_in_file_ref:
                 warnings.append(
-                    f"row {idx + 1}: duplicate planfix_task_id {task!r} "
-                    f"(first at row {seen_task_ids[task_key] + 1})"
+                    f"row {idx + 1}: duplicate external_ref {ref!r} "
+                    f"(first at row {seen_refs[ref_key] + 1})"
                 )
             if existing_ids:
                 warnings.append(
@@ -1165,8 +1190,8 @@ def topics_bulk_create(
                 )
             items_out.append(row)
             seen_names.setdefault(name, idx)
-            if task_key is not None:
-                seen_task_ids.setdefault(task_key, idx)
+            if ref_key is not None:
+                seen_refs.setdefault(ref_key, idx)
 
         planned_actions = [
             f"create topic {row['topic_name']!r} in chat {resolved_chat_id}"
@@ -1223,7 +1248,7 @@ def topics_bulk_create(
                 items=tuple(
                     BulkTopicItem(
                         topic_name=str(it["topic_name"]),
-                        planfix_task_id=it.get("planfix_task_id"),
+                        external_ref=it.get("external_ref"),
                         message=it.get("message"),
                     )
                     for it in raw_items
@@ -1236,6 +1261,7 @@ def topics_bulk_create(
                 store=store,
                 queue=queue,
                 request=req,
+                plugins=plugins,
             )
             payload = result.to_dict()
             payload["operation_status"] = op.status.value
@@ -1661,6 +1687,7 @@ def members_bulk_add(
         normalize_user_ref,
         protected_user_set,
     )
+    from telegram_assistant.plugins import build_registry
     from telegram_assistant.worker.queue import WorkerQueue
 
     if (chat_id is None) == (chat_name is None):
@@ -1712,7 +1739,9 @@ def members_bulk_add(
             typer.echo(str(exc), err=True)
             raise typer.Exit(code=2) from exc
 
-        protected = protected_user_set(config=config.telegram)
+        protected = protected_user_set(
+            config=config.telegram, plugins=build_registry(config)
+        )
         try:
             normalized_inputs = [
                 (it, normalize_user_ref(it.user)) for it in items_validated
@@ -1977,7 +2006,7 @@ def members_bulk_remove(
     force: bool = typer.Option(
         False,
         "--force",
-        help="Allow removing configured reserve accounts or @planfix_bot.",
+        help="Allow removing configured reserve accounts or plugin-protected accounts.",
     ),
     operation_id: str | None = typer.Option(
         None,
@@ -2013,6 +2042,7 @@ def members_bulk_remove(
         protected_user_set,
     )
     from telegram_assistant.members.service import VALID_REMOVE_MODES
+    from telegram_assistant.plugins import build_registry
     from telegram_assistant.worker.queue import WorkerQueue
 
     if (chat_id is None) == (chat_name is None):
@@ -2053,7 +2083,9 @@ def members_bulk_remove(
         raise typer.Exit(code=2)
 
     config, manager, store, open_backends = _build_member_backends(config_path)
-    protected = protected_user_set(config=config.telegram)
+    protected = protected_user_set(
+        config=config.telegram, plugins=build_registry(config)
+    )
     try:
         normalized_inputs = [
             (raw, normalize_user_ref(raw)) for raw in raw_users

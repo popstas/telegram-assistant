@@ -16,7 +16,7 @@ def minimal_config_yaml() -> str:
           api_id: 123456
           api_hash: "telegram_api_hash"
           session_path: /data/telegram-assistant.session
-          main_account_label: planfix-assistant-main
+          main_account_label: telegram-assistant-main
           reserve_admins:
             - "@reserve_account"
           reserve_members:
@@ -27,7 +27,11 @@ def minimal_config_yaml() -> str:
           defaults:
             enable_topics: true
             create_invite_link: true
-            cleanup_planfix_messages: true
+
+        plugins:
+          planfix:
+            enabled: true
+            cleanup_messages: true
             task_reply_wait_seconds: 0
 
         http:

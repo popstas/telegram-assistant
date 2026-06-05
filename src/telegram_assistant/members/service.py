@@ -49,12 +49,11 @@ from telegram_assistant.persistence.models import (
     OperationStatus,
 )
 from telegram_assistant.persistence.store import OperationStore
+from telegram_assistant.plugins import PluginRegistry
 from telegram_assistant.worker.queue import BulkItemSpec, WorkerQueue
 
 VALID_ROLES = frozenset({"member", "admin"})
 VALID_REMOVE_MODES = frozenset({"ban_unban", "ban"})
-
-PLANFIX_BOT_USERNAME = "@planfix_bot"
 
 
 class MemberAddError(RuntimeError):
@@ -1046,16 +1045,25 @@ def _replay_bulk_remove(
     )
 
 
-def protected_user_set(*, config: TelegramConfig) -> set[str]:
+def protected_user_set(
+    *, config: TelegramConfig, plugins: PluginRegistry | None = None
+) -> set[str]:
     """Normalized references of users considered 'technical' for the --force guard.
 
-    Includes every configured reserve admin/member plus the canonical
-    ``@planfix_bot`` username. Each reference is normalized via
-    :func:`normalize_user_ref` so the guard catches case/whitespace variants
-    of the same identity.
+    Includes every configured reserve admin/member plus any accounts an active
+    plugin marks as protected (e.g. the Planfix plugin's ``@planfix_bot``). Each
+    reference is normalized via :func:`normalize_user_ref` so the guard catches
+    case/whitespace variants of the same identity.
     """
-    protected: set[str] = {PLANFIX_BOT_USERNAME}
-    for u in list(config.reserve_admins) + list(config.reserve_members):
+    if plugins is None:
+        plugins = PluginRegistry()
+    protected: set[str] = set()
+    candidates = (
+        list(config.reserve_admins)
+        + list(config.reserve_members)
+        + list(plugins.protected_accounts())
+    )
+    for u in candidates:
         try:
             protected.add(normalize_user_ref(u).value)
         except ValueError:

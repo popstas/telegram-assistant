@@ -46,8 +46,14 @@ class TopicCreateBody(BaseModel):
     chat_name: str | None = None
     folder_name: str | None = None
     folder_id: int | None = None
+    # Generic idempotency anchor. ``planfix_task_id`` is a backward-compat alias.
+    external_ref: int | str | None = None
     planfix_task_id: int | str | None = None
     message: str | None = None
+
+    @property
+    def effective_external_ref(self) -> int | str | None:
+        return self.external_ref if self.external_ref is not None else self.planfix_task_id
 
     @model_validator(mode="after")
     def _exactly_one_chat_ref(self) -> TopicCreateBody:
@@ -80,8 +86,14 @@ class TopicCloseBody(BaseModel):
 
 class BulkTopicItemBody(BaseModel):
     topic_name: str = Field(..., min_length=1)
+    # Generic idempotency anchor. ``planfix_task_id`` is a backward-compat alias.
+    external_ref: int | str | None = None
     planfix_task_id: int | str | None = None
     message: str | None = None
+
+    @property
+    def effective_external_ref(self) -> int | str | None:
+        return self.external_ref if self.external_ref is not None else self.planfix_task_id
 
 
 class BulkTopicCreateBody(BaseModel):
@@ -238,13 +250,16 @@ def build_router() -> APIRouter:
         domain_request = TopicCreateRequest(
             telegram_chat_id=chat_id,
             topic_name=body.topic_name,
-            planfix_task_id=body.planfix_task_id,
+            external_ref=body.effective_external_ref,
             message=body.message,
         )
 
         try:
             result, op = await create_topic(
-                backend=backend, store=store, request=domain_request
+                backend=backend,
+                store=store,
+                request=domain_request,
+                plugins=request.app.state.plugin_registry,
             )
         except TopicCreatePending as exc:
             raise HTTPException(
@@ -292,7 +307,7 @@ def build_router() -> APIRouter:
             items=tuple(
                 BulkTopicItem(
                     topic_name=it.topic_name,
-                    planfix_task_id=it.planfix_task_id,
+                    external_ref=it.effective_external_ref,
                     message=it.message,
                 )
                 for it in body.items
@@ -307,6 +322,7 @@ def build_router() -> APIRouter:
                 store=store,
                 queue=queue,
                 request=domain_request,
+                plugins=request.app.state.plugin_registry,
             )
         except BulkTopicCreatePending as exc:
             raise HTTPException(

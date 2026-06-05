@@ -3,7 +3,7 @@
 All long-form operations log through ``structlog.get_logger`` so each line
 carries the standard operation context fields defined in the plan's
 Technical Details section: ``operation_id``, ``request_id`` (HTTP) or
-``invocation_id`` (CLI), ``planfix_task_id``, ``chat_name``, ``topic_name``,
+``invocation_id`` (CLI), ``external_ref``, ``chat_name``, ``topic_name``,
 ``telegram_chat_id``, ``telegram_topic_id``, operation type, bulk item,
 result, error, duration.
 
@@ -27,7 +27,7 @@ LOG_CONTEXT_FIELDS: tuple[str, ...] = (
     "operation_id",
     "request_id",
     "invocation_id",
-    "planfix_task_id",
+    "external_ref",
     "chat_name",
     "topic_name",
     "telegram_chat_id",

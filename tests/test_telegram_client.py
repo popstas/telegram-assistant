@@ -133,7 +133,7 @@ async def test_state_detects_unauthorized_session(minimal_config_yaml: str) -> N
     assert clients[0].connected is True
     assert state.authorized is False
     assert state.me is None
-    assert state.account_label == "planfix-assistant-main"
+    assert state.account_label == "telegram-assistant-main"
     assert state.session_path == "/data/telegram-assistant.session"
 
 

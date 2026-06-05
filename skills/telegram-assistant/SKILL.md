@@ -123,8 +123,9 @@ not skip steps, even if the request looks obvious.
 2. Determine resource and action from the catalogue
    (see "Resources & actions"). If the request maps to no entry, stop and
    ask.
-3. Extract parameters: chat, topic, users, role, text, `planfix_task_id`,
-   folder. Treat anything missing as missing — never invent values.
+3. Extract parameters: chat, topic, users, role, text, `external_ref`
+   (alias `planfix_task_id`), folder. Treat anything missing as missing —
+   never invent values.
 4. If a required parameter is missing or ambiguous, ask a short clarifying
    question (one question, no preamble).
 5. Run `telegram-assistant health` if it has not yet succeeded in
@@ -173,7 +174,7 @@ agent stops and asks for clarification — it does not invent a new path.
 |---|---|---|---|
 | `auth` | `login` | The human asks to (re-)log in the technical Telegram account. The agent never runs this itself. | `telegram-assistant auth` |
 | `health` | `check` | Pre-flight before any change; or the human asks "is everything alive?". | `telegram-assistant health` |
-| `groups` | `create` | Create a new client supergroup (title or `planfix_task_id`), optionally with members/admins and folder placement. | `telegram-assistant groups create ...` |
+| `groups` | `create` | Create a new supergroup (title or `external_ref`, alias `planfix_task_id`), optionally with members/admins and folder placement. | `telegram-assistant groups create ...` |
 | `groups` | `set-layout` | Change the topics layout (list ↔ tabs) on an existing forum supergroup. | `telegram-assistant groups set-layout ...` |
 | `groups` | `get-layout` | Read the current topics layout (`list` or `tabs`) for a forum supergroup. | `telegram-assistant groups get-layout ...` |
 | `topics` | `create` | Add one forum topic to an existing supergroup. | `telegram-assistant topics create ...` |
@@ -223,30 +224,35 @@ messages the agent must surface verbatim instead of paraphrasing.
 
 #### `groups` / `create`
 
-- Extract: `--title` (or `--planfix-task-id`), `--admin` and `--member`
+- Extract: `--title` (or `--external-ref`), `--admin` and `--member`
   lists, optional `--about`, optional `--topics-layout` (`list` or
-  `tabs`) when the human names how topics should open.
-- Required flags: at least one of `--title` or `--planfix-task-id`.
+  `tabs`) when the human names how topics should open. `--external-ref`
+  is the generic idempotency anchor; `--planfix-task-id` is a
+  backward-compat alias that maps onto it.
+- Required flags: at least one of `--title` or `--external-ref`
+  (`--planfix-task-id`).
 - From config: `--folder-name` defaults to
   `telegram.default_chat_folder.folder_name`; reserve admins/members
   come from `telegram.reserve_admins` / `telegram.reserve_members`;
-  `--topics-layout` defaults to `telegram.defaults.topics_layout`. The
-  effective Telegram title also gets `telegram.defaults.group_title_postfix`
-  appended (the idempotency key stays on the raw title), members get
-  `telegram.defaults.default_member_permissions` (create topics / pin
-  messages), and `telegram.defaults.cleanup_planfix_messages` (opt-in,
-  default off) removes @planfix_bot's welcome, the `/task` command, and the
-  bot's reply after creation — surface the effective title in the plan so the
-  postfix is visible.
+  `--topics-layout` defaults to `telegram.defaults.topics_layout`;
+  members get `telegram.defaults.default_member_permissions` (create
+  topics / pin messages). When the Planfix plugin is enabled
+  (`plugins.planfix.enabled: true`), the effective Telegram title also
+  gets `plugins.planfix.group_title_postfix` appended (the idempotency
+  key stays on the raw title), and `plugins.planfix.cleanup_messages`
+  (opt-in, default off) removes the bot's welcome, the `/task` command,
+  and the bot's reply after creation — surface the effective title in
+  the plan so the postfix is visible.
 - Temp file: no — admins and members go on the command line as repeated
   `--admin @employee_username` / `--member @member_username` flags.
-- Automation: include `--planfix-task-id` when the human gives one; the
-  dry-run plan must show whether `@planfix_bot` is among planned
-  members so the `/task <id>` service message will actually fire, the
+- Automation: include `--external-ref` (or the `--planfix-task-id`
+  alias) when the human gives one; with the Planfix plugin enabled the
+  dry-run plan shows whether `@planfix_bot` is among planned members so
+  the `/task <id>` service message will actually fire, the
   `effective_title` (raw title + postfix), and the resolved
   `topics_layout`.
 - Confirmation: required after dry-run.
-- Typical errors: `group create requires planfix_task_id or non-empty
+- Typical errors: `group create requires external_ref or non-empty
   title`, folder errors from `resolve_folder`, `GroupCreateFailed`,
   `GroupCreateNeedsReview`.
 
@@ -284,7 +290,7 @@ messages the agent must surface verbatim instead of paraphrasing.
 #### `topics` / `create`
 
 - Extract: `--topic-name`, chat reference (`--chat-name` or `--chat-id`),
-  optional `--planfix-task-id`, optional `--message`.
+  optional `--external-ref` (alias `--planfix-task-id`), optional `--message`.
 - Required flags: `--topic-name` and exactly one of `--chat-name` /
   `--chat-id`.
 - From config: `--folder-name` defaults to the configured chat folder
@@ -300,15 +306,15 @@ messages the agent must surface verbatim instead of paraphrasing.
 #### `topics` / `bulk-create`
 
 - Extract: chat reference, list of topics (each: `topic_name`, optional
-  `planfix_task_id`, optional `message`).
+  `external_ref` (alias `planfix_task_id`), optional `message`).
 - Required flags: chat reference and `--file`.
 - From config: `--folder-name` default.
 - Temp file: yes — write a CSV
-  (`planfix_task_id,topic_name,message`) or a JSON list to
+  (`external_ref,topic_name,message`) or a JSON list to
   `/tmp/telegram-assistant-topics.csv` (or `.json`).
 - Automation: dedupe rows locally before writing the file; still run
   `--dry-run` and rely on its `duplicate_topic_name_in_file` /
-  `duplicate_planfix_task_id_in_file` flags.
+  `duplicate_external_ref_in_file` flags.
 - Confirmation: required after dry-run. Show the row count and any
   warnings the dry-run reported.
 - Typical errors: `--file is required (CSV or JSON)`, `--file path does
@@ -545,7 +551,7 @@ Request: «Заведи в чате Клиент / проект топики "Д
 2. Prepare `/tmp/telegram-assistant-topics.csv`:
 
    ```csv
-   planfix_task_id,topic_name,message
+   external_ref,topic_name,message
    ,Документы,
    ,Оплата,
    ```
