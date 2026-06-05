@@ -73,6 +73,7 @@
 
 ### Task
 
+- Add write/manage access restrictions (whitelist + folder)
 - Add integration/agent-setup layer (INTEGRATION.md)
 - Add project rename (telegram-planfix-assistant -> telegram-?)
 
