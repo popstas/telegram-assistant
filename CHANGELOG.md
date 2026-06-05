@@ -59,6 +59,10 @@
 - Add creds, repeat e2e
 - Add task 17: e2e tests
 
+### Build
+
+- Rewrite old project name in generated changelog
+
 ### Miscellaneous
 
 - Ignore installed skills and .claude
