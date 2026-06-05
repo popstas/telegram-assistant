@@ -47,6 +47,11 @@ there is a real read operation to protect:
 - Run the project test suite after each Task before proceeding.
 - e2e (real account) is added in the surfaces task by extending the existing `scripts/e2e_*.sh`.
 
+## Progress Tracking
+
+- Mark completed items with `[x]` immediately when done.
+- Update this plan if implementation deviates from the original scope.
+
 ## Technical Details
 
 ### Entity resolver
@@ -64,16 +69,26 @@ there is a real read operation to protect:
 
 ### Access control
 
-- Config (`config/models.py`): `AccessRule` (`extra="forbid"`, exactly one of `chat`/`folder`;
-  `permission: read|write` default `write`); `AccessConfig` (`rules: list[AccessRule]`);
-  `TelegramConfig.access: AccessConfig | None = None` (None ⇒ allow-all). `config/loader.py` template
-  gains a commented `access:` example so the generated default stays allow-all.
+- Config (`config/models.py`): `AccessRule` (`extra="forbid"`, exactly one target of
+  `chat` / `folder` / `all: true` (wildcard, every chat); `permission: read|write` default `write`);
+  `AccessConfig` (`rules: list[AccessRule]`); `TelegramConfig.access: AccessConfig | None = None`
+  (None ⇒ allow-all). `config/loader.py` template gains a commented `access:` example so the
+  generated default stays allow-all.
+- **Rules combine as a union, highest level wins.** The effective level for a chat is the max
+  `AccessLevel` across every matching rule (wildcard `all`, any folder it belongs to, an explicit
+  `chat` rule), and `write` implies `read`. So one config can simultaneously express: (1) a wildcard
+  `all` + `permission: read` rule → read every chat; (2) per-`chat` / per-`folder` `permission: write`
+  rules → write to selected usernames/folders; (3) a `folder` `permission: write` rule → manage
+  members and topics for that folder (member add/remove and topic create/close are WRITE-level ops).
+  These layer on top of the read-all baseline without conflict.
 - `access/service.py`: `AccessLevel` enum (`READ < WRITE`); `AccessDenied(RuntimeError)` carrying
   chat ref + required level; `Authorizer` built per request from `AccessConfig` + an `EntityResolver`
-  + a folder backend. It lazily builds an index — `chat_levels: dict[int, AccessLevel]` (rule chat
-  refs resolved via the resolver) and `folder_levels: dict[str, AccessLevel]` — and exposes
-  `require(chat_id, level, *, folder_memberships)` and `require_folder(folder_name, level)`. When
-  config `access is None`, the authorizer is a no-op sentinel (`require` returns immediately).
+  + a folder backend. It lazily builds an index — `default_level: AccessLevel | None` (from wildcard
+  `all` rules), `chat_levels: dict[int, AccessLevel]` (rule chat refs resolved via the resolver), and
+  `folder_levels: dict[str, AccessLevel]` — and exposes `require(chat_id, level, *, folder_memberships)`
+  (granting the max of the wildcard default, the chat's folder levels, and any explicit chat level)
+  and `require_folder(folder_name, level)`. When config `access is None`, the authorizer is a no-op
+  sentinel (`require` returns immediately).
 - Enforcement matrix (in the domain services, not just CLI): send / member add+remove / topic
   create+close / folder add+remove → WRITE on resolved chat; group create → WRITE on destination
   folder; mass-send folder mode → WRITE per-resolved-chat (unpermitted chats become `skipped` with
@@ -102,15 +117,18 @@ there is a real read operation to protect:
 ### Task 2: Add the access-control config and authorizer, enforced in the domain layer
 
 - [ ] Add `AccessRule` / `AccessConfig` to `config/models.py` and `TelegramConfig.access`
-  (None ⇒ allow-all); validate exactly one of `chat`/`folder` per rule
-- [ ] Add a commented `access:` example to the `config/loader.py` template (default stays allow-all)
-- [ ] Add `access/service.py` with `AccessLevel`, `AccessDenied`, and `Authorizer` (chat + folder
-  index, `require` / `require_folder`, no-op sentinel when `access is None`)
+  (None ⇒ allow-all); validate exactly one target of `chat` / `folder` / `all` per rule
+- [ ] Add a commented `access:` example to the `config/loader.py` template (default stays allow-all);
+  show a combined config: a wildcard `all: read` rule plus per-`chat`/`folder` `write` rules
+- [ ] Add `access/service.py` with `AccessLevel`, `AccessDenied`, and `Authorizer` (wildcard default
+  + chat + folder index with union/highest-level-wins resolution, `require` / `require_folder`, no-op
+  sentinel when `access is None`)
 - [ ] Thread an optional `authorizer` into the domain services and enforce the matrix: WRITE for
   send / members / topics / folders, WRITE on destination folder for group create, READ where
   applicable; mass-send marks unpermitted chats `skipped` reason `access_denied`
-- [ ] write tests for the authorizer (chat rule, folder rule, read vs write, write-implies-read,
-  allow-all when None, deny-by-default when present, create-by-folder) and per-service deny/allow
+- [ ] write tests for the authorizer (chat rule, folder rule, wildcard `all` rule, read vs write,
+  write-implies-read, union of read-all baseline + targeted write rules, allow-all when None,
+  deny-by-default when present, create-by-folder) and per-service deny/allow
 - [ ] run project tests - must pass before next task
 
 ### Task 3: Promote get-recent-messages to a first-class read op
@@ -159,7 +177,8 @@ there is a real read operation to protect:
 
 *Items requiring manual intervention - no checkboxes, informational only*
 
-- Run the live e2e scripts (`scripts/e2e_*.sh`) against an authorized Telethon session with folder
-  `Clients` / chat `Client chat test` — these mutate the real test account and are not run by `pytest`.
+- Run the live e2e scripts (`scripts/e2e_*.sh`) against an authorized Telethon session with the
+  configured `default_chat_folder.folder_name` set to `Clients` (containing chat `Client chat test`)
+  — these mutate the real test account and are not run by `pytest`.
 - Delete the source draft `docs/draft-access-control-entity-resolver.md` once this plan is adopted.
 - Install the `ralphex` CLI to execute this plan.
