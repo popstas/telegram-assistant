@@ -67,3 +67,7 @@
 - Add git-cliff changelog and GitHub Actions workflows
 - Initial commit with spec and ralphex plan
 
+### Refactor
+
+- Rename cleanup_service_messages -> cleanup_planfix_messages, default off
+
