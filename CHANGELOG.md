@@ -71,3 +71,7 @@
 
 - Rename cleanup_service_messages -> cleanup_planfix_messages, default off
 
+### Task
+
+- Add project rename (telegram-planfix-assistant -> telegram-?)
+
