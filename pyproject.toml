@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-assistant"
-version = "0.1.0"
-description = "Telegram automation service for Planfix <-> Telegram integration (MTProto/Telethon)."
+version = "0.2.0"
+description = "Telegram automation service (MTProto/Telethon) with an optional Planfix integration plugin."
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "Proprietary" }

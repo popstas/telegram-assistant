@@ -5,7 +5,6 @@
 
 ### Features
 
-- Make Planfix an optional plugin; generic external_ref idempotency anchor
 - Verify acceptance criteria for first-day fixes
 - Clean up service messages after group creation
 - Verify chat existence before replaying group_create
@@ -60,10 +59,6 @@
 - Add creds, repeat e2e
 - Add task 17: e2e tests
 
-### Build
-
-- Rewrite old project name in generated changelog
-
 ### Miscellaneous
 
 - Ignore installed skills and .claude
@@ -74,21 +69,5 @@
 
 ### Refactor
 
-- Rename project telegram-assistant -> telegram-assistant
 - Rename cleanup_service_messages -> cleanup_planfix_messages, default off
-
-### Task
-
-- Rename complete (remote+dir+code merged); drop leftover item
-- Settle Planfix-plugin design; clear completed rename item
-- Add HTTP MCP server (Google OAuth); scope reads in access control
-- Add scheduled msgs, mute, folder-remove, reactions, forward, get-recent
-- Support sending media (photos, videos, files)
-- Make Planfix an optional plugin, not core
-- Settle rename target -> telegram-assistant
-- Generalize entity resolution (entity everywhere, not just chat_id)
-- Add addressing chats by username/title for message send
-- Add write/manage access restrictions (whitelist + folder)
-- Add integration/agent-setup layer (INTEGRATION.md)
-- Add project rename (telegram-assistant -> telegram-?)
 
