@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add Telethon media message backend
 - Expand message send domain
 
 ### Documentation

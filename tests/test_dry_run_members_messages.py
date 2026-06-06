@@ -758,6 +758,62 @@ def test_cli_messages_send_dry_run_resolves_topic_by_name(
     assert payload["resolved"]["topic_name"] == "Documents"
 
 
+def test_cli_messages_send_dry_run_media_and_delay(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    media = tmp_path / "report.txt"
+    media.write_text("report")
+    backend = RecordingMessageBackend()
+    folder_backend = RecordingFolderBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--file",
+            str(media),
+            "--file-url",
+            "https://example.com/a.pdf",
+            "--delay",
+            "10m",
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert_dry_run_envelope(
+        payload,
+        command="messages.send",
+        resolved_keys=(
+            "mode",
+            "telegram_chat_id",
+            "files",
+            "file_urls",
+            "scheduled",
+            "schedule_at",
+        ),
+    )
+    assert payload["resolved"]["mode"] == "targeted"
+    assert payload["resolved"]["text"] == ""
+    assert payload["resolved"]["files"] == [str(media)]
+    assert payload["resolved"]["file_urls"] == ["https://example.com/a.pdf"]
+    assert payload["resolved"]["scheduled"] is True
+    assert payload["resolved"]["schedule_at"] is not None
+    assert backend.sent == []
+    assert _operation_count(store) == 0
+
+
 def test_cli_messages_send_dry_run_missing_topic_errors(
     minimal_config_yaml: str,
     tmp_path: Path,

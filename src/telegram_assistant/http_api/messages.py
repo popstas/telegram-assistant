@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
@@ -33,6 +34,8 @@ from telegram_assistant.messages import (
     SendMessageRequest,
     get_recent_messages,
     mass_send_message,
+    normalize_attachment_inputs,
+    resolve_schedule_at,
     send_message,
 )
 from telegram_assistant.persistence.store import OperationStore
@@ -45,7 +48,7 @@ from telegram_assistant.topics import (
 
 
 class MessageSendBody(BaseModel):
-    text: str = Field(..., min_length=1)
+    text: str | None = None
     telegram_chat_id: int | None = None
     chat_name: str | None = None
     # Flexible entity reference (numeric id with/without -100, @username, t.me /
@@ -56,6 +59,10 @@ class MessageSendBody(BaseModel):
     telegram_topic_id: int | None = None
     topic_name: str | None = None
     operation_id: str | None = None
+    files: list[str] | None = None
+    file_urls: list[str] | None = None
+    schedule_at: datetime | None = None
+    delay_seconds: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _shape(self) -> MessageSendBody:
@@ -65,6 +72,11 @@ class MessageSendBody(BaseModel):
         has_folder = self.folder_name is not None
         has_topic_name = self.topic_name is not None
         has_topic_id = self.telegram_topic_id is not None
+        has_attachments = bool(self.files or self.file_urls)
+        has_schedule = self.schedule_at is not None or self.delay_seconds is not None
+
+        if self.schedule_at is not None and self.delay_seconds is not None:
+            raise ValueError("provide exactly one of schedule_at or delay_seconds")
 
         # ``entity`` is a direct chat reference, equivalent to telegram_chat_id
         # for shape purposes (no folder lookup needed).
@@ -87,6 +99,12 @@ class MessageSendBody(BaseModel):
                     "telegram_topic_id is not valid in mass mode; "
                     "use topic_name to resolve per chat"
                 )
+            if has_attachments or has_schedule:
+                raise ValueError(
+                    "media attachments and scheduling are only supported for targeted sends"
+                )
+            if not (self.text and self.text.strip()):
+                raise ValueError("mass send requires non-empty text")
             return self
 
         if targeted_refs > 1:
@@ -95,6 +113,8 @@ class MessageSendBody(BaseModel):
             )
         if has_chat_name and not has_folder:
             raise ValueError("chat_name requires folder_name")
+        if not (self.text and self.text.strip()) and not has_attachments:
+            raise ValueError("must provide text or at least one attachment")
         return self
 
 
@@ -199,6 +219,21 @@ def build_router() -> APIRouter:
     async def send(body: MessageSendBody, request: Request) -> dict[str, Any]:
         backend = _message_backend_or_503(request)
         store = _store_or_503(request)
+        try:
+            files, file_urls = normalize_attachment_inputs(
+                files=body.files,
+                file_urls=body.file_urls,
+            )
+            schedule_at = resolve_schedule_at(
+                schedule_at=body.schedule_at,
+                delay_seconds=body.delay_seconds,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        text = body.text or ""
 
         is_mass = (
             body.telegram_chat_id is None
@@ -226,7 +261,7 @@ def build_router() -> APIRouter:
                     request=MassSendRequest(
                         folder_name=body.folder_name or "",
                         topic_name=body.topic_name or "",
-                        text=body.text,
+                        text=text,
                         folder_id=body.folder_id,
                         operation_id=body.operation_id,
                     ),
@@ -298,11 +333,14 @@ def build_router() -> APIRouter:
 
         domain_request = SendMessageRequest(
             telegram_chat_id=telegram_chat_id,
-            text=body.text,
+            text=text,
             telegram_topic_id=telegram_topic_id,
             operation_id=body.operation_id,
             chat_name=chat_name_for_log,
             topic_name=topic_name_for_log,
+            files=files,
+            file_urls=file_urls,
+            schedule_at=schedule_at,
         )
 
         authorizer = build_authorizer(

@@ -2451,7 +2451,31 @@ def _build_message_backends(config_path: Path | None):
 
 @messages_app.command("send")
 def messages_send(
-    text: str = typer.Option(..., "--text", help="Message text or service command."),
+    text: str | None = typer.Option(
+        None,
+        "--text",
+        help="Message text, caption, or service command.",
+    ),
+    files: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--file",
+        help="Local file path to send as media/document; repeat for multiple.",
+    ),
+    file_urls: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--file-url",
+        help="HTTP(S) file URL to send as media/document; repeat for multiple.",
+    ),
+    schedule_at: str | None = typer.Option(
+        None,
+        "--schedule-at",
+        help="ISO-8601 datetime for scheduled send.",
+    ),
+    delay: str | None = typer.Option(
+        None,
+        "--delay",
+        help="Relative delay for scheduled send, e.g. 10m, 2h, or 1d.",
+    ),
     chat_id: int | None = typer.Option(
         None,
         "--chat-id",
@@ -2527,7 +2551,9 @@ def messages_send(
         SendMessageRequest,
         is_service_command,
         mass_send_message,
+        normalize_attachment_inputs,
         redact_message_text,
+        resolve_schedule_at,
         send_message,
     )
     from telegram_assistant.topics import (
@@ -2560,6 +2586,38 @@ def messages_send(
         )
         raise typer.Exit(code=2)
 
+    try:
+        normalized_files, normalized_file_urls = normalize_attachment_inputs(
+            files=files,
+            file_urls=file_urls,
+        )
+        resolved_schedule_at = resolve_schedule_at(
+            schedule_at=schedule_at,
+            delay=delay,
+        )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    text_value = text or ""
+    has_attachments = bool(normalized_files or normalized_file_urls)
+    has_schedule = resolved_schedule_at is not None
+    if is_mass and (has_attachments or has_schedule):
+        typer.echo(
+            "media attachments and scheduling are only supported for targeted sends",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if is_mass and not text_value.strip():
+        typer.echo("mass send requires non-empty --text", err=True)
+        raise typer.Exit(code=2)
+    if not is_mass and not text_value.strip() and not has_attachments:
+        typer.echo(
+            "messages send requires non-empty --text or at least one attachment",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
     config, manager, store, open_backends = _build_message_backends(config_path)
 
     def _split_message_backends(opened):
@@ -2580,9 +2638,6 @@ def messages_send(
         effective_folder_id = folder_id
 
     if dry_run:
-        if not text or not text.strip():
-            typer.echo("messages send requires non-empty --text", err=True)
-            raise typer.Exit(code=2)
         if is_mass and not (topic_name or "").strip():
             typer.echo(
                 "mass mode requires --topic-name (and --folder-name resolves the folder)",
@@ -2590,8 +2645,8 @@ def messages_send(
             )
             raise typer.Exit(code=2)
 
-        service = is_service_command(text)
-        display_text = redact_message_text(text) if service else text
+        service = is_service_command(text_value)
+        display_text = redact_message_text(text_value) if service else text_value
 
         async def _resolve_send() -> dict[str, object]:
             try:
@@ -2753,6 +2808,14 @@ def messages_send(
                 "topic_name": topic_name,
                 "text": display_text,
                 "is_service_command": service,
+                "files": list(normalized_files),
+                "file_urls": list(normalized_file_urls),
+                "schedule_at": (
+                    resolved_schedule_at.isoformat()
+                    if resolved_schedule_at is not None
+                    else None
+                ),
+                "scheduled": resolved_schedule_at is not None,
                 "items": items_out,
                 "items_count": len(items_out),
                 "send_count": send_count,
@@ -2784,6 +2847,14 @@ def messages_send(
                 "topic_name": topic_name,
                 "text": display_text,
                 "is_service_command": service,
+                "files": list(normalized_files),
+                "file_urls": list(normalized_file_urls),
+                "schedule_at": (
+                    resolved_schedule_at.isoformat()
+                    if resolved_schedule_at is not None
+                    else None
+                ),
+                "scheduled": resolved_schedule_at is not None,
                 "operation_id": operation_id,
             }
             if chat_name is not None:
@@ -2827,7 +2898,7 @@ def messages_send(
                 req = MassSendRequest(
                     folder_name=resolved_folder_name or "",
                     topic_name=topic_name or "",
-                    text=text,
+                    text=text_value,
                     folder_id=effective_folder_id,
                     operation_id=operation_id,
                 )
@@ -2874,11 +2945,14 @@ def messages_send(
 
             req_single = SendMessageRequest(
                 telegram_chat_id=resolved_chat_id,
-                text=text,
+                text=text_value,
                 telegram_topic_id=resolved_topic_id,
                 operation_id=operation_id,
                 chat_name=resolved_chat_name,
                 topic_name=resolved_topic_name,
+                files=normalized_files,
+                file_urls=normalized_file_urls,
+                schedule_at=resolved_schedule_at,
             )
             result_single, op = await send_message(
                 backend=message_backend,

@@ -1,5 +1,11 @@
 """Message-send domain shared by HTTP, CLI, and the worker."""
 
+from telegram_assistant.messages.input_validation import (
+    normalize_attachment_inputs,
+    parse_relative_delay,
+    parse_schedule_at,
+    resolve_schedule_at,
+)
 from telegram_assistant.messages.service import (
     MassSendItemResult,
     MassSendRequest,
@@ -42,6 +48,10 @@ __all__ = [
     "get_recent_messages",
     "is_service_command",
     "mass_send_message",
+    "normalize_attachment_inputs",
+    "parse_relative_delay",
+    "parse_schedule_at",
     "redact_message_text",
+    "resolve_schedule_at",
     "send_message",
 ]

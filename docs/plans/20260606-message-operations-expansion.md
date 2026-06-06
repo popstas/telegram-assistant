@@ -133,21 +133,21 @@ ruff check src tests
 
 ### Task 3: Wire media and schedule into CLI/HTTP
 
-- [ ] CLI `messages send`:
+- [x] CLI `messages send`:
   - add repeated `--file`;
   - add repeated `--file-url`;
   - add `--schedule-at`;
   - add `--delay`;
   - include attachments and scheduling in `--dry-run` JSON.
-- [ ] HTTP `POST /telegram/messages`:
+- [x] HTTP `POST /telegram/messages`:
   - add `files`, `file_urls`, `schedule_at`, `delay_seconds`;
   - validate schedule shape with the Pydantic model;
   - return media ids and scheduling fields in the response.
-- [ ] Add parsing helper for relative delays in CLI and HTTP; test `10m`, `2h`, `1d`, invalid units, and past absolute dates.
-- [ ] Decide past schedule behavior in code: reject past `schedule_at` with exit code 2 / HTTP 400.
-- [ ] Add CLI tests for dry-run and real fake-backed media/scheduled sends.
-- [ ] Add HTTP tests for media and scheduled sends.
-- [ ] Run `.venv/bin/pytest -q tests/test_messages.py tests/test_dry_run_members_messages.py`.
+- [x] Add parsing helper for relative delays in CLI and HTTP; test `10m`, `2h`, `1d`, invalid units, and past absolute dates.
+- [x] Decide past schedule behavior in code: reject past `schedule_at` with exit code 2 / HTTP 400.
+- [x] Add CLI tests for dry-run and real fake-backed media/scheduled sends.
+- [x] Add HTTP tests for media and scheduled sends.
+- [x] Run `.venv/bin/pytest -q tests/test_messages.py tests/test_dry_run_members_messages.py`.
 
 ### Task 4: Folder remove-chat domain, Telethon adapter, CLI, and HTTP
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -27,7 +27,9 @@ from telegram_assistant.messages import (
     SendMessageRequest,
     is_service_command,
     mass_send_message,
+    parse_relative_delay,
     redact_message_text,
+    resolve_schedule_at,
     send_message,
 )
 from telegram_assistant.persistence import (
@@ -151,6 +153,22 @@ def test_redact_message_text_redacts_args_only_for_commands() -> None:
     assert redact_message_text("/task 12345") == "/task [redacted]"
     assert redact_message_text("/start") == "/start"
     assert redact_message_text("hello world") == "hello world"
+
+
+def test_parse_relative_delay_units() -> None:
+    assert parse_relative_delay("10m") == timedelta(minutes=10)
+    assert parse_relative_delay("2h") == timedelta(hours=2)
+    assert parse_relative_delay("1d") == timedelta(days=1)
+
+
+def test_parse_relative_delay_rejects_invalid_units() -> None:
+    with pytest.raises(ValueError, match="delay"):
+        parse_relative_delay("5w")
+
+
+def test_resolve_schedule_at_rejects_past_absolute_date() -> None:
+    with pytest.raises(ValueError, match="future"):
+        resolve_schedule_at(schedule_at=datetime(2000, 1, 1, tzinfo=UTC))
 
 
 # ---------------------------------------------------------------------------
@@ -773,6 +791,101 @@ def test_http_send_service_command(minimal_config_yaml: str) -> None:
     assert backend.sent[0]["text"] == "/task 12345"
 
 
+def test_http_send_media_and_schedule(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "report.txt"
+    media.write_text("report")
+    backend = FakeMessageBackend(next_result=[701, 702])
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "text": "caption",
+            "files": [str(media)],
+            "file_urls": ["https://example.com/a.pdf"],
+            "schedule_at": "2099-06-07T12:00:00+00:00",
+            "operation_id": "media-http",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["telegram_message_id"] == 701
+    assert body["telegram_message_ids"] == [701, 702]
+    assert body["scheduled"] is True
+    assert body["schedule_at"] == "2099-06-07T12:00:00+00:00"
+    assert body["attachments"] == [
+        {"kind": "file", "reference": str(media)},
+        {"kind": "url", "reference": "https://example.com/a.pdf"},
+    ]
+    assert backend.sent[0]["files"] == (str(media), "https://example.com/a.pdf")
+    assert backend.sent[0]["schedule_at"] == datetime(
+        2099, 6, 7, 12, 0, tzinfo=UTC
+    )
+
+
+def test_http_send_accepts_delay_seconds(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "report.txt"
+    media.write_text("report")
+    backend = FakeMessageBackend()
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+    before = datetime.now()
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "files": [str(media)],
+            "delay_seconds": 60,
+            "operation_id": "delay-http",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    scheduled = backend.sent[0]["schedule_at"]
+    assert scheduled is not None
+    assert scheduled >= before
+    assert resp.json()["scheduled"] is True
+
+
+def test_http_send_rejects_past_schedule(
+    minimal_config_yaml: str,
+) -> None:
+    backend = FakeMessageBackend()
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "text": "hi",
+            "schedule_at": "2000-01-01T00:00:00+00:00",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert backend.sent == []
+
+
+def test_http_send_rejects_invalid_file_url(minimal_config_yaml: str) -> None:
+    backend = FakeMessageBackend()
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "file_urls": ["ftp://example.com/a.pdf"],
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert backend.sent == []
+
+
 def test_http_send_rejects_missing_target(minimal_config_yaml: str) -> None:
     backend = FakeMessageBackend()
     client = _http_client(minimal_config_yaml, message_backend=backend)
@@ -968,6 +1081,56 @@ def test_cli_messages_send_targeted_with_topic_name_resolves(
     )
     assert result.exit_code == 0, result.stdout
     assert backend.sent[0]["topic_id"] == 22
+
+
+def test_cli_messages_send_media_and_schedule(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    media = tmp_path / "report.txt"
+    media.write_text("report")
+    backend = FakeMessageBackend(next_result=[801, 802])
+    folder_backend = FakeFolderBackend([])
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--text",
+            "caption",
+            "--file",
+            str(media),
+            "--file-url",
+            "https://example.com/a.pdf",
+            "--schedule-at",
+            "2099-06-07T12:00:00+00:00",
+            "--chat-id",
+            "-100",
+            "--operation-id",
+            "cli-media",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["telegram_message_id"] == 801
+    assert payload["telegram_message_ids"] == [801, 802]
+    assert payload["scheduled"] is True
+    assert payload["attachments"] == [
+        {"kind": "file", "reference": str(media)},
+        {"kind": "url", "reference": "https://example.com/a.pdf"},
+    ]
+    assert backend.sent[0]["files"] == (str(media), "https://example.com/a.pdf")
+    assert backend.sent[0]["schedule_at"] == datetime(
+        2099, 6, 7, 12, 0, tzinfo=UTC
+    )
 
 
 def test_cli_messages_send_requires_chat_or_topic_for_mass(
