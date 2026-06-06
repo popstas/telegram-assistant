@@ -97,18 +97,18 @@ authenticate with Google and drive Telegram operations through the same safety r
 
 ### Task 2: Build the local OAuth Authorization Server
 
-- [ ] Implement discovery endpoints: `/.well-known/oauth-authorization-server` and the MCP
+- [x] Implement discovery endpoints: `/.well-known/oauth-authorization-server` and the MCP
       protected-resource metadata, populated from `McpConfig`
-- [ ] Implement Dynamic Client Registration (`/register`)
-- [ ] Implement `/authorize`: redirect to Google OIDC, validate the returned id_token, and enforce
+- [x] Implement Dynamic Client Registration (`/register`)
+- [x] Implement `/authorize`: redirect to Google OIDC, validate the returned id_token, and enforce
       the allowed-emails/allowed-domains allowlist before issuing an authorization code
-- [ ] Implement `/token`: exchange the code for an audience-bound, scoped, signed MCP access token
+- [x] Implement `/token`: exchange the code for an audience-bound, scoped, signed MCP access token
       with config-driven TTLs
-- [ ] Implement token-validation logic (signature, audience, expiry, required scopes) for reuse by
+- [x] Implement token-validation logic (signature, audience, expiry, required scopes) for reuse by
       the `/mcp` mount
-- [ ] Introduce a fake-Google OIDC test double so the flow is exercisable without live Google
-- [ ] write tests for the fake-Google login flow, allowlist enforcement, and token audience/scope/TTL
-- [ ] run project tests - must pass before next task
+- [x] Introduce a fake-Google OIDC test double so the flow is exercisable without live Google
+- [x] write tests for the fake-Google login flow, allowlist enforcement, and token audience/scope/TTL
+- [x] run project tests - must pass before next task
 
 ### Task 3: Mount the FastMCP streamable-HTTP server at `/mcp`
 

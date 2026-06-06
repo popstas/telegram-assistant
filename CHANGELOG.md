@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- Add mcp config validation
+
 ### Documentation
 
 - Move plans

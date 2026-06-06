@@ -18,6 +18,11 @@ from telegram_assistant.health import collect_health, default_database_path
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.http_api.folders import build_router as build_folders_router
 from telegram_assistant.http_api.groups import build_router as build_groups_router
+from telegram_assistant.http_api.mcp import (
+    GoogleOidcProvider,
+    OAuthAuthorizationServer,
+    build_oauth_router,
+)
 from telegram_assistant.http_api.members import build_router as build_members_router
 from telegram_assistant.http_api.messages import build_router as build_messages_router
 from telegram_assistant.http_api.notifications import (
@@ -350,6 +355,7 @@ def create_app(
     notification_backend_factory: NotificationBackendFactory | None = None,
     resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
+    mcp_google_provider: GoogleOidcProvider | None = None,
 ) -> FastAPI:
     """Build a FastAPI instance.
 
@@ -512,6 +518,16 @@ def create_app(
             # smoke test) leave the slot empty — the groups router will return
             # 503 on demand rather than failing at app startup.
             app.state.operation_store = None
+
+    if config.mcp is not None and config.mcp.enabled:
+        mcp_oauth_server = OAuthAuthorizationServer(
+            config.mcp,
+            google_provider=mcp_google_provider,
+        )
+        app.state.mcp_oauth_server = mcp_oauth_server
+        app.include_router(build_oauth_router(mcp_oauth_server))
+    else:
+        app.state.mcp_oauth_server = None
 
     app.include_router(_build_health_router())
     app.include_router(_build_protected_router(), prefix="/telegram")
