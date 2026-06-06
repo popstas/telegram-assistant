@@ -5,6 +5,7 @@
 
 ### Features
 
+- Document optional mcp server
 - Add mcp oauth integration tests
 - Expose MCP Telegram tools
 - Mount fastmcp streamable http server

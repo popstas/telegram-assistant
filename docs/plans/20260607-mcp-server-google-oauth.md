@@ -159,11 +159,11 @@ authenticate with Google and drive Telegram operations through the same safety r
 
 ### Task 7: Verify acceptance criteria
 
-- [ ] verify all requirements from Overview are implemented (optional `/mcp` mount disabled by
+- [x] verify all requirements from Overview are implemented (optional `/mcp` mount disabled by
       default; full Google-OAuth AS with audience-bound tokens; `telegram_` tools reusing domain
       services + access policy + idempotency; `/health` and `/telegram/*` unchanged)
-- [ ] run full project test suite (`pytest`)
-- [ ] run project linter (`ruff check src tests`) - all issues must be fixed
+- [x] run full project test suite (`pytest`)
+- [x] run project linter (`ruff check src tests`) - all issues must be fixed
 
 ## Post-Completion
 
