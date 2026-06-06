@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Documentation
+
+- plan: Plan message ops expansion
+
 ## v0.3.0 - 2026-06-05
 
 ### Features

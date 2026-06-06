@@ -86,6 +86,7 @@ ruff check src tests
   - New resource group: `notifications mute` / `notifications unmute` or `chats mute` / `chats unmute`.
   - Prefer `notifications` because the Telethon operation is notification settings, not chat membership.
   - CLI accepts `--entity`, `--chat-id`, or `--chat-name` and optional `--duration`.
+  - Allow to pass mute duration in hours (default is forever).
   - HTTP endpoints: `POST /telegram/notifications/mute` and `POST /telegram/notifications/unmute`.
 - Folder remove:
   - Add inverse of existing `folders add-chat`.
