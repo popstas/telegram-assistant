@@ -26,6 +26,8 @@ from telegram_assistant.http_api.access import (
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.messages import (
     AttachmentError,
+    ForwardBackend,
+    ForwardMessagesRequest,
     MassSendRequest,
     MessageBackend,
     MessageReadBackend,
@@ -36,6 +38,7 @@ from telegram_assistant.messages import (
     ScheduleError,
     SendMessageRequest,
     SendReactionRequest,
+    forward_messages,
     get_recent_messages,
     mass_send_message,
     resolve_schedule_at,
@@ -176,6 +179,41 @@ class ReactionBody(BaseModel):
         return self
 
 
+class ForwardBody(BaseModel):
+    """Forward one or more messages from a source chat into a target chat.
+
+    The source is one of ``from_chat_id`` / ``from_entity``; the target is one
+    of ``to_chat_id`` / ``to_entity``. ``message_ids`` must hold at least one
+    positive id. Forwarding READ-gates the source and WRITE-gates the target.
+    """
+
+    message_ids: list[int]
+    from_chat_id: int | None = None
+    from_entity: str | int | None = None
+    to_chat_id: int | None = None
+    to_entity: str | int | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> ForwardBody:
+        if not self.message_ids:
+            raise ValueError("message_ids must contain at least one id")
+        if any(mid <= 0 for mid in self.message_ids):
+            raise ValueError("every message_id must be a positive integer")
+        source_refs = sum(
+            [self.from_chat_id is not None, self.from_entity is not None]
+        )
+        if source_refs != 1:
+            raise ValueError(
+                "provide exactly one of from_chat_id or from_entity"
+            )
+        target_refs = sum(
+            [self.to_chat_id is not None, self.to_entity is not None]
+        )
+        if target_refs != 1:
+            raise ValueError("provide exactly one of to_chat_id or to_entity")
+        return self
+
+
 def _message_backend_or_503(request: Request) -> MessageBackend:
     factory = getattr(request.app.state, "message_backend_factory", None)
     if factory is None:
@@ -208,6 +246,22 @@ def _reaction_backend_or_503(request: Request) -> ReactionBackend:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram reaction backend is not available",
+        )
+    return backend
+
+
+def _forward_backend_or_503(request: Request) -> ForwardBackend:
+    factory = getattr(request.app.state, "forward_backend_factory", None)
+    if factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram forward backend is not configured (session may be unauthorized)",
+        )
+    backend = factory(request)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram forward backend is not available",
         )
     return backend
 
@@ -501,6 +555,45 @@ def build_router() -> APIRouter:
                     emoji=body.emoji,
                     clear=body.clear,
                     chat_name=chat_name_for_log,
+                ),
+                authorizer=authorizer,
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        return result.to_dict()
+
+    @router.post("/messages/forward")
+    async def forward(body: ForwardBody, request: Request) -> dict[str, Any]:
+        """Forward messages from a source chat to a target chat.
+
+        READ-gated on the source, WRITE-gated on the target.
+        """
+        backend = _forward_backend_or_503(request)
+
+        if body.from_entity is not None:
+            from_chat_id = await resolve_entity_chat_id(request, body.from_entity)
+        else:
+            from_chat_id = body.from_chat_id  # type: ignore[assignment]
+        if body.to_entity is not None:
+            to_chat_id = await resolve_entity_chat_id(request, body.to_entity)
+        else:
+            to_chat_id = body.to_chat_id  # type: ignore[assignment]
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        try:
+            result = await forward_messages(
+                backend,
+                request=ForwardMessagesRequest(
+                    from_chat_id=from_chat_id,
+                    to_chat_id=to_chat_id,
+                    message_ids=tuple(body.message_ids),
                 ),
                 authorizer=authorizer,
             )

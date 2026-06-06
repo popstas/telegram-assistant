@@ -172,8 +172,44 @@ class TelethonReactionBackend:
             raise translate_flood_wait(exc) from exc
 
 
+class TelethonForwardBackend:
+    """Adapter from the Telethon ``TelegramClient`` to :class:`ForwardBackend`.
+
+    Resolves both peers, then calls ``forward_messages(target, ids, from_peer)``.
+    A single forwarded message comes back as one ``Message``; several come back
+    as a ``list[Message]`` — both are normalised to a list of ids in request
+    order. ``FloodWaitError`` is translated so the worker queue can
+    pause-and-retry rather than mark a generic failure.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def forward_messages(
+        self,
+        *,
+        from_chat_id: int,
+        to_chat_id: int,
+        message_ids: tuple[int, ...],
+    ) -> list[int]:
+        try:
+            from_peer = await self._client.get_input_entity(from_chat_id)
+            to_peer = await self._client.get_input_entity(to_chat_id)
+            sent = await self._client.forward_messages(
+                to_peer,
+                list(message_ids),
+                from_peer=from_peer,
+            )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        if isinstance(sent, (list, tuple)):
+            return [_message_id(m) for m in sent]
+        return [_message_id(sent)]
+
+
 __all__ = [
     "TelethonMessageReadBackend",
     "TelethonMessageBackend",
     "TelethonReactionBackend",
+    "TelethonForwardBackend",
 ]

@@ -26,6 +26,7 @@ from telegram_assistant.http_api.notifications import (
 from telegram_assistant.http_api.topics import build_router as build_topics_router
 from telegram_assistant.members import MemberAddBackend, MemberRemoveBackend
 from telegram_assistant.messages import (
+    ForwardBackend,
     MessageBackend,
     MessageReadBackend,
     ReactionBackend,
@@ -47,6 +48,7 @@ MemberRemoveBackendFactory = Callable[[Request], MemberRemoveBackend | None]
 MessageBackendFactory = Callable[[Request], MessageBackend | None]
 MessageReadBackendFactory = Callable[[Request], MessageReadBackend | None]
 ReactionBackendFactory = Callable[[Request], ReactionBackend | None]
+ForwardBackendFactory = Callable[[Request], ForwardBackend | None]
 NotificationBackendFactory = Callable[[Request], NotificationBackend | None]
 ResolverFactory = Callable[[Request], EntityResolver | None]
 
@@ -260,6 +262,30 @@ def _default_reaction_backend_factory(
     return _factory
 
 
+def _default_forward_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> ForwardBackendFactory:
+    """Build a Telethon-backed message-forward backend factory.
+
+    Mirrors :func:`_default_folder_backend_factory`: returns ``None`` until a
+    Telethon client is available so the forward endpoint can return 503.
+    """
+
+    def _factory(_request: Request) -> ForwardBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonForwardBackend,
+        )
+
+        return TelethonForwardBackend(client)
+
+    return _factory
+
+
 def _default_notification_backend_factory(
     session_manager: TelethonSessionManager | None,
 ) -> NotificationBackendFactory:
@@ -320,6 +346,7 @@ def create_app(
     message_backend_factory: MessageBackendFactory | None = None,
     message_read_backend_factory: MessageReadBackendFactory | None = None,
     reaction_backend_factory: ReactionBackendFactory | None = None,
+    forward_backend_factory: ForwardBackendFactory | None = None,
     notification_backend_factory: NotificationBackendFactory | None = None,
     resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
@@ -459,6 +486,11 @@ def create_app(
         reaction_backend_factory
         if reaction_backend_factory is not None
         else _default_reaction_backend_factory(session_manager)
+    )
+    app.state.forward_backend_factory = (
+        forward_backend_factory
+        if forward_backend_factory is not None
+        else _default_forward_backend_factory(session_manager)
     )
     app.state.notification_backend_factory = (
         notification_backend_factory

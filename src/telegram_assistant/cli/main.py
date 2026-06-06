@@ -3372,6 +3372,218 @@ def messages_react(
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
 
 
+def _build_forward_backends(config_path: Path | None):
+    """Open the Telethon-backed forward + folder backends.
+
+    ``_open`` returns ``(forward_backend, folder_backend)``. The folder backend
+    feeds the authorizer's folder rules. Tests monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonForwardBackend,
+        )
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonForwardBackend(client),
+            TelethonFolderBackend(client),
+        )
+
+    return config, manager, _open
+
+
+@messages_app.command("forward")
+def messages_forward(
+    message_id: list[int] = typer.Option(  # noqa: B008
+        None,
+        "--message-id",
+        help="Numeric id of a message to forward (repeatable).",
+    ),
+    from_chat_id: int | None = typer.Option(
+        None, "--from-chat-id", help="Numeric source Telegram chat id."
+    ),
+    from_entity: str | None = typer.Option(
+        None,
+        "--from-entity",
+        help="Flexible source entity reference (numeric id, @username, link, "
+        "phone, or exact title) resolved via the shared resolver.",
+    ),
+    to_chat_id: int | None = typer.Option(
+        None, "--to-chat-id", help="Numeric target Telegram chat id."
+    ),
+    to_entity: str | None = typer.Option(
+        None,
+        "--to-entity",
+        help="Flexible target entity reference (numeric id, @username, link, "
+        "phone, or exact title) resolved via the shared resolver.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without forwarding.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Forward messages from a source chat to a target chat.
+
+    READ-gated on the source, WRITE-gated on the target.
+    """
+    from telegram_assistant.messages import (
+        ForwardMessagesRequest,
+        forward_messages,
+    )
+
+    message_ids = tuple(message_id or ())
+    if not message_ids:
+        typer.echo("at least one --message-id is required", err=True)
+        raise typer.Exit(code=2)
+    if any(mid <= 0 for mid in message_ids):
+        typer.echo("every --message-id must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+    if sum([from_chat_id is not None, from_entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --from-chat-id or --from-entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if sum([to_chat_id is not None, to_entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --to-chat-id or --to-entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_forward_backends(config_path)
+
+    async def _resolve_target(folder_backend):
+        resolver = None
+        if (
+            config.telegram.access is not None
+            or from_entity is not None
+            or to_entity is not None
+        ):
+            from telegram_assistant.entities import TelethonEntityResolver
+
+            resolver = TelethonEntityResolver(await manager.get_client())
+
+        if from_entity is not None:
+            assert resolver is not None
+            resolved = await resolver.resolve(from_entity)
+            src_id = resolved.chat_id
+            src_name = resolved.title
+        else:
+            src_id = from_chat_id
+            src_name = None
+
+        if to_entity is not None:
+            assert resolver is not None
+            resolved = await resolver.resolve(to_entity)
+            tgt_id = resolved.chat_id
+            tgt_name = resolved.title
+        else:
+            tgt_id = to_chat_id
+            tgt_name = None
+
+        authorizer = _cli_authorizer(
+            config, resolver=resolver, folder_backend=folder_backend
+        )
+        return src_id, src_name, tgt_id, tgt_name, authorizer
+
+    if dry_run:
+
+        async def _resolve_only():
+            try:
+                _backend, folder_backend = await open_backends()
+                src_id, src_name, tgt_id, tgt_name, _auth = await _resolve_target(
+                    folder_backend
+                )
+                return src_id, src_name, tgt_id, tgt_name
+            finally:
+                try:
+                    await manager.disconnect()
+                except Exception:
+                    pass
+
+        try:
+            src_id, src_name, tgt_id, tgt_name = asyncio.run(_resolve_only())
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"messages forward failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        would = (
+            f"forward {list(message_ids)} from chat {src_id} to chat {tgt_id}"
+        )
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "messages.forward",
+            "would": would,
+            "resolved": {
+                "from_chat_id": src_id,
+                "from_chat_name": src_name,
+                "to_chat_id": tgt_id,
+                "to_chat_name": tgt_name,
+                "message_ids": list(message_ids),
+            },
+            "planned_actions": [would],
+            "warnings": [],
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            backend, folder_backend = await open_backends()
+            src_id, src_name, tgt_id, tgt_name, authorizer = (
+                await _resolve_target(folder_backend)
+            )
+            result = await forward_messages(
+                backend,
+                request=ForwardMessagesRequest(
+                    from_chat_id=src_id,
+                    to_chat_id=tgt_id,
+                    message_ids=message_ids,
+                    from_chat_name=src_name,
+                    to_chat_name=tgt_name,
+                ),
+                authorizer=authorizer,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"messages forward failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
 # --- notifications ----------------------------------------------------------
 
 notifications_app = typer.Typer(

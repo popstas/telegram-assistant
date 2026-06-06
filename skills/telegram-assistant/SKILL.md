@@ -60,8 +60,9 @@ Commands fall into three buckets:
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `topics create`, `topics close`, `messages send` (single chat),
-   `messages react`, `notifications mute`, `notifications unmute`,
-   `folders add-chat`, `folders remove-chat`, `operations retry`. Always:
+   `messages react`, `messages forward`, `notifications mute`,
+   `notifications unmute`, `folders add-chat`, `folders remove-chat`,
+   `operations retry`. Always:
    prepare command → run with `--dry-run` →
    show the plan and dry-run output → wait for explicit human confirmation
    → run the same command without `--dry-run`.
@@ -137,9 +138,9 @@ not skip steps, even if the request looks obvious.
    `--dry-run` first. The supported set is: `groups create`,
    `groups set-layout`, `topics create`, `topics bulk-create`,
    `topics close`, `members bulk-add`, `members bulk-remove`,
-   `messages send`, `messages react`, `notifications mute`,
-   `notifications unmute`, `folders add-chat`, `folders remove-chat`,
-   `operations retry`.
+   `messages send`, `messages react`, `messages forward`,
+   `notifications mute`, `notifications unmute`, `folders add-chat`,
+   `folders remove-chat`, `operations retry`.
 8. Present a short plan to the human: what was found (chat id, folder,
    matched users), the full command that would run, and the relevant parts
    of the dry-run output (`status = dry_run`, planned actions, validation
@@ -188,6 +189,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
+| `messages` | `forward` | Forward one or more messages (`--message-id`, repeatable) from a source to a target chat (READ-gated source, WRITE-gated target). | `telegram-assistant messages forward ...` |
 | `notifications` | `mute` | Mute a chat/contact's notifications, forever or for `--duration` hours. | `telegram-assistant notifications mute ...` |
 | `notifications` | `unmute` | Restore normal notifications for a chat/contact. | `telegram-assistant notifications unmute ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
@@ -211,7 +213,9 @@ Most chat-targeting commands (`messages send`, `messages recent`,
 `members bulk-add`/`bulk-remove`, `notifications mute`/`unmute`,
 `folders add-chat`/`remove-chat`) also accept
 `--entity` as a flexible alternative to
-`--chat-id` / `--chat-name`. `--entity` takes a numeric id (with or
+`--chat-id` / `--chat-name`. `messages forward` uses the same reference
+forms via `--from-entity` / `--to-entity` (alternatives to
+`--from-chat-id` / `--to-chat-id`). `--entity` takes a numeric id (with or
 without the `-100` prefix), an `@username`, a `t.me` / invite link, a
 phone, or an exact chat title; exactly one of `--chat-id` / `--chat-name`
 / `--entity` is allowed per call. When the resolver cannot resolve the
@@ -453,6 +457,26 @@ edits `data/config.yml` to widen access on its own.
 - Typical errors: `exactly one of --chat-id, --chat-name, or --entity must
   be supplied`, `--message-id must be a positive integer`, `provide either
   --emoji or --clear, not both`, `access denied ...` (exit code 3), entity
+  not-found / ambiguous (exit code 2).
+
+#### `messages` / `forward`
+
+- Extract: source reference (`--from-chat-id` / `--from-entity`), target
+  reference (`--to-chat-id` / `--to-entity`), and one or more `--message-id`
+  (repeat the flag per message to forward).
+- Required flags: exactly one source reference, exactly one target reference,
+  and at least one `--message-id`.
+- From config: none.
+- Temp file: no.
+- Automation: none — forwarding is READ-gated on the source and WRITE-gated
+  on the target. Run `--dry-run` first, show the plan, wait for confirmation,
+  then run without `--dry-run`. Map «перешли сообщение N из чата A в чат B» →
+  `--from-entity A --to-entity B --message-id N`.
+- Confirmation: required (bucket 2).
+- Typical errors: `at least one --message-id is required`, `every
+  --message-id must be a positive integer`, `exactly one of --from-chat-id or
+  --from-entity must be supplied`, `exactly one of --to-chat-id or
+  --to-entity must be supplied`, `access denied ...` (exit code 3), entity
   not-found / ambiguous (exit code 2).
 
 #### `notifications` / `mute`

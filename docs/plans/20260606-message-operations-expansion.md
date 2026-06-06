@@ -200,22 +200,22 @@ ruff check src tests
 
 ### Task 7: Forward messages
 
-- [ ] Add forward request/result types and backend protocol in `messages/service.py` or `messages/forwarding.py`.
-- [ ] Implement `forward_messages(...)`:
+- [x] Add forward request/result types and backend protocol in `messages/service.py` or `messages/forwarding.py`.
+- [x] Implement `forward_messages(...)`:
   - validate one or more positive `message_ids`;
   - resolve source and target before authorization in surfaces;
   - require READ on source and WRITE on target;
   - call backend and return forwarded ids.
-- [ ] Implement Telethon adapter with `client.forward_messages(target, message_ids, from_peer=source)`.
-- [ ] Add CLI `messages forward`:
+- [x] Implement Telethon adapter with `client.forward_messages(target, message_ids, from_peer=source)`.
+- [x] Add CLI `messages forward`:
   - source: `--from-chat-id` / `--from-entity`;
   - target: existing target flags or `--to-chat-id` / `--to-entity`;
   - repeated `--message-id`;
   - `--dry-run`.
-- [ ] Add HTTP `POST /telegram/messages/forward`.
-- [ ] Add tests for validation, source READ denial, target WRITE denial, CLI dry-run, HTTP success/403, and fake Telethon request construction.
-- [ ] Update README and skill catalog.
-- [ ] Run `.venv/bin/pytest -q tests/test_messages_forward.py tests/test_skill_inventory.py`.
+- [x] Add HTTP `POST /telegram/messages/forward`.
+- [x] Add tests for validation, source READ denial, target WRITE denial, CLI dry-run, HTTP success/403, and fake Telethon request construction.
+- [x] Update README and skill catalog.
+- [x] Run `.venv/bin/pytest -q tests/test_messages_forward.py tests/test_skill_inventory.py`.
 
 ### Task 8: Documentation, skill sync, e2e, and full verification
 

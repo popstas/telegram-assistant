@@ -5,6 +5,12 @@ from telegram_assistant.messages.attachments import (
     validate_file_urls,
     validate_local_files,
 )
+from telegram_assistant.messages.forwarding import (
+    ForwardBackend,
+    ForwardMessagesRequest,
+    ForwardMessagesResult,
+    forward_messages,
+)
 from telegram_assistant.messages.reactions import (
     ReactionBackend,
     SendReactionRequest,
@@ -36,6 +42,9 @@ from telegram_assistant.messages.service import (
 
 __all__ = [
     "AttachmentError",
+    "ForwardBackend",
+    "ForwardMessagesRequest",
+    "ForwardMessagesResult",
     "MassSendItemResult",
     "MassSendRequest",
     "MassSendResult",
@@ -51,6 +60,7 @@ __all__ = [
     "SendMessageResult",
     "SendReactionRequest",
     "SendReactionResult",
+    "forward_messages",
     "get_recent_messages",
     "is_service_command",
     "mass_send_message",
