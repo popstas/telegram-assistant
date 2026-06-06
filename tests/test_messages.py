@@ -846,7 +846,7 @@ def test_http_send_accepts_delay_seconds(
         message_backend=backend,
         media_root=str(tmp_path),
     )
-    before = datetime.now()
+    before = datetime.now(UTC)
     resp = client.post(
         "/telegram/messages",
         json={

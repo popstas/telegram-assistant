@@ -5,6 +5,7 @@
 
 ### Features
 
+- Document message operations expansion
 - Add message forwarding
 - Add message reactions
 - Add notifications mute unmute
@@ -12,6 +13,10 @@
 - Wire media and scheduled message sends
 - Add Telethon media message backend
 - Expand message send domain
+
+### Bug Fixes
+
+- Address codex review findings
 
 ### Documentation
 

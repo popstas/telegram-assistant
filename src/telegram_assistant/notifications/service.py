@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from telegram_assistant.access.service import AccessLevel, Authorizer
@@ -67,7 +67,7 @@ async def mute_chat(
         await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
     mute_until = None
     if request.duration is not None:
-        mute_until = (now or datetime.now()) + request.duration
+        mute_until = (now or datetime.now(UTC)) + request.duration
     await backend.mute_chat(
         chat_id=request.telegram_chat_id,
         mute_until=mute_until,

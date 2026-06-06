@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -135,7 +135,11 @@ def enforce_media_root(
 
 
 def _now_for_relative(now: datetime | None) -> datetime:
-    return now or datetime.now()
+    # Telethon serialises naive datetimes as UTC (``_datetime_to_timestamp``),
+    # so a relative base must be timezone-aware or the resolved schedule is
+    # shifted by the host's UTC offset (and can land in the past on UTC-negative
+    # hosts, which Telegram rejects).
+    return now or datetime.now(UTC)
 
 
 def _now_for_datetime(value: datetime) -> datetime:
