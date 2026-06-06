@@ -29,6 +29,14 @@ from telegram_assistant.notifications import (
     mute_chat,
     unmute_chat,
 )
+from telegram_assistant.worker.queue import FloodWaitError
+
+
+def _translate_flood_wait(exc: FloodWaitError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail={"error": "needs_review", "message": str(exc)},
+    )
 
 
 class _TargetBody(BaseModel):
@@ -171,6 +179,8 @@ def build_router() -> APIRouter:
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc
+        except FloodWaitError as exc:
+            raise _translate_flood_wait(exc) from exc
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
@@ -195,6 +205,8 @@ def build_router() -> APIRouter:
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc
+        except FloodWaitError as exc:
+            raise _translate_flood_wait(exc) from exc
         return result.to_dict()
 
     return router

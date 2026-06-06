@@ -30,12 +30,15 @@ from telegram_assistant.worker.queue import FloodWaitError
 
 
 class FakeReactionBackend:
-    def __init__(self) -> None:
+    def __init__(self, *, raise_on_call: Exception | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._raise_on_call = raise_on_call
 
     async def set_reaction(
         self, *, chat_id: int, message_id: int, emoji: str | None
     ) -> None:
+        if self._raise_on_call is not None:
+            raise self._raise_on_call
         self.calls.append(
             {"chat_id": chat_id, "message_id": message_id, "emoji": emoji}
         )
@@ -191,7 +194,7 @@ async def test_telethon_clear_reaction_builds_request() -> None:
     backend = TelethonReactionBackend(client)
     await backend.set_reaction(chat_id=-100, message_id=7, emoji=None)
     req = client.requests[0]
-    assert req.reaction is None
+    assert req.reaction == []
 
 
 async def test_telethon_reaction_translates_flood_wait() -> None:
@@ -413,6 +416,7 @@ def _http_client(
     *,
     access_block: str | None = None,
     reaction_backend: FakeReactionBackend | None = None,
+    folder_backend: FakeFolderBackend | None = None,
     has_factory: bool = True,
 ) -> TestClient:
     config = load_config_from_text(_config_with_access(access_block))
@@ -422,7 +426,7 @@ def _http_client(
         reaction_backend_factory=(
             (lambda _r: reaction_backend) if has_factory else (lambda _r: None)
         ),
-        folder_backend_factory=lambda _r: None,
+        folder_backend_factory=lambda _r: folder_backend,
         resolver_factory=lambda _r: None,
         operation_store=_make_store(),
     )
@@ -443,6 +447,39 @@ def test_http_react_success() -> None:
     assert body["cleared"] is False
     assert body["telegram_message_id"] == 42
     assert len(backend.calls) == 1
+
+
+def test_http_react_by_chat_name_success() -> None:
+    backend = FakeReactionBackend()
+    folder_backend = FakeFolderBackend(
+        [
+            FolderSnapshot(
+                folder_id=2,
+                folder_name="Planfix clients",
+                chats=[FolderChat(chat_id=-100, title="Acme")],
+            )
+        ]
+    )
+    client = _http_client(
+        reaction_backend=backend, folder_backend=folder_backend
+    )
+
+    resp = client.post(
+        "/telegram/messages/reactions",
+        json={
+            "chat_name": "Acme",
+            "folder_name": "Planfix clients",
+            "message_id": 42,
+            "emoji": "👍",
+        },
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["chat_name"] == "Acme"
+    assert backend.calls == [
+        {"chat_id": -100, "message_id": 42, "emoji": "👍"}
+    ]
 
 
 def test_http_react_clear_success() -> None:
@@ -480,7 +517,19 @@ def test_http_react_503_when_backend_unavailable() -> None:
     assert resp.status_code == 503, resp.text
 
 
-def test_http_react_400_emoji_and_clear() -> None:
+def test_http_react_flood_wait_returns_needs_review() -> None:
+    backend = FakeReactionBackend(raise_on_call=FloodWaitError(9))
+    client = _http_client(reaction_backend=backend)
+    resp = client.post(
+        "/telegram/messages/reactions",
+        json={"telegram_chat_id": -100, "message_id": 42, "emoji": "👍"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["detail"]["error"] == "needs_review"
+
+
+def test_http_react_422_emoji_and_clear() -> None:
     backend = FakeReactionBackend()
     client = _http_client(reaction_backend=backend)
     resp = client.post(

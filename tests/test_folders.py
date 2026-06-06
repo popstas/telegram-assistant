@@ -9,6 +9,7 @@ touch Telethon — the Telethon adapter is exercised only through type checks.
 from __future__ import annotations
 
 import json
+import textwrap
 from pathlib import Path
 from typing import Any
 
@@ -289,6 +290,54 @@ async def test_remove_chat_per_peer_failure_raises_needs_review() -> None:
         )
 
 
+async def test_remove_chat_denied_before_backend_call() -> None:
+    from telegram_assistant.access import AccessDenied, Authorizer
+    from telegram_assistant.config.models import AccessConfig, AccessRule
+
+    backend = FakeFolderBackend([_sample_folder()])
+    authorizer = Authorizer(
+        AccessConfig(rules=[AccessRule(all=True, permission="read")])
+    )
+
+    with pytest.raises(AccessDenied):
+        await remove_chat_from_folder(
+            backend,
+            folder_name="Planfix clients",
+            chat_ref=100,
+            authorizer=authorizer,
+        )
+
+    assert backend.removed == []
+
+
+async def test_remove_chat_absent_retry_allowed_with_folder_write_rule() -> None:
+    from telegram_assistant.access import Authorizer
+    from telegram_assistant.config.models import AccessConfig, AccessRule
+
+    backend = FakeFolderBackend([_sample_folder()])
+    access = AccessConfig(
+        rules=[AccessRule(folder="Planfix clients", permission="write")]
+    )
+
+    first = await remove_chat_from_folder(
+        backend,
+        folder_name="Planfix clients",
+        chat_ref=100,
+        authorizer=Authorizer(access, folder_backend=backend),
+    )
+    assert first["already_absent"] is False
+    assert backend.removed == [(2, 100)]
+
+    second = await remove_chat_from_folder(
+        backend,
+        folder_name="Planfix clients",
+        chat_ref=100,
+        authorizer=Authorizer(access, folder_backend=backend),
+    )
+    assert second["already_absent"] is True
+    assert backend.removed == [(2, 100)]
+
+
 # ---------------------------------------------------------------------------
 # HTTP routes
 # ---------------------------------------------------------------------------
@@ -309,6 +358,31 @@ def _make_app(
         folder_backend_factory=lambda _request: backend,
     )
     return TestClient(app)
+
+
+def _config_with_access(access_block: str | None) -> str:
+    base = textwrap.dedent(
+        """
+        telegram:
+          api_id: 123456
+          api_hash: "telegram_api_hash"
+          session_path: /data/telegram-assistant.session
+          default_chat_folder:
+            folder_id: 2
+            folder_name: "Planfix clients"
+        {access}
+        http:
+          host: "0.0.0.0"
+          port: 8085
+          bearer_token: "secret_token"
+        logging:
+          level: INFO
+        """
+    )
+    indented = ""
+    if access_block is not None:
+        indented = textwrap.indent(access_block, "  ")
+    return base.format(access=indented).strip()
 
 
 def test_http_inspect_returns_folder_payload(
@@ -483,6 +557,25 @@ def test_http_remove_chat_absent_is_idempotent(
     assert fake_backend.removed == []
 
 
+def test_http_remove_chat_403_when_denied() -> None:
+    backend = FakeFolderBackend([_sample_folder()])
+    client = _make_app(
+        _config_with_access("access:\n  rules: []\n"),
+        backend,
+    )
+
+    resp = client.request(
+        "DELETE",
+        "/telegram/folders/Planfix clients/chats",
+        json={"chat_id": 100},
+        headers={"Authorization": "Bearer secret_token"},
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["error"] == "access_denied"
+    assert backend.removed == []
+
+
 def test_http_remove_chat_peer_failure_returns_502(
     minimal_config_yaml: str,
 ) -> None:
@@ -535,11 +628,16 @@ def _patch_cli_backend(
         async def disconnect(self) -> None:
             return None
 
+        async def get_client(self) -> object:
+            return object()
+
     def _factory(config_path: Path | None) -> Any:
+        from telegram_assistant.config import load_config
+
         async def _open() -> FakeFolderBackend:
             return backend
 
-        return None, _FakeManager(), _open
+        return load_config(config_path), _FakeManager(), _open
 
     monkeypatch.setattr(cli_main, "_build_folder_backend", _factory)
 
@@ -762,6 +860,35 @@ def test_cli_folders_remove_chat_absent_is_idempotent(
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["already_absent"] is True
+    assert backend.removed == []
+
+
+def test_cli_folders_remove_chat_403_when_denied(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(
+        tmp_path, _config_with_access("access:\n  rules: []\n")
+    )
+    backend = FakeFolderBackend([_sample_folder()])
+    _patch_cli_backend(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "folders",
+            "remove-chat",
+            "--folder-name",
+            "Planfix clients",
+            "--chat-id",
+            "100",
+            "--config",
+            str(config_file),
+        ],
+    )
+
+    assert result.exit_code == 3
     assert backend.removed == []
 
 

@@ -35,14 +35,25 @@ from telegram_assistant.worker.queue import FloodWaitError
 
 
 class FakeNotificationBackend:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        raise_on_mute: Exception | None = None,
+        raise_on_unmute: Exception | None = None,
+    ) -> None:
         self.muted: list[dict[str, Any]] = []
         self.unmuted: list[dict[str, Any]] = []
+        self._raise_on_mute = raise_on_mute
+        self._raise_on_unmute = raise_on_unmute
 
     async def mute_chat(self, *, chat_id: int, mute_until: datetime | None) -> None:
+        if self._raise_on_mute is not None:
+            raise self._raise_on_mute
         self.muted.append({"chat_id": chat_id, "mute_until": mute_until})
 
     async def unmute_chat(self, *, chat_id: int) -> None:
+        if self._raise_on_unmute is not None:
+            raise self._raise_on_unmute
         self.unmuted.append({"chat_id": chat_id})
 
 
@@ -107,6 +118,27 @@ async def test_mute_rejects_non_positive_duration() -> None:
     with pytest.raises(ValueError):
         await mute_chat(
             backend, request=MuteRequest(telegram_chat_id=-100, duration_hours=0)
+        )
+    assert backend.muted == []
+
+
+async def test_mute_rejects_unrepresentable_duration() -> None:
+    backend = FakeNotificationBackend()
+    with pytest.raises(ValueError):
+        await mute_chat(
+            backend, request=MuteRequest(telegram_chat_id=-100, duration_hours=10**20)
+        )
+    assert backend.muted == []
+
+
+async def test_mute_rejects_duration_beyond_telegram_limit() -> None:
+    backend = FakeNotificationBackend()
+    now = datetime(2037, 12, 31, 23, 0, tzinfo=UTC)
+    with pytest.raises(ValueError):
+        await mute_chat(
+            backend,
+            request=MuteRequest(telegram_chat_id=-100, duration_hours=2),
+            now=now,
         )
     assert backend.muted == []
 
@@ -176,12 +208,15 @@ class FakeTelethonClient:
 
 
 async def test_telethon_mute_forever_builds_request() -> None:
+    from telethon.tl.types import InputNotifyPeer
+
     client = FakeTelethonClient()
     backend = TelethonNotificationBackend(client)
     await backend.mute_chat(chat_id=-100, mute_until=None)
     assert len(client.requests) == 1
     req = client.requests[0]
-    assert req.peer == "peer:-100"
+    assert isinstance(req.peer, InputNotifyPeer)
+    assert req.peer.peer == "peer:-100"
     assert req.settings.mute_until == _MUTE_FOREVER_UNTIL
 
 
@@ -191,6 +226,7 @@ async def test_telethon_mute_until_builds_request() -> None:
     when = datetime(2030, 6, 1, tzinfo=UTC)
     await backend.mute_chat(chat_id=42, mute_until=when)
     req = client.requests[0]
+    assert req.peer.peer == "peer:42"
     assert req.settings.mute_until == when
 
 
@@ -199,6 +235,7 @@ async def test_telethon_unmute_builds_request() -> None:
     backend = TelethonNotificationBackend(client)
     await backend.unmute_chat(chat_id=-100)
     req = client.requests[0]
+    assert req.peer.peer == "peer:-100"
     assert req.settings.mute_until == 0
 
 
@@ -426,6 +463,7 @@ def _http_client(
     *,
     access_block: str | None = None,
     notification_backend: FakeNotificationBackend | None = None,
+    folder_backend: FakeFolderBackend | None = None,
     has_factory: bool = True,
 ) -> TestClient:
     config = load_config_from_text(_config_with_access(access_block))
@@ -435,7 +473,7 @@ def _http_client(
         notification_backend_factory=(
             (lambda _r: notification_backend) if has_factory else (lambda _r: None)
         ),
-        folder_backend_factory=lambda _r: None,
+        folder_backend_factory=lambda _r: folder_backend,
         resolver_factory=lambda _r: None,
         operation_store=_make_store(),
     )
@@ -456,6 +494,36 @@ def test_http_mute_success() -> None:
     assert body["telegram_chat_id"] == -100
     assert body["duration_hours"] == 2
     assert len(backend.muted) == 1
+
+
+def test_http_mute_by_chat_name_success() -> None:
+    backend = FakeNotificationBackend()
+    folder_backend = FakeFolderBackend(
+        [
+            FolderSnapshot(
+                folder_id=2,
+                folder_name="Planfix clients",
+                chats=[FolderChat(chat_id=-100, title="Acme")],
+            )
+        ]
+    )
+    client = _http_client(
+        notification_backend=backend, folder_backend=folder_backend
+    )
+
+    resp = client.post(
+        "/telegram/notifications/mute",
+        json={
+            "chat_name": "Acme",
+            "folder_name": "Planfix clients",
+            "duration_hours": 2,
+        },
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["chat_name"] == "Acme"
+    assert backend.muted[0]["chat_id"] == -100
 
 
 def test_http_unmute_success() -> None:
@@ -490,6 +558,30 @@ def test_http_mute_503_when_backend_unavailable() -> None:
     assert resp.status_code == 503, resp.text
 
 
+def test_http_mute_flood_wait_returns_needs_review() -> None:
+    backend = FakeNotificationBackend(raise_on_mute=FloodWaitError(9))
+    client = _http_client(notification_backend=backend)
+    resp = client.post(
+        "/telegram/notifications/mute",
+        json={"telegram_chat_id": -100},
+        headers=AUTH,
+    )
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["detail"]["error"] == "needs_review"
+
+
+def test_http_unmute_flood_wait_returns_needs_review() -> None:
+    backend = FakeNotificationBackend(raise_on_unmute=FloodWaitError(9))
+    client = _http_client(notification_backend=backend)
+    resp = client.post(
+        "/telegram/notifications/unmute",
+        json={"telegram_chat_id": -100},
+        headers=AUTH,
+    )
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["detail"]["error"] == "needs_review"
+
+
 def test_http_mute_403_when_denied() -> None:
     backend = FakeNotificationBackend()
     client = _http_client(
@@ -519,7 +611,7 @@ def test_http_unmute_403_when_denied() -> None:
     assert backend.unmuted == []
 
 
-def test_http_mute_bad_duration_400() -> None:
+def test_http_mute_bad_duration_422() -> None:
     backend = FakeNotificationBackend()
     client = _http_client(notification_backend=backend)
     resp = client.post(
@@ -528,3 +620,15 @@ def test_http_mute_bad_duration_400() -> None:
         headers=AUTH,
     )
     assert resp.status_code == 422
+
+
+def test_http_mute_rejects_unrepresentable_duration() -> None:
+    backend = FakeNotificationBackend()
+    client = _http_client(notification_backend=backend)
+    resp = client.post(
+        "/telegram/notifications/mute",
+        json={"telegram_chat_id": -100, "duration_hours": 10**20},
+        headers=AUTH,
+    )
+    assert resp.status_code in {400, 422}, resp.text
+    assert backend.muted == []

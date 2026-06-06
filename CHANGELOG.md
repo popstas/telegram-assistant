@@ -5,6 +5,7 @@
 
 ### Features
 
+- Document and e2e-cover message operations expansion
 - Message forwarding across domain, Telethon, CLI, and HTTP
 - Message reactions across domain, Telethon, CLI, and HTTP
 - Notifications mute/unmute across domain, Telethon, CLI, and HTTP
@@ -12,6 +13,11 @@
 - Wire media and scheduled sends into messages CLI/HTTP
 - TelethonMessageBackend for text/media/scheduled sends
 - Media/scheduled send request model and domain behavior
+
+### Bug Fixes
+
+- Address code review findings
+- review: Harden message operations expansion
 
 ### Documentation
 

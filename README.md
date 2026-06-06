@@ -52,10 +52,10 @@ Top-level:
 
 `messages` — send messages and service commands:
 
-- `messages send` — send a message or service command (targeted or folder-wide mass mode). Attach local server-side files with repeated `--file` and/or remote URLs with repeated `--file-url` (multiple attachments send an album); defer delivery with `--schedule-at` (ISO-8601 datetime) or `--delay` (relative duration like `10m`, `2h`, `1d`). Attachments and scheduling apply to targeted sends only, not mass mode.
+- `messages send` — send a message or service command (targeted or folder-wide mass mode). Attach local files with repeated `--file` and/or remote URLs with repeated `--file-url` (multiple attachments send an album); defer delivery with `--schedule-at` (ISO-8601 datetime) or `--delay` (relative duration like `10m`, `2h`, `1d`). `--text` may be omitted for media-only sends. Attachments and scheduling apply to targeted sends only, not mass mode.
 - `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5).
 - `messages react` — set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated).
-- `messages forward` — forward one or more messages (`--message-id`, repeatable) from a source (`--from-chat-id`/`--from-entity`) to a target (`--to-chat-id`/`--to-entity`); READ-gated on the source, WRITE-gated on the target.
+- `messages forward` — forward one or more messages (`--message-id`, repeatable) from a source (`--from-chat-id`/`--from-entity`) to a target (`--to-chat-id`/`--to-entity`, or the usual target aliases `--chat-id`/`--chat-name`/`--entity`); READ-gated on the source, WRITE-gated on the target.
 
 `notifications` — mute and unmute chat/contact notifications:
 
@@ -70,6 +70,8 @@ Most chat-targeting commands accept `--entity` (a numeric id with/without `-100`
 - `folders add-chat` — move an existing chat into a folder.
 - `folders remove-chat` — remove a chat from a folder (idempotent: a no-op if the chat is not in the folder).
 
+Mutating CLI commands support `--dry-run` before the real run. Local `--file` attachments must exist, be regular files, and be non-empty. `--file-url` must be a valid `http`/`https` URL with a host. `--schedule-at` and `--delay` are mutually exclusive and must resolve to a future time. `messages react` requires exactly one of `--emoji` or `--clear`; `notifications mute --duration` must be positive. `folders remove-chat` accepts `--chat-id`, `--chat-name`, or `--entity`, plus optional `--folder-id`.
+
 ### Access control
 
 `telegram.access` in `data/config.yml` gates which chats/folders this instance may read or write. Omitting it means allow-all (backward compatible); once present it is deny-by-default, `write` implies `read`, and rules combine as a union with the highest level winning. Denials surface as a non-zero CLI exit (code 3) and `HTTP 403` on the API.
@@ -80,6 +82,16 @@ Most chat-targeting commands accept `--entity` (a numeric id with/without `-100`
 - `operations retry` — reset a failed/`needs_review` operation (and its items) back to pending.
 
 Updating this list: descriptions are sourced from each Typer command's docstring in `src/telegram_assistant/cli/main.py`. When you add or rename a command, update this section, `skills/telegram-assistant/SKILL.md`, and re-run `pytest tests/test_skill_inventory.py` — the inventory guard fails if the README/skill catalog drifts from the CLI.
+
+## HTTP API
+
+All `/telegram/*` endpoints require `Authorization: Bearer <token>` and use the same access policy as the CLI.
+
+- `POST /telegram/messages` sends targeted or mass messages. Targeted bodies accept `telegram_chat_id`, `entity`, or `chat_name` + `folder_name`, plus optional `telegram_topic_id`/`topic_name`, `file_urls`, `schedule_at`, `delay_seconds`, and `operation_id`. HTTP server-local `files` are rejected; use `file_urls` for media over HTTP. Responses include `telegram_message_id`, `telegram_message_ids` for albums, `scheduled`, `schedule_at`, `operation_id`, and `operation_status`.
+- `POST /telegram/messages/reactions` sets or clears a reaction with `message_id` plus exactly one of `emoji` or `clear=true`.
+- `POST /telegram/messages/forward` forwards `message_ids` from `from_chat_id`/`from_entity` to `to_chat_id`/`to_entity`.
+- `POST /telegram/notifications/mute` and `/telegram/notifications/unmute` mute or unmute a target chat/contact; mute accepts positive `duration_hours`.
+- `DELETE /telegram/folders/{folder_name}/chats` removes `chat_id`, `chat_name`, or `entity` from a folder and returns `already_absent` when no change was needed.
 
 ## Configuration
 

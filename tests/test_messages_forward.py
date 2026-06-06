@@ -14,6 +14,8 @@ from typer.testing import CliRunner
 
 from telegram_assistant.cli import main as cli_main
 from telegram_assistant.config import load_config_from_text
+from telegram_assistant.entities import ResolvedEntity
+from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.http_api import create_app
 from telegram_assistant.messages import (
     ForwardMessagesRequest,
@@ -29,9 +31,15 @@ from telegram_assistant.worker.queue import FloodWaitError
 
 
 class FakeForwardBackend:
-    def __init__(self, *, returned_ids: list[int] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        returned_ids: list[int] | None = None,
+        raise_on_call: Exception | None = None,
+    ) -> None:
         self.calls: list[dict[str, Any]] = []
         self._returned_ids = returned_ids
+        self._raise_on_call = raise_on_call
 
     async def forward_messages(
         self,
@@ -47,10 +55,47 @@ class FakeForwardBackend:
                 "message_ids": list(message_ids),
             }
         )
+        if self._raise_on_call is not None:
+            raise self._raise_on_call
         if self._returned_ids is not None:
             return list(self._returned_ids)
         # Default: pretend the target assigned ids 1000+ in order.
         return [1000 + i for i, _ in enumerate(message_ids)]
+
+
+class FakeFolderBackend:
+    def __init__(self, folders: list[FolderSnapshot]) -> None:
+        self._folders = folders
+
+    async def list_folders(self) -> list[FolderSnapshot]:
+        return [
+            FolderSnapshot(
+                folder_id=f.folder_id,
+                folder_name=f.folder_name,
+                chats=list(f.chats),
+            )
+            for f in self._folders
+        ]
+
+    async def resolve_chat(self, chat_ref: str | int) -> FolderChat:
+        raise NotImplementedError
+
+    async def add_chat_to_folder(self, folder_id: int, chat_id: int) -> None:
+        raise NotImplementedError
+
+    async def remove_chat_from_folder(self, folder_id: int, chat_id: int) -> None:
+        raise NotImplementedError
+
+
+class FakeEntityResolver:
+    def __init__(self, mapping: dict[str, int]) -> None:
+        self._mapping = mapping
+
+    async def resolve(self, ref: Any) -> ResolvedEntity:
+        text = str(ref)
+        return ResolvedEntity(
+            chat_id=self._mapping[text], title=text, kind="channel"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +285,15 @@ async def test_telethon_forward_album_returns_list() -> None:
     assert ids == [55, 56]
 
 
+async def test_telethon_forward_rejects_missing_result_for_mixed_invalid_ids() -> None:
+    client = FakeTelethonClient(sent=[_FakeMessage(55), None, _FakeMessage(56)])
+    backend = TelethonForwardBackend(client)
+    with pytest.raises(ValueError, match="source message ids without forwarded result"):
+        await backend.forward_messages(
+            from_chat_id=-100, to_chat_id=-200, message_ids=(1, 2, 3)
+        )
+
+
 async def test_telethon_forward_translates_flood_wait() -> None:
     class _Flood(Exception):
         def __init__(self) -> None:
@@ -269,6 +323,7 @@ def _write_config(tmp_path: Path, body: str) -> Path:
 def _patch_cli_forward_backends(
     monkeypatch: pytest.MonkeyPatch,
     backend: FakeForwardBackend,
+    folder_backend: FakeFolderBackend | None = None,
 ) -> None:
     class _FakeManager:
         async def disconnect(self) -> None:
@@ -283,7 +338,7 @@ def _patch_cli_forward_backends(
         config = load_config(config_path)
 
         async def _open() -> Any:
-            return backend, None
+            return backend, folder_backend
 
         return config, _FakeManager(), _open
 
@@ -359,6 +414,49 @@ def test_cli_forward_real(
     assert backend.calls == [
         {"from_chat_id": -100, "to_chat_id": -200, "message_ids": [1, 2]}
     ]
+
+
+def test_cli_forward_accepts_existing_target_chat_name(
+    minimal_config_yaml: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeForwardBackend()
+    folder_backend = FakeFolderBackend(
+        [
+            FolderSnapshot(
+                folder_id=2,
+                folder_name="Planfix clients",
+                chats=[FolderChat(chat_id=-200, title="Target")],
+            )
+        ]
+    )
+    _patch_cli_forward_backends(monkeypatch, backend, folder_backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "forward",
+            "--from-chat-id",
+            "-100",
+            "--chat-name",
+            "Target",
+            "--folder-name",
+            "Planfix clients",
+            "--message-id",
+            "1",
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["resolved"]["to_chat_id"] == -200
+    assert payload["resolved"]["to_chat_name"] == "Target"
+    assert backend.calls == []
 
 
 def test_cli_forward_requires_message_id(
@@ -455,6 +553,7 @@ def _http_client(
     *,
     access_block: str | None = None,
     forward_backend: FakeForwardBackend | None = None,
+    resolver: FakeEntityResolver | None = None,
     has_factory: bool = True,
 ) -> TestClient:
     config = load_config_from_text(_config_with_access(access_block))
@@ -465,7 +564,7 @@ def _http_client(
             (lambda _r: forward_backend) if has_factory else (lambda _r: None)
         ),
         folder_backend_factory=lambda _r: None,
-        resolver_factory=lambda _r: None,
+        resolver_factory=lambda _r: resolver,
         operation_store=_make_store(),
     )
     return TestClient(app)
@@ -492,6 +591,30 @@ def test_http_forward_success() -> None:
     assert len(backend.calls) == 1
 
 
+def test_http_forward_by_entity_success() -> None:
+    backend = FakeForwardBackend(returned_ids=[22])
+    client = _http_client(
+        forward_backend=backend,
+        resolver=FakeEntityResolver({"@src": -100, "@dst": -200}),
+    )
+
+    resp = client.post(
+        "/telegram/messages/forward",
+        json={
+            "from_entity": "@src",
+            "to_entity": "@dst",
+            "message_ids": [1],
+        },
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["telegram_message_ids"] == [22]
+    assert backend.calls == [
+        {"from_chat_id": -100, "to_chat_id": -200, "message_ids": [1]}
+    ]
+
+
 def test_http_forward_requires_auth() -> None:
     backend = FakeForwardBackend()
     client = _http_client(forward_backend=backend)
@@ -510,6 +633,18 @@ def test_http_forward_503_when_backend_unavailable() -> None:
         headers=AUTH,
     )
     assert resp.status_code == 503, resp.text
+
+
+def test_http_forward_flood_wait_returns_needs_review() -> None:
+    backend = FakeForwardBackend(raise_on_call=FloodWaitError(9))
+    client = _http_client(forward_backend=backend)
+    resp = client.post(
+        "/telegram/messages/forward",
+        json={"from_chat_id": -100, "to_chat_id": -200, "message_ids": [1]},
+        headers=AUTH,
+    )
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["detail"]["error"] == "needs_review"
 
 
 def test_http_forward_422_empty_ids() -> None:

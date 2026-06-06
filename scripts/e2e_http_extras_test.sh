@@ -109,12 +109,9 @@ echo "${addchat_resp}" | jq . 2>/dev/null || echo "${addchat_resp}"
 # enough to be cancellable by hand; the folder remove is rounded back with
 # an add so net membership is unchanged.
 
-step "POST /telegram/messages (media) — attach a small server-side text file"
-media_tmp=$(mktemp --suffix=.txt)
-trap 'rm -f "${media_tmp}"' EXIT
-printf 'e2e http media attachment\n' > "${media_tmp}"
-media_payload=$(jq -nc --arg cid "${chat_id}" --arg f "${media_tmp}" \
-    '{telegram_chat_id: ($cid|tonumber), text: "http media caption", files: [$f]}')
+step "POST /telegram/messages (media) — attach a remote URL"
+media_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "http media caption", file_urls: ["https://www.python.org/static/img/python-logo.png"]}')
 media_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
     -d "${media_payload}" \
     "${BASE_URL}/telegram/messages")

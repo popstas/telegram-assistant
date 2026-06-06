@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, model_validator
 
-from telegram_assistant.access import AccessDenied
+from telegram_assistant.access import AccessDenied, AccessLevel
 from telegram_assistant.folders import (
     AmbiguousChatNameError,
     ChatNotFoundError,
@@ -45,7 +45,6 @@ from telegram_assistant.messages import (
     send_message,
     set_message_reaction,
     validate_file_urls,
-    validate_local_files,
 )
 from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.topics import (
@@ -54,6 +53,14 @@ from telegram_assistant.topics import (
     TopicNotFoundError,
     resolve_topic_id_by_name,
 )
+from telegram_assistant.worker.queue import FloodWaitError
+
+
+def _translate_flood_wait(exc: FloodWaitError) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        detail={"error": "needs_review", "message": str(exc)},
+    )
 
 
 class MessageSendBody(BaseModel):
@@ -70,9 +77,9 @@ class MessageSendBody(BaseModel):
     telegram_topic_id: int | None = None
     topic_name: str | None = None
     operation_id: str | None = None
-    # Attachments: ``files`` are server-side local paths, ``file_urls`` are
-    # http(s) URLs handed to Telethon as-is. Scheduling: exactly one of
-    # ``schedule_at`` (ISO-8601) / ``delay_seconds`` may be set.
+    # Attachments: HTTP accepts remote ``file_urls``. ``files`` is kept in the
+    # model only to return a clear 400 for old callers; server-local paths are
+    # not uploaded over HTTP.
     files: list[str] | None = None
     file_urls: list[str] | None = None
     schedule_at: datetime | None = None
@@ -216,10 +223,6 @@ class ForwardBody(BaseModel):
 
 def _message_backend_or_503(request: Request) -> MessageBackend:
     factory = getattr(request.app.state, "message_backend_factory", None)
-    if factory is None:
-        # Fall back to the topic backend factory — the Telethon adapter for
-        # topics already implements ``send_message`` with the same signature.
-        factory = getattr(request.app.state, "topic_backend_factory", None)
     if factory is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -448,22 +451,37 @@ def build_router() -> APIRouter:
                 ) from exc
             topic_name_for_log = body.topic_name
 
-        files = tuple(body.files or ())
-        file_urls = tuple(body.file_urls or ())
-        try:
-            validate_local_files(files)
-            validate_file_urls(file_urls)
-        except AttachmentError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-            ) from exc
-
         try:
             resolved_schedule_at = resolve_schedule_at(
                 schedule_at=body.schedule_at,
                 delay_seconds=body.delay_seconds,
             )
         except ScheduleError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        files = tuple(body.files or ())
+        if files:
+            try:
+                await authorizer.require(telegram_chat_id, AccessLevel.WRITE)
+            except AccessDenied as exc:
+                raise translate_access_error(exc) from exc
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "HTTP server-local files are not supported; use file_urls "
+                    "with http(s) URLs"
+                ),
+            )
+
+        file_urls = tuple(body.file_urls or ())
+        try:
+            validate_file_urls(file_urls)
+        except AttachmentError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
@@ -480,9 +498,6 @@ def build_router() -> APIRouter:
             schedule_at=resolved_schedule_at,
         )
 
-        authorizer = build_authorizer(
-            request, folder_backend=_folder_backend_optional(request)
-        )
         try:
             result, op = await send_message(
                 backend=backend,
@@ -560,6 +575,8 @@ def build_router() -> APIRouter:
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc
+        except FloodWaitError as exc:
+            raise _translate_flood_wait(exc) from exc
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
@@ -599,6 +616,8 @@ def build_router() -> APIRouter:
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc
+        except FloodWaitError as exc:
+            raise _translate_flood_wait(exc) from exc
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)

@@ -259,11 +259,17 @@ async def remove_chat_from_folder(
         backend, folder_name=folder_name, folder_id=folder_id
     )
     chat = await backend.resolve_chat(chat_ref)
-    # Removing a chat from a folder mutates the chat — gate WRITE on the
-    # resolved chat. Checked after resolution so we authorize the real id.
-    if authorizer is not None:
-        await authorizer.require(chat.chat_id, AccessLevel.WRITE)
     present = any(c.chat_id == chat.chat_id for c in snapshot.chats)
+    # Removing a present chat mutates that chat, so require chat WRITE. If the
+    # chat is already absent, the operation is an idempotent folder no-op; allow
+    # either direct chat WRITE or WRITE on the target folder so retries still
+    # work for folder-scoped policies after the first removal changes membership.
+    if authorizer is not None:
+        if present:
+            await authorizer.require(chat.chat_id, AccessLevel.WRITE)
+        else:
+            if not await authorizer.allows(chat.chat_id, AccessLevel.WRITE):
+                await authorizer.require_folder(snapshot.folder_name, AccessLevel.WRITE)
     if not present:
         return {
             "folder_id": snapshot.folder_id,

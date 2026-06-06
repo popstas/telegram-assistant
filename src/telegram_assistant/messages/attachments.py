@@ -36,8 +36,9 @@ def validate_file_urls(urls: Iterable[str]) -> None:
     for url in urls:
         if not url or not str(url).strip():
             raise AttachmentError("file URLs must be non-empty references")
-        scheme = urlparse(str(url)).scheme.lower()
-        if scheme not in ("http", "https"):
+        parsed = urlparse(str(url))
+        scheme = parsed.scheme.lower()
+        if scheme not in ("http", "https") or not parsed.netloc:
             raise AttachmentError(f"file URL must use http or https: {url}")
 
 

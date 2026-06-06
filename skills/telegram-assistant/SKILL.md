@@ -404,7 +404,7 @@ edits `data/config.yml` to widen access on its own.
 #### `messages` / `send`
 
 - Extract: `--text`, chat/topic references, optional `--operation-id`,
-  optional attachments (`--file` for a local server path, `--file-url`
+  optional attachments (`--file` for a local file path, `--file-url`
   for an http(s) URL — both repeatable), optional scheduling
   (`--schedule-at` ISO-8601 datetime, or `--delay` relative duration
   like `10m`, `2h`, `1d`).
@@ -478,11 +478,12 @@ edits `data/config.yml` to widen access on its own.
 #### `messages` / `forward`
 
 - Extract: source reference (`--from-chat-id` / `--from-entity`), target
-  reference (`--to-chat-id` / `--to-entity`), and one or more `--message-id`
+  reference (`--to-chat-id` / `--to-entity`, or the normal target aliases
+  `--chat-id` / `--chat-name` / `--entity`), and one or more `--message-id`
   (repeat the flag per message to forward).
 - Required flags: exactly one source reference, exactly one target reference,
   and at least one `--message-id`.
-- From config: none.
+- From config: `--folder-name` default when resolving target `--chat-name`.
 - Temp file: no.
 - Automation: none — forwarding is READ-gated on the source and WRITE-gated
   on the target. Run `--dry-run` first, show the plan, wait for confirmation,
@@ -491,8 +492,8 @@ edits `data/config.yml` to widen access on its own.
 - Confirmation: required (bucket 2).
 - Typical errors: `at least one --message-id is required`, `every
   --message-id must be a positive integer`, `exactly one of --from-chat-id or
-  --from-entity must be supplied`, `exactly one of --to-chat-id or
-  --to-entity must be supplied`, `access denied ...` (exit code 3), entity
+  --from-entity must be supplied`, `exactly one target must be supplied`,
+  `access denied ...` (exit code 3), entity
   not-found / ambiguous (exit code 2).
 
 #### `notifications` / `mute`

@@ -2455,7 +2455,7 @@ def _build_message_backends(config_path: Path | None):
 
 @messages_app.command("send")
 def messages_send(
-    text: str = typer.Option(..., "--text", help="Message text or service command."),
+    text: str = typer.Option("", "--text", help="Message text or service command."),
     chat_id: int | None = typer.Option(
         None,
         "--chat-id",
@@ -3426,6 +3426,30 @@ def messages_forward(
         help="Flexible target entity reference (numeric id, @username, link, "
         "phone, or exact title) resolved via the shared resolver.",
     ),
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric target Telegram chat id (alias for --to-chat-id).",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Target chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible target entity reference (alias for --to-entity).",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name target lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None, "--folder-id", help="Optional target folder id cross-check."
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -3461,21 +3485,42 @@ def messages_forward(
             err=True,
         )
         raise typer.Exit(code=2)
-    if sum([to_chat_id is not None, to_entity is not None]) != 1:
+    target_refs = sum(
+        [
+            to_chat_id is not None,
+            to_entity is not None,
+            chat_id is not None,
+            chat_name is not None,
+            entity is not None,
+        ]
+    )
+    if target_refs != 1:
         typer.echo(
-            "exactly one of --to-chat-id or --to-entity must be supplied",
+            "exactly one target must be supplied: --to-chat-id, --to-entity, "
+            "--chat-id, --chat-name, or --entity",
             err=True,
         )
         raise typer.Exit(code=2)
 
     config, manager, open_backends = _build_forward_backends(config_path)
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
 
     async def _resolve_target(folder_backend):
+        from telegram_assistant.folders import resolve_chat_in_folder
+
         resolver = None
         if (
             config.telegram.access is not None
             or from_entity is not None
             or to_entity is not None
+            or entity is not None
         ):
             from telegram_assistant.entities import TelethonEntityResolver
 
@@ -3490,14 +3535,30 @@ def messages_forward(
             src_id = from_chat_id
             src_name = None
 
-        if to_entity is not None:
+        if to_entity is not None or entity is not None:
             assert resolver is not None
-            resolved = await resolver.resolve(to_entity)
+            resolved = await resolver.resolve(
+                to_entity if to_entity is not None else entity
+            )
             tgt_id = resolved.chat_id
             tgt_name = resolved.title
-        else:
+        elif to_chat_id is not None:
             tgt_id = to_chat_id
             tgt_name = None
+        elif chat_id is not None:
+            tgt_id = chat_id
+            tgt_name = None
+        else:
+            if folder_backend is None:
+                raise ValueError("--chat-name target requires a folder backend")
+            resolved = await resolve_chat_in_folder(
+                folder_backend,
+                folder_name=resolved_folder_name or "",
+                chat_name=chat_name or "",
+                folder_id=effective_folder_id,
+            )
+            tgt_id = resolved.chat_id
+            tgt_name = resolved.title
 
         authorizer = _cli_authorizer(
             config, resolver=resolver, folder_backend=folder_backend

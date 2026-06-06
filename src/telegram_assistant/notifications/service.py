@@ -24,6 +24,8 @@ from typing import Any, Protocol
 
 from telegram_assistant.access.service import AccessLevel, Authorizer
 
+_MAX_MUTE_UNTIL = datetime(2037, 12, 31, 23, 59, 59, tzinfo=UTC)
+
 
 class NotificationBackend(Protocol):
     """Telethon-facing surface needed to change a chat's notify settings.
@@ -104,7 +106,14 @@ async def mute_chat(
     mute_until: datetime | None = None
     if request.duration_hours is not None:
         base = now if now is not None else datetime.now(UTC)
-        mute_until = base + timedelta(hours=request.duration_hours)
+        try:
+            mute_until = base + timedelta(hours=request.duration_hours)
+        except OverflowError as exc:
+            raise ValueError("duration_hours is too large") from exc
+        if mute_until > _MAX_MUTE_UNTIL:
+            raise ValueError(
+                "duration_hours is too large; omit it to mute indefinitely"
+            )
 
     await backend.mute_chat(
         chat_id=request.telegram_chat_id, mute_until=mute_until

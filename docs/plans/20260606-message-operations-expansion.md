@@ -1,5 +1,7 @@
 # Telegram message operations expansion
 
+Status: completed on 2026-06-06.
+
 ## Overview
 
 Implement the first six open `docs/TODO.md` items after the completed access/entity/read work:
@@ -73,10 +75,8 @@ ruff check src tests
   - `--caption` is not needed at first; keep `--text` as the caption/text field so existing command shape remains compact.
 - Media HTTP:
   - Add JSON fields to `POST /telegram/messages`: `files: list[str] | None`, `file_urls: list[str] | None`.
-  - Treat local paths as server-side paths. Do not add multipart upload in this plan; it needs storage and request-size policy not present in the project.
-  - Allow `files` and `file_urls` together as one attachment list.
-  - Validate local files exist, are regular files, and are not empty before calling Telethon.
-  - Validate URL attachments use `http` or `https`; do not prefetch remote URLs for size/type inspection.
+  - Review update: HTTP rejects server-local `files` paths to avoid host file disclosure. Use `file_urls` for HTTP media; CLI remains the local-file surface.
+  - Validate URL attachments use `http` or `https` with a host; do not prefetch remote URLs for size/type inspection.
 - Scheduled messages:
   - CLI accepts `--schedule-at` as ISO-8601 datetime and `--delay` as duration (`10m`, `2h`, `1d`).
   - HTTP accepts `schedule_at` ISO-8601 and `delay_seconds`.

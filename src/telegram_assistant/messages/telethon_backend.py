@@ -72,7 +72,11 @@ class TelethonMessageReadBackend:
 
 def _message_id(sent: Any) -> int:
     """Return the integer id of a single Telethon ``Message`` result."""
-    return int(getattr(sent, "id", 0))
+    raw_id = sent.id
+    msg_id = int(raw_id)
+    if msg_id <= 0:
+        raise ValueError(f"Telethon returned invalid message id: {raw_id!r}")
+    return msg_id
 
 
 def _message_ids(sent: Any) -> int | list[int]:
@@ -85,6 +89,32 @@ def _message_ids(sent: Any) -> int | list[int]:
     if isinstance(sent, (list, tuple)):
         return [_message_id(m) for m in sent]
     return _message_id(sent)
+
+
+def _forwarded_message_ids(sent: Any, source_message_ids: tuple[int, ...]) -> list[int]:
+    """Normalise Telethon forward results and reject missing placeholders."""
+    messages = list(sent) if isinstance(sent, (list, tuple)) else [sent]
+    if len(messages) != len(source_message_ids):
+        raise ValueError(
+            "Telethon returned "
+            f"{len(messages)} forwarded messages for "
+            f"{len(source_message_ids)} source message ids"
+        )
+
+    forwarded: list[int] = []
+    missing_sources: list[int] = []
+    for source_id, message in zip(source_message_ids, messages, strict=True):
+        if message is None:
+            missing_sources.append(source_id)
+            continue
+        forwarded.append(_message_id(message))
+
+    if missing_sources:
+        raise ValueError(
+            "source message ids without forwarded result: "
+            f"{missing_sources}; forwarded target ids: {forwarded}"
+        )
+    return forwarded
 
 
 class TelethonMessageBackend:
@@ -142,8 +172,8 @@ class TelethonReactionBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`ReactionBackend`.
 
     Translates a set/clear into a ``messages.SendReaction`` RPC. Setting passes
-    a single :class:`ReactionEmoji`; clearing passes ``reaction=None`` so
-    Telegram removes any existing reaction. ``FloodWaitError`` is translated so
+    a single :class:`ReactionEmoji`; clearing passes an explicit empty reaction
+    vector so Telegram removes any existing reaction. ``FloodWaitError`` is translated so
     the worker queue can pause-and-retry rather than mark a generic failure.
     """
 
@@ -156,9 +186,7 @@ class TelethonReactionBackend:
         from telethon.tl.functions.messages import SendReactionRequest
         from telethon.tl.types import ReactionEmoji
 
-        reaction = (
-            [ReactionEmoji(emoticon=emoji)] if emoji is not None else None
-        )
+        reaction = [ReactionEmoji(emoticon=emoji)] if emoji is not None else []
         try:
             peer = await self._client.get_input_entity(chat_id)
             await self._client(
@@ -202,9 +230,7 @@ class TelethonForwardBackend:
             )
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
-        if isinstance(sent, (list, tuple)):
-            return [_message_id(m) for m in sent]
-        return [_message_id(sent)]
+        return _forwarded_message_ids(sent, message_ids)
 
 
 __all__ = [

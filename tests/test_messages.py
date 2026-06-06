@@ -106,6 +106,32 @@ class FakeMessageBackend:
         return list(self._topics_per_chat.get(chat_id, []))
 
 
+class MalformedMessageBackend(FakeMessageBackend):
+    def __init__(self, returned: Any) -> None:
+        super().__init__()
+        self._returned = returned
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        topic_id: int | None = None,
+        files: tuple[str, ...] = (),
+        schedule_at: Any = None,
+    ) -> Any:
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "topic_id": topic_id,
+                "files": tuple(files),
+                "schedule_at": schedule_at,
+            }
+        )
+        return self._returned
+
+
 class FakeFolderBackend:
     def __init__(self, folders: list[FolderSnapshot]) -> None:
         self._folders = folders
@@ -396,8 +422,54 @@ async def test_send_message_schedule_at_sets_scheduled_flag(
     )
     result, op = await send_message(backend=backend, store=store, request=req)
     assert result.scheduled is True
+    assert result.schedule_at == when.isoformat()
     assert backend.sent[0]["schedule_at"] == when
     assert op.request_payload["schedule_at"] == when.isoformat()
+    assert op.result_payload["schedule_at"] == when.isoformat()
+
+
+async def test_send_message_replay_preserves_schedule_at(
+    store: OperationStore,
+) -> None:
+    from datetime import UTC, datetime
+
+    when = datetime(2030, 1, 1, 12, 30, tzinfo=UTC)
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="later",
+        operation_id="sched-replay",
+        schedule_at=when,
+    )
+    first, _ = await send_message(
+        backend=FakeMessageBackend(), store=store, request=req
+    )
+    second, _ = await send_message(
+        backend=FakeMessageBackend(), store=store, request=req
+    )
+
+    assert first.schedule_at == when.isoformat()
+    assert second.replayed is True
+    assert second.schedule_at == when.isoformat()
+
+
+@pytest.mark.parametrize("returned", [None, [], [0]])
+async def test_send_message_rejects_missing_backend_message_ids(
+    store: OperationStore, returned: Any
+) -> None:
+    backend = MalformedMessageBackend(returned)
+    req = SendMessageRequest(
+        telegram_chat_id=-100, text="hello", operation_id=f"bad-id-{returned!r}"
+    )
+
+    with pytest.raises(ValueError):
+        await send_message(backend=backend, store=store, request=req)
+
+    with pytest.raises(MessageSendFailed):
+        await send_message(
+            backend=FakeMessageBackend(),
+            store=store,
+            request=req,
+        )
 
 
 async def test_send_message_media_denied_before_backend_call(
@@ -1027,6 +1099,26 @@ def test_resolve_schedule_at_delay_adds_to_now() -> None:
     assert resolved == datetime(2026, 1, 1, 12, 10, 0)
 
 
+def test_resolve_schedule_at_delay_defaults_to_utc() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from telegram_assistant.messages import resolve_schedule_at
+
+    before = datetime.now(UTC)
+    resolved = resolve_schedule_at(delay_seconds=600)
+    after = datetime.now(UTC)
+    assert resolved is not None
+    assert resolved.tzinfo == UTC
+    assert before + timedelta(seconds=600) <= resolved <= after + timedelta(seconds=600)
+
+
+def test_resolve_schedule_at_delay_overflow_is_schedule_error() -> None:
+    from telegram_assistant.messages import ScheduleError, resolve_schedule_at
+
+    with pytest.raises(ScheduleError):
+        resolve_schedule_at(delay_seconds=10**20)
+
+
 def test_resolve_schedule_at_rejects_both_modes() -> None:
     from datetime import datetime
 
@@ -1049,13 +1141,15 @@ def test_resolve_schedule_at_rejects_past() -> None:
 
 
 def test_resolve_schedule_at_future_passes_through() -> None:
-    from datetime import datetime
+    from datetime import UTC, datetime
 
     from telegram_assistant.messages import resolve_schedule_at
 
     now = datetime(2026, 1, 1, 12, 0, 0)
     future = datetime(2026, 1, 1, 13, 0, 0)
-    assert resolve_schedule_at(schedule_at=future, now=now) == future
+    assert resolve_schedule_at(schedule_at=future, now=now) == future.replace(
+        tzinfo=UTC
+    )
 
 
 def test_parse_schedule_at_invalid() -> None:
@@ -1063,6 +1157,14 @@ def test_parse_schedule_at_invalid() -> None:
 
     with pytest.raises(ScheduleError):
         parse_schedule_at("not-a-date")
+
+
+@pytest.mark.parametrize("url", ["http://", "http:foo", "https:///x"])
+def test_validate_file_urls_rejects_missing_host(url: str) -> None:
+    from telegram_assistant.messages import AttachmentError, validate_file_urls
+
+    with pytest.raises(AttachmentError):
+        validate_file_urls([url])
 
 
 # ---------------------------------------------------------------------------
@@ -1151,6 +1253,41 @@ def test_cli_messages_send_media_real(
     assert backend.sent[0]["chat_id"] == -100
 
 
+def test_cli_messages_send_media_only_does_not_require_text(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    media = tmp_path / "doc.txt"
+    media.write_text("content")
+    backend = FakeMessageBackend()
+    folder_backend = FakeFolderBackend([])
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--file",
+            str(media),
+            "--operation-id",
+            "media-no-text",
+            "--config",
+            str(config_file),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    assert backend.sent[0]["text"] == ""
+    assert backend.sent[0]["files"] == (str(media),)
+
+
 def test_cli_messages_send_scheduled_real(
     minimal_config_yaml: str,
     tmp_path: Path,
@@ -1183,6 +1320,7 @@ def test_cli_messages_send_scheduled_real(
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["scheduled"] is True
+    assert payload["schedule_at"] is not None
     assert backend.sent[0]["schedule_at"] is not None
 
 
@@ -1309,6 +1447,65 @@ def test_http_send_media_via_urls(minimal_config_yaml: str) -> None:
     )
 
 
+def test_http_send_rejects_server_local_files(minimal_config_yaml: str, tmp_path: Path) -> None:
+    media = tmp_path / "secret.txt"
+    media.write_text("do not upload")
+    backend = FakeMessageBackend()
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "files": [str(media)],
+            "operation_id": "http-local-file",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+
+    assert resp.status_code == 400, resp.text
+    assert "file_urls" in resp.json()["detail"]
+    assert backend.sent == []
+
+
+def test_http_send_denied_before_local_file_handling(
+    tmp_path: Path,
+) -> None:
+    media = tmp_path / "missing-secret.txt"
+    backend = FakeMessageBackend()
+    access_config = """
+telegram:
+  api_id: 123456
+  api_hash: "telegram_api_hash"
+  session_path: /data/telegram-assistant.session
+  default_chat_folder:
+    folder_id: 2
+    folder_name: "Planfix clients"
+  access:
+    rules: []
+http:
+  host: "0.0.0.0"
+  port: 8085
+  bearer_token: "secret_token"
+logging:
+  level: INFO
+"""
+    client = _http_client(access_config, message_backend=backend)
+
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "files": [str(media)],
+            "operation_id": "http-local-file-denied",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert backend.sent == []
+
+
 def test_http_send_scheduled_via_delay(minimal_config_yaml: str) -> None:
     backend = FakeMessageBackend()
     client = _http_client(minimal_config_yaml, message_backend=backend)
@@ -1325,6 +1522,7 @@ def test_http_send_scheduled_via_delay(minimal_config_yaml: str) -> None:
     assert resp.status_code == 200, resp.text
     body = resp.json()
     assert body["scheduled"] is True
+    assert body["schedule_at"] is not None
     assert backend.sent[0]["schedule_at"] is not None
 
 
@@ -1360,6 +1558,22 @@ def test_http_send_rejects_conflicting_schedule_modes(
         headers={"Authorization": "Bearer secret_token"},
     )
     assert resp.status_code == 422, resp.text
+
+
+def test_http_send_rejects_unrepresentable_delay(minimal_config_yaml: str) -> None:
+    backend = FakeMessageBackend()
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "text": "hi",
+            "delay_seconds": 10**20,
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code in {400, 422}, resp.text
+    assert backend.sent == []
 
 
 def test_http_send_rejects_media_in_mass_mode(minimal_config_yaml: str) -> None:

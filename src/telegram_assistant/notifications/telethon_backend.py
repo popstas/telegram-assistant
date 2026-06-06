@@ -33,14 +33,14 @@ class TelethonNotificationBackend:
         self, *, chat_id: int, mute_until: datetime | None
     ) -> None:
         from telethon.tl.functions.account import UpdateNotifySettingsRequest
-        from telethon.tl.types import InputPeerNotifySettings
+        from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings
 
         until = mute_until if mute_until is not None else _MUTE_FOREVER_UNTIL
         try:
             peer = await self._client.get_input_entity(chat_id)
             await self._client(
                 UpdateNotifySettingsRequest(
-                    peer=peer,
+                    peer=InputNotifyPeer(peer),
                     settings=InputPeerNotifySettings(mute_until=until),
                 )
             )
@@ -49,13 +49,13 @@ class TelethonNotificationBackend:
 
     async def unmute_chat(self, *, chat_id: int) -> None:
         from telethon.tl.functions.account import UpdateNotifySettingsRequest
-        from telethon.tl.types import InputPeerNotifySettings
+        from telethon.tl.types import InputNotifyPeer, InputPeerNotifySettings
 
         try:
             peer = await self._client.get_input_entity(chat_id)
             await self._client(
                 UpdateNotifySettingsRequest(
-                    peer=peer,
+                    peer=InputNotifyPeer(peer),
                     settings=InputPeerNotifySettings(mute_until=0),
                 )
             )

@@ -8,6 +8,13 @@ from typer.testing import CliRunner
 from telegram_assistant.cli.main import app as cli_app
 from telegram_assistant.config import load_config_from_text
 from telegram_assistant.http_api import create_app
+from telegram_assistant.messages.telethon_backend import (
+    TelethonForwardBackend,
+    TelethonMessageBackend,
+    TelethonMessageReadBackend,
+    TelethonReactionBackend,
+)
+from telegram_assistant.notifications import TelethonNotificationBackend
 
 
 def _client(minimal_config_yaml: str) -> TestClient:
@@ -71,10 +78,32 @@ def test_cli_exposes_required_subcommand_groups() -> None:
         "topics",
         "members",
         "messages",
+        "notifications",
         "folders",
         "operations",
     ):
         assert group in result.stdout
+
+
+def test_default_message_operation_factories_use_telethon_backends(
+    minimal_config_yaml: str,
+) -> None:
+    class _FakeSessionManager:
+        def __init__(self) -> None:
+            self._client = object()
+
+    config = load_config_from_text(minimal_config_yaml)
+    app = create_app(config, session_manager=_FakeSessionManager())  # type: ignore[arg-type]
+
+    assert isinstance(app.state.message_backend_factory(None), TelethonMessageBackend)
+    assert isinstance(
+        app.state.message_read_backend_factory(None), TelethonMessageReadBackend
+    )
+    assert isinstance(app.state.reaction_backend_factory(None), TelethonReactionBackend)
+    assert isinstance(app.state.forward_backend_factory(None), TelethonForwardBackend)
+    assert isinstance(
+        app.state.notification_backend_factory(None), TelethonNotificationBackend
+    )
 
 
 def test_cli_version_command() -> None:

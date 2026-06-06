@@ -22,7 +22,7 @@ they are not naturally pinned to a Planfix task id).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
 from telegram_assistant.access.service import AccessDenied, AccessLevel, Authorizer
@@ -110,16 +110,19 @@ def resolve_schedule_at(
     if delay_seconds is not None:
         if delay_seconds <= 0:
             raise ScheduleError("delay must be a positive duration")
-        base = now if now is not None else datetime.now()
-        return base + timedelta(seconds=delay_seconds)
+        base = now if now is not None else datetime.now(UTC)
+        try:
+            return base + timedelta(seconds=delay_seconds)
+        except OverflowError as exc:
+            raise ScheduleError("delay is too large") from exc
     if schedule_at is not None:
+        if schedule_at.tzinfo is None:
+            schedule_at = schedule_at.replace(tzinfo=UTC)
         reference = now
         if reference is None:
-            reference = (
-                datetime.now(schedule_at.tzinfo)
-                if schedule_at.tzinfo is not None
-                else datetime.now()
-            )
+            reference = datetime.now(schedule_at.tzinfo)
+        elif reference.tzinfo is None and schedule_at.tzinfo is not None:
+            reference = reference.replace(tzinfo=schedule_at.tzinfo)
         if schedule_at <= reference:
             raise ScheduleError("schedule_at must be in the future")
         return schedule_at
@@ -184,24 +187,32 @@ def _validate_attachment_refs(refs: tuple[str, ...], *, kind: str) -> None:
             )
 
 
+def _coerce_message_id(raw: Any) -> int:
+    msg_id = int(raw)
+    if msg_id <= 0:
+        raise ValueError(f"backend returned invalid message id: {raw!r}")
+    return msg_id
+
+
 def _normalize_message_ids(
     raw: int | list[int] | tuple[int, ...] | None,
 ) -> tuple[int | None, tuple[int, ...] | None]:
     """Split a backend send result into (primary_id, all_ids).
 
     A scalar id (plain/single send) yields ``(id, None)``. A sequence (album)
-    yields ``(first, full_tuple)``. ``None``/empty yields ``(None, None)``.
+    yields ``(first, full_tuple)``. Missing, empty, or non-positive ids are
+    invalid backend results and fail the operation.
     """
     if raw is None:
-        return None, None
+        raise ValueError("backend returned no message id")
     if isinstance(raw, (list, tuple)):
-        ids = tuple(int(x) for x in raw)
+        ids = tuple(_coerce_message_id(x) for x in raw)
         if not ids:
-            return None, None
+            raise ValueError("backend returned no message ids")
         if len(ids) == 1:
             return ids[0], None
         return ids[0], ids
-    return int(raw), None
+    return _coerce_message_id(raw), None
 
 
 class MessageBackend(Protocol):
@@ -350,6 +361,7 @@ class SendMessageResult:
     replayed: bool = False
     telegram_message_ids: tuple[int, ...] | None = None
     scheduled: bool = False
+    schedule_at: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -366,6 +378,7 @@ class SendMessageResult:
                 else None
             ),
             "scheduled": self.scheduled,
+            "schedule_at": self.schedule_at,
         }
 
     @classmethod
@@ -391,6 +404,7 @@ class SendMessageResult:
                 tuple(int(x) for x in raw_ids) if raw_ids is not None else None
             ),
             scheduled=bool(payload.get("scheduled", False)),
+            schedule_at=payload.get("schedule_at"),
         )
 
 
@@ -471,6 +485,7 @@ async def send_message(
             topic_id=request.telegram_topic_id,
             **extra,
         )
+        primary_id, all_ids = _normalize_message_ids(raw_id)
     except FloodWaitError as exc:
         # FLOOD_WAIT is transient — marking the op `failed` would lock the
         # idempotency key on a terminal state and the retry would surface
@@ -484,7 +499,6 @@ async def send_message(
         store.fail_operation(operation_id, str(exc))
         raise
 
-    primary_id, all_ids = _normalize_message_ids(raw_id)
     result = SendMessageResult(
         telegram_chat_id=request.telegram_chat_id,
         telegram_topic_id=request.telegram_topic_id,
@@ -494,6 +508,11 @@ async def send_message(
         topic_name=request.topic_name,
         telegram_message_ids=all_ids,
         scheduled=request.schedule_at is not None,
+        schedule_at=(
+            request.schedule_at.isoformat()
+            if request.schedule_at is not None
+            else None
+        ),
     )
     op = store.complete_operation(operation_id, result.to_dict())
     return result, op

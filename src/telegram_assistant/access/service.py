@@ -192,6 +192,35 @@ class Authorizer:
             matched = "chat"
         return best, matched
 
+    async def _chat_access(
+        self,
+        chat_id: int,
+        folder_memberships: Iterable[str] | None,
+    ) -> tuple[int, AccessLevel | None, str | None]:
+        await self._ensure_index()
+        lookup_id = _canonical_chat_id(chat_id)
+        if folder_memberships is None:
+            memberships: Iterable[str] = await self._folder_memberships(lookup_id)
+        else:
+            memberships = set(folder_memberships)
+        granted, matched = self._effective_chat_level(lookup_id, memberships)
+        return lookup_id, granted, matched
+
+    async def allows(
+        self,
+        chat_id: int,
+        level: AccessLevel,
+        *,
+        folder_memberships: Iterable[str] | None = None,
+    ) -> bool:
+        """Return whether ``chat_id`` has ``level`` without logging or raising."""
+        if self._config is None:
+            return True
+        _lookup_id, granted, _matched = await self._chat_access(
+            chat_id, folder_memberships
+        )
+        return granted is not None and granted >= level
+
     async def require(
         self,
         chat_id: int,
@@ -207,13 +236,9 @@ class Authorizer:
         """
         if self._config is None:
             return
-        await self._ensure_index()
-        lookup_id = _canonical_chat_id(chat_id)
-        if folder_memberships is None:
-            memberships: Iterable[str] = await self._folder_memberships(lookup_id)
-        else:
-            memberships = set(folder_memberships)
-        granted, matched = self._effective_chat_level(lookup_id, memberships)
+        _lookup_id, granted, matched = await self._chat_access(
+            chat_id, folder_memberships
+        )
         if granted is None or granted < level:
             _log.warning(
                 "access_denied",
