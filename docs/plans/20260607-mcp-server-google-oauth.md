@@ -150,12 +150,12 @@ authenticate with Google and drive Telegram operations through the same safety r
 
 ### Task 6: Update docs and sync the skill
 
-- [ ] Update `README.md` (Commands/usage) to document the optional MCP server and its config
-- [ ] Update `skills/telegram-assistant/SKILL.md` and re-sync it to
+- [x] Update `README.md` (Commands/usage) to document the optional MCP server and its config
+- [x] Update `skills/telegram-assistant/SKILL.md` and re-sync it to
       `~/.claude/skills/telegram-assistant/SKILL.md` in the same change
-- [ ] Document the `mcp:` config block (fields, enable/disable, OAuth setup) in the project docs
-- [ ] write/adjust tests so the `tests/test_skill_inventory.py` guard passes
-- [ ] run project tests - must pass before next task
+- [x] Document the `mcp:` config block (fields, enable/disable, OAuth setup) in the project docs
+- [x] write/adjust tests so the `tests/test_skill_inventory.py` guard passes
+- [x] run project tests - must pass before next task
 
 ### Task 7: Verify acceptance criteria
 
