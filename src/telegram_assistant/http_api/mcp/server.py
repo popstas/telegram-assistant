@@ -13,6 +13,10 @@ from telegram_assistant.http_api.mcp.oauth import (
     OAuthAuthorizationServer,
     TokenValidationError,
 )
+from telegram_assistant.http_api.mcp.tools import (
+    AppStateProvider,
+    register_telegram_tools,
+)
 
 
 class OAuthTokenVerifier:
@@ -52,6 +56,7 @@ def build_fastmcp_server(
     config: AppConfig,
     *,
     oauth_server: OAuthAuthorizationServer,
+    app_state_provider: AppStateProvider | None = None,
 ) -> FastMCP[Any]:
     """Build the FastMCP server mounted by the FastAPI app."""
 
@@ -60,7 +65,7 @@ def build_fastmcp_server(
     if config.mcp.issuer_url is None or config.mcp.server_url is None:
         raise ValueError("FastMCP server config is incomplete")
 
-    return FastMCP(
+    server: FastMCP[Any] = FastMCP(
         "telegram-assistant",
         host=config.http.host,
         port=config.http.port,
@@ -74,3 +79,6 @@ def build_fastmcp_server(
         ),
         token_verifier=OAuthTokenVerifier(oauth_server),
     )
+    if app_state_provider is not None:
+        register_telegram_tools(server, app_state_provider)
+    return server

@@ -172,6 +172,29 @@ def _initialize_payload(request_id: int = 1) -> dict[str, object]:
     }
 
 
+EXPECTED_TOOL_NAMES = {
+    "telegram_folders_add_chat",
+    "telegram_folders_inspect",
+    "telegram_folders_remove_chat",
+    "telegram_groups_create",
+    "telegram_health",
+    "telegram_members_add",
+    "telegram_members_remove",
+    "telegram_messages_forward",
+    "telegram_messages_react",
+    "telegram_messages_recent",
+    "telegram_messages_send",
+    "telegram_notifications_mute",
+    "telegram_notifications_unmute",
+    "telegram_operations_retry",
+    "telegram_operations_status",
+    "telegram_topics_bulk_create",
+    "telegram_topics_close",
+    "telegram_topics_create",
+    "telegram_topics_layout",
+}
+
+
 def test_mcp_mount_is_absent_when_disabled(minimal_config_yaml: str) -> None:
     config = load_config_from_text(minimal_config_yaml)
     client = TestClient(create_app(config, session_manager=FakeSessionManager()))  # type: ignore[arg-type]
@@ -212,7 +235,11 @@ def test_mcp_initialize_and_tools_list_are_reachable_with_token(
             headers=_mcp_headers(token),
         )
         assert tools.status_code == 200
-        assert tools.json()["result"]["tools"] == []
+        listed = {tool["name"]: tool for tool in tools.json()["result"]["tools"]}
+        assert set(listed) == EXPECTED_TOOL_NAMES
+        assert listed["telegram_messages_recent"]["annotations"]["readOnlyHint"] is True
+        assert listed["telegram_messages_send"]["annotations"]["idempotentHint"] is True
+        assert listed["telegram_folders_remove_chat"]["annotations"]["destructiveHint"] is True
 
 
 def test_mcp_mount_rejects_missing_invalid_expired_and_wrong_audience_tokens(

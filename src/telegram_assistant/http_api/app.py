@@ -396,6 +396,14 @@ def create_app(
         except Exception:
             session_manager = None
 
+    mcp_app_ref: dict[str, FastAPI] = {}
+
+    def _mcp_app_state() -> object:
+        app_ref = mcp_app_ref.get("app")
+        if app_ref is None:
+            raise RuntimeError("FastAPI app state is not available yet")
+        return app_ref.state
+
     mcp_oauth_server: OAuthAuthorizationServer | None = None
     mcp_fastmcp_server = None
     mcp_asgi_app = None
@@ -407,6 +415,7 @@ def create_app(
         mcp_fastmcp_server = build_fastmcp_server(
             config,
             oauth_server=mcp_oauth_server,
+            app_state_provider=_mcp_app_state,
         )
         mcp_asgi_app = mcp_fastmcp_server.streamable_http_app()
 
@@ -478,6 +487,7 @@ def create_app(
         version=__version__,
         lifespan=lifespan,
     )
+    mcp_app_ref["app"] = app
     app.state.config = config
     app.state.plugin_registry = build_registry(config)
     app.state.session_manager = session_manager

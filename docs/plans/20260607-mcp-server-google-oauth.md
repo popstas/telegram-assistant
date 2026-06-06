@@ -123,19 +123,19 @@ authenticate with Google and drive Telegram operations through the same safety r
 
 ### Task 4: Expose `telegram_` tools over the domain services
 
-- [ ] Register `telegram_`-prefixed MCP tools mapping to existing operations (health, messages send,
+- [x] Register `telegram_`-prefixed MCP tools mapping to existing operations (health, messages send,
       recent messages, forward, reactions, groups create, topic layout, topics, members, folders,
       notifications, operations), each reusing the corresponding domain service via the existing
       backend factories
-- [ ] Attach MCP annotations (`readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`) to
+- [x] Attach MCP annotations (`readOnlyHint`/`destructiveHint`/`idempotentHint`/`openWorldHint`) to
       each tool to match the operation's nature
-- [ ] Thread the `telegram.access` `Authorizer` and `EntityResolver` into the tools, preserving the
+- [x] Thread the `telegram.access` `Authorizer` and `EntityResolver` into the tools, preserving the
       HTTP WRITE/READ mapping and `OperationStore` idempotency
-- [ ] Map failures to actionable tool errors: backend-unavailable (≈503), `AccessDenied` (≈403),
+- [x] Map failures to actionable tool errors: backend-unavailable (≈503), `AccessDenied` (≈403),
       entity-not-found (≈404), ambiguous entity (≈409)
-- [ ] write tests with fake backends for representative read and write tools, access-denied, and
+- [x] write tests with fake backends for representative read and write tools, access-denied, and
       backend-unavailable paths
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 5: Integration tests for the MCP protocol + OAuth surface
 
