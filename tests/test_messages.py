@@ -55,14 +55,44 @@ class FakeMessageBackend:
         self.sent: list[dict[str, Any]] = []
 
     async def send_message(
-        self, *, chat_id: int, text: str, topic_id: int | None = None
-    ) -> int:
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        topic_id: int | None = None,
+        files: tuple[str, ...] = (),
+        schedule_at: Any = None,
+    ) -> int | list[int]:
         if self._fail_send:
             raise RuntimeError("telegram error")
+        files = tuple(files)
+        if len(files) > 1:
+            # Album — one id per attachment.
+            ids = [self._next_id + i for i in range(len(files))]
+            self._next_id += len(files)
+            self.sent.append(
+                {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "topic_id": topic_id,
+                    "files": files,
+                    "schedule_at": schedule_at,
+                    "id": ids[0],
+                    "ids": ids,
+                }
+            )
+            return ids
         msg_id = self._next_id
         self._next_id += 1
         self.sent.append(
-            {"chat_id": chat_id, "text": text, "topic_id": topic_id, "id": msg_id}
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "topic_id": topic_id,
+                "files": files,
+                "schedule_at": schedule_at,
+                "id": msg_id,
+            }
         )
         return msg_id
 
@@ -242,6 +272,176 @@ async def test_send_message_rejects_empty_text(store: OperationStore) -> None:
                 telegram_chat_id=-100, text="", operation_id="op"
             ),
         )
+
+
+# ---------------------------------------------------------------------------
+# Domain tests — media / scheduled send
+# ---------------------------------------------------------------------------
+
+
+async def test_send_message_text_only_still_omits_media_kwargs(
+    store: OperationStore,
+) -> None:
+    """Backward compatibility: a text-only send must not pass files/schedule to
+    the backend so backends predating attachments keep working."""
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100, text="plain", operation_id="text-only"
+    )
+    result, _ = await send_message(backend=backend, store=store, request=req)
+    assert result.telegram_message_ids is None
+    assert result.scheduled is False
+    # No attachments recorded for a plain send.
+    assert backend.sent[0]["files"] == ()
+    assert backend.sent[0]["schedule_at"] is None
+
+
+async def test_send_message_media_only(store: OperationStore) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="",
+        files=("/data/a.png",),
+        operation_id="media-only",
+    )
+    result, op = await send_message(backend=backend, store=store, request=req)
+    assert op.status is OperationStatus.COMPLETED
+    assert result.telegram_message_id is not None
+    assert result.telegram_message_ids is None
+    assert backend.sent[0]["files"] == ("/data/a.png",)
+    # Only references are persisted, never contents.
+    assert op.request_payload["files"] == ["/data/a.png"]
+
+
+async def test_send_message_media_with_caption(store: OperationStore) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="look at this",
+        files=("/data/a.png",),
+        operation_id="media-caption",
+    )
+    result, _ = await send_message(backend=backend, store=store, request=req)
+    assert result.telegram_message_id is not None
+    assert backend.sent[0]["text"] == "look at this"
+    assert backend.sent[0]["files"] == ("/data/a.png",)
+
+
+async def test_send_message_album_returns_all_ids(store: OperationStore) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="album caption",
+        files=("/data/a.png", "/data/b.png"),
+        file_urls=("https://example.com/c.png",),
+        operation_id="album-1",
+    )
+    result, _ = await send_message(backend=backend, store=store, request=req)
+    assert result.telegram_message_ids is not None
+    assert len(result.telegram_message_ids) == 3
+    assert result.telegram_message_id == result.telegram_message_ids[0]
+    # files + file_urls combined into one ordered attachment list.
+    assert backend.sent[0]["files"] == (
+        "/data/a.png",
+        "/data/b.png",
+        "https://example.com/c.png",
+    )
+
+
+async def test_send_message_rejects_empty_when_no_text_and_no_files(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    with pytest.raises(ValueError):
+        await send_message(
+            backend=backend,
+            store=store,
+            request=SendMessageRequest(
+                telegram_chat_id=-100, text="", operation_id="empty"
+            ),
+        )
+    assert backend.sent == []
+
+
+async def test_send_message_rejects_blank_attachment_ref(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    with pytest.raises(ValueError):
+        await send_message(
+            backend=backend,
+            store=store,
+            request=SendMessageRequest(
+                telegram_chat_id=-100,
+                text="hi",
+                files=("  ",),
+                operation_id="blank",
+            ),
+        )
+    assert backend.sent == []
+
+
+async def test_send_message_schedule_at_sets_scheduled_flag(
+    store: OperationStore,
+) -> None:
+    from datetime import UTC, datetime
+
+    backend = FakeMessageBackend()
+    when = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="later",
+        schedule_at=when,
+        operation_id="sched-1",
+    )
+    result, op = await send_message(backend=backend, store=store, request=req)
+    assert result.scheduled is True
+    assert backend.sent[0]["schedule_at"] == when
+    assert op.request_payload["schedule_at"] == when.isoformat()
+
+
+async def test_send_message_media_denied_before_backend_call(
+    store: OperationStore,
+) -> None:
+    from telegram_assistant.access import AccessDenied, Authorizer
+    from telegram_assistant.config.models import AccessConfig, AccessRule
+
+    backend = FakeMessageBackend()
+    authorizer = Authorizer(AccessConfig(rules=[AccessRule(all=True, permission="read")]))
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="",
+        files=("/data/a.png",),
+        operation_id="denied-media",
+    )
+    with pytest.raises(AccessDenied):
+        await send_message(
+            backend=backend, store=store, request=req, authorizer=authorizer
+        )
+    # Denied before any backend traffic.
+    assert backend.sent == []
+
+
+async def test_send_message_media_replays_same_operation_id(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="caption",
+        files=("/data/a.png", "/data/b.png"),
+        operation_id="media-replay",
+    )
+    first, _ = await send_message(backend=backend, store=store, request=req)
+    assert first.replayed is False
+    assert first.telegram_message_ids is not None
+
+    backend2 = FakeMessageBackend()
+    second, _ = await send_message(backend=backend2, store=store, request=req)
+    assert second.replayed is True
+    assert backend2.sent == []
+    assert second.telegram_message_ids == first.telegram_message_ids
+    assert second.telegram_message_id == first.telegram_message_id
 
 
 # ---------------------------------------------------------------------------

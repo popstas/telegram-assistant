@@ -21,7 +21,8 @@ they are not naturally pinned to a Planfix task id).
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol
 
 from telegram_assistant.access.service import AccessDenied, AccessLevel, Authorizer
@@ -83,16 +84,62 @@ def redact_message_text(text: str) -> str:
     return f"{cmd} [redacted]"
 
 
+def _validate_attachment_refs(refs: tuple[str, ...], *, kind: str) -> None:
+    """Reject empty/blank attachment references.
+
+    Only checks that each reference is a non-empty string; existence and
+    URL-scheme validation belong to the surface layer (CLI/HTTP) which has the
+    filesystem and request context the pure domain deliberately avoids.
+    """
+    for ref in refs:
+        if not ref or not str(ref).strip():
+            raise ValueError(
+                f"send_message {kind} entries must be non-empty references"
+            )
+
+
+def _normalize_message_ids(
+    raw: int | list[int] | tuple[int, ...] | None,
+) -> tuple[int | None, tuple[int, ...] | None]:
+    """Split a backend send result into (primary_id, all_ids).
+
+    A scalar id (plain/single send) yields ``(id, None)``. A sequence (album)
+    yields ``(first, full_tuple)``. ``None``/empty yields ``(None, None)``.
+    """
+    if raw is None:
+        return None, None
+    if isinstance(raw, (list, tuple)):
+        ids = tuple(int(x) for x in raw)
+        if not ids:
+            return None, None
+        if len(ids) == 1:
+            return ids[0], None
+        return ids[0], ids
+    return int(raw), None
+
+
 class MessageBackend(Protocol):
     """Telethon-facing surface needed to send a message.
 
-    Production wires this to the same Telethon adapter used by topics; tests
-    inject a fake. The shape mirrors :class:`TopicBackend.send_message`.
+    Production wires this to the Telethon message adapter; tests inject a fake.
+    The base shape mirrors :class:`TopicBackend.send_message` and stays
+    backward-compatible: ``files`` and ``schedule_at`` are optional, so a
+    text-only send is called exactly as before.
+
+    Return value is a single message id for a plain/text send and a list of
+    ids for an album (multiple attachments). The service normalises both into
+    :class:`SendMessageResult`.
     """
 
     async def send_message(
-        self, *, chat_id: int, text: str, topic_id: int | None = None
-    ) -> int:
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        topic_id: int | None = None,
+        files: tuple[str, ...] = (),
+        schedule_at: datetime | None = None,
+    ) -> int | list[int]:
         ...
 
 
@@ -144,6 +191,14 @@ class SendMessageRequest:
     the chat upstream and passed the resolved id. ``operation_id`` anchors
     idempotency — supply the same one to replay the saved result without
     re-sending.
+
+    Attachments are optional. ``files`` are server-side paths (or anything
+    Telethon accepts as a local file) and ``file_urls`` are ``http``/``https``
+    URLs handed to Telethon as-is. Both are combined into one attachment list
+    in declaration order (``files`` then ``file_urls``); supplying more than
+    one attachment sends an album. ``schedule_at`` defers delivery to a future
+    time. ``text`` doubles as the caption when attachments are present and may
+    be empty for a media-only send.
     """
 
     telegram_chat_id: int
@@ -152,6 +207,18 @@ class SendMessageRequest:
     operation_id: str | None = None
     chat_name: str | None = None
     topic_name: str | None = None
+    files: tuple[str, ...] = field(default_factory=tuple)
+    file_urls: tuple[str, ...] = field(default_factory=tuple)
+    schedule_at: datetime | None = None
+
+    @property
+    def attachment_refs(self) -> tuple[str, ...]:
+        """All attachments as one ordered list (``files`` then ``file_urls``)."""
+        return tuple(self.files) + tuple(self.file_urls)
+
+    @property
+    def has_attachments(self) -> bool:
+        return bool(self.files or self.file_urls)
 
     def to_payload(self) -> dict[str, Any]:
         redacted = (
@@ -167,12 +234,26 @@ class SendMessageRequest:
             "operation_id": self.operation_id,
             "chat_name": self.chat_name,
             "topic_name": self.topic_name,
+            # Only attachment *references* are persisted, never file contents.
+            "files": list(self.files),
+            "file_urls": list(self.file_urls),
+            "schedule_at": (
+                self.schedule_at.isoformat()
+                if self.schedule_at is not None
+                else None
+            ),
         }
 
 
 @dataclass(frozen=True)
 class SendMessageResult:
-    """Result returned by :func:`send_message`."""
+    """Result returned by :func:`send_message`.
+
+    ``telegram_message_id`` is the primary id (the first message of an album).
+    ``telegram_message_ids`` carries the full ordered list when the send
+    produced more than one message (album); it is ``None`` for single sends.
+    ``scheduled`` is ``True`` when the message was deferred via ``schedule_at``.
+    """
 
     telegram_chat_id: int
     telegram_topic_id: int | None
@@ -181,6 +262,8 @@ class SendMessageResult:
     chat_name: str | None = None
     topic_name: str | None = None
     replayed: bool = False
+    telegram_message_ids: tuple[int, ...] | None = None
+    scheduled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -191,10 +274,17 @@ class SendMessageResult:
             "chat_name": self.chat_name,
             "topic_name": self.topic_name,
             "replayed": self.replayed,
+            "telegram_message_ids": (
+                list(self.telegram_message_ids)
+                if self.telegram_message_ids is not None
+                else None
+            ),
+            "scheduled": self.scheduled,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SendMessageResult:
+        raw_ids = payload.get("telegram_message_ids")
         return cls(
             telegram_chat_id=int(payload["telegram_chat_id"]),
             telegram_topic_id=(
@@ -211,6 +301,10 @@ class SendMessageResult:
             chat_name=payload.get("chat_name"),
             topic_name=payload.get("topic_name"),
             replayed=True,
+            telegram_message_ids=(
+                tuple(int(x) for x in raw_ids) if raw_ids is not None else None
+            ),
+            scheduled=bool(payload.get("scheduled", False)),
         )
 
 
@@ -233,9 +327,18 @@ async def send_message(
     Sending is a WRITE op: when an ``authorizer`` is supplied it must grant
     WRITE on the target chat or :class:`AccessDenied` is raised before any
     operation row is created.
+
+    A send needs either non-empty ``text`` or at least one attachment. Media
+    sends pass ``files``/``schedule_at`` through to the backend; a plain text
+    send calls the backend exactly as before for backward compatibility.
     """
-    if not request.text or not request.text.strip():
-        raise ValueError("send_message requires non-empty text")
+    has_text = bool(request.text and request.text.strip())
+    if not has_text and not request.has_attachments:
+        raise ValueError(
+            "send_message requires non-empty text or at least one attachment"
+        )
+    _validate_attachment_refs(request.files, kind="files")
+    _validate_attachment_refs(request.file_urls, kind="file_urls")
 
     if authorizer is not None:
         await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
@@ -267,11 +370,20 @@ async def send_message(
         )
 
     operation_id = begin.operation.id
+    # Only pass the media/schedule kwargs when set so a plain text send hits
+    # the backend with the exact original signature (backward compatible with
+    # text-only backends that predate attachments).
+    extra: dict[str, Any] = {}
+    if request.attachment_refs:
+        extra["files"] = request.attachment_refs
+    if request.schedule_at is not None:
+        extra["schedule_at"] = request.schedule_at
     try:
-        message_id = await backend.send_message(
+        raw_id = await backend.send_message(
             chat_id=request.telegram_chat_id,
             text=request.text,
             topic_id=request.telegram_topic_id,
+            **extra,
         )
     except FloodWaitError as exc:
         # FLOOD_WAIT is transient — marking the op `failed` would lock the
@@ -286,13 +398,16 @@ async def send_message(
         store.fail_operation(operation_id, str(exc))
         raise
 
+    primary_id, all_ids = _normalize_message_ids(raw_id)
     result = SendMessageResult(
         telegram_chat_id=request.telegram_chat_id,
         telegram_topic_id=request.telegram_topic_id,
-        telegram_message_id=int(message_id) if message_id is not None else None,
+        telegram_message_id=primary_id,
         is_service_command=is_service_command(request.text),
         chat_name=request.chat_name,
         topic_name=request.topic_name,
+        telegram_message_ids=all_ids,
+        scheduled=request.schedule_at is not None,
     )
     op = store.complete_operation(operation_id, result.to_dict())
     return result, op

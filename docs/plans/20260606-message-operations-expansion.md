@@ -106,16 +106,16 @@ ruff check src tests
 
 ### Task 1: Media send request model and domain behavior
 
-- [ ] Add attachment request/result dataclasses to `src/telegram_assistant/messages/service.py`.
-- [ ] Extend `SendMessageRequest` with `files: tuple[str, ...]`, `file_urls: tuple[str, ...]`, and `schedule_at: datetime | None`, while preserving existing text-only behavior.
-- [ ] Update `MessageBackend` protocol to accept optional `files`, `schedule_at`, and keep `topic_id`.
-- [ ] Validate:
+- [x] Add attachment request/result dataclasses to `src/telegram_assistant/messages/service.py`.
+- [x] Extend `SendMessageRequest` with `files: tuple[str, ...]`, `file_urls: tuple[str, ...]`, and `schedule_at: datetime | None`, while preserving existing text-only behavior.
+- [x] Update `MessageBackend` protocol to accept optional `files`, `schedule_at`, and keep `topic_id`.
+- [x] Validate:
   - text or at least one attachment is required;
   - attachment paths/URLs are non-empty;
   - media send is WRITE-gated before operation creation;
   - persisted request payload redacts service-command text as today and stores only attachment references, not file contents.
-- [ ] Add domain tests in `tests/test_messages.py` for text-only compatibility, media-only, media+caption, albums, empty request rejection, access denied before backend call, and replay behavior.
-- [ ] Run `.venv/bin/pytest -q tests/test_messages.py`.
+- [x] Add domain tests in `tests/test_messages.py` for text-only compatibility, media-only, media+caption, albums, empty request rejection, access denied before backend call, and replay behavior.
+- [x] Run `.venv/bin/pytest -q tests/test_messages.py`.
 
 ### Task 2: Telethon media and schedule adapter
 
