@@ -5,6 +5,7 @@
 
 ### Features
 
+- Message forwarding across domain, Telethon, CLI, and HTTP
 - Message reactions across domain, Telethon, CLI, and HTTP
 - Notifications mute/unmute across domain, Telethon, CLI, and HTTP
 - Folders remove-chat across domain, Telethon, CLI, and HTTP

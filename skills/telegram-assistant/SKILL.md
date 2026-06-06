@@ -403,24 +403,40 @@ edits `data/config.yml` to widen access on its own.
 
 #### `messages` / `send`
 
-- Extract: `--text`, chat/topic references, optional `--operation-id`.
-- Required flags: `--text` plus exactly one targeting shape — targeted
+- Extract: `--text`, chat/topic references, optional `--operation-id`,
+  optional attachments (`--file` for a local server path, `--file-url`
+  for an http(s) URL — both repeatable), optional scheduling
+  (`--schedule-at` ISO-8601 datetime, or `--delay` relative duration
+  like `10m`, `2h`, `1d`).
+- Required flags: exactly one targeting shape — targeted
   (`--chat-id`/`--chat-name` + optional `--topic-id`/`--topic-name`)
   or mass (`--mass` or no chat ref, plus `--topic-name` and
-  `--folder-name`).
+  `--folder-name`). `--text` is required unless at least one
+  `--file`/`--file-url` is supplied (in which case `--text` is the
+  caption). Attachments and scheduling are targeted-only — never combine
+  them with `--mass`.
 - From config: `--folder-name` default for both targeted resolution and
   mass mode.
-- Temp file: no — message text goes via `--text`. If the human pastes a
-  long multi-line message, escape it for the shell; do not write it to
-  a file the CLI cannot read.
-- Automation: pass service commands (`/task 123456`) verbatim.
+- Temp file: no — message text goes via `--text`, attachments via
+  repeated `--file`/`--file-url`. `--file` points at a path that exists
+  on the server running the CLI; the agent does not upload bytes. If the
+  human pastes a long multi-line message, escape it for the shell; do not
+  write it to a file the CLI cannot read.
+- Automation: pass service commands (`/task 123456`) verbatim. Pass at
+  most one of `--schedule-at` / `--delay`. Map «отправь через 2 часа» →
+  `--delay 2h`, «запланируй на 2026-06-07T09:00» → `--schedule-at`. The
+  dry-run JSON echoes `files`, `file_urls`, `schedule_at`, and
+  `scheduled` so the plan can show attachments and the resolved send
+  time.
 - Confirmation: required after dry-run. Mass mode plans must list every
   resolved chat row and call out `would_skip` rows with their reason
   (`topic_not_found`, `topic_ambiguous`, `list_topics_failed: ...`).
-- Typical errors: `messages send requires non-empty --text`,
-  `--mass cannot be combined with --chat-id or --chat-name`,
-  `mass mode requires --topic-name (and --folder-name resolves the
-  folder)`, `MessageSendNeedsReview`.
+- Typical errors: `messages send requires non-empty --text`
+  (when no attachments), `--mass cannot be combined with --chat-id or
+  --chat-name`, `--file/--file-url/--schedule-at/--delay are only
+  supported for targeted sends`, `provide only one of --schedule-at or
+  --delay`, past-schedule rejection (exit code 2), missing/empty
+  attachment file, non-http(s) `--file-url`, `MessageSendNeedsReview`.
 
 #### `messages` / `recent`
 
@@ -819,6 +835,32 @@ Request: «Напомни во всех чатах Planfix clients в топик
    would actually happen.
 4. Require an explicit confirmation that names the chat count before
    re-running without `--dry-run`.
+
+### `messages send` — media / scheduled
+
+Request: «Отправь файл /srv/exports/report.pdf в чат Клиент / проект
+через 2 часа.»
+
+1. Resource/action: `messages` / `send`. Targeted send with one
+   attachment and a relative delay.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant messages send \
+     --chat-name "Клиент / проект" \
+     --folder-name "Planfix clients" \
+     --file /srv/exports/report.pdf \
+     --text "Отчёт" \
+     --delay 2h \
+     --dry-run
+   ```
+
+3. Show resolved chat id, the `files` / `file_urls` lists, and the
+   resolved `schedule_at` / `scheduled` fields from the dry-run JSON.
+   For URL attachments use `--file-url https://...` (repeatable); for an
+   absolute send time use `--schedule-at 2026-06-07T09:00:00`. Pass at
+   most one of `--schedule-at` / `--delay`.
+4. Wait for confirmation, then re-run without `--dry-run`.
 
 ### `messages recent`
 

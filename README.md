@@ -52,7 +52,7 @@ Top-level:
 
 `messages` — send messages and service commands:
 
-- `messages send` — send a message or service command (targeted or folder-wide mass mode).
+- `messages send` — send a message or service command (targeted or folder-wide mass mode). Attach local server-side files with repeated `--file` and/or remote URLs with repeated `--file-url` (multiple attachments send an album); defer delivery with `--schedule-at` (ISO-8601 datetime) or `--delay` (relative duration like `10m`, `2h`, `1d`). Attachments and scheduling apply to targeted sends only, not mass mode.
 - `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5).
 - `messages react` — set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated).
 - `messages forward` — forward one or more messages (`--message-id`, repeatable) from a source (`--from-chat-id`/`--from-entity`) to a target (`--to-chat-id`/`--to-entity`); READ-gated on the source, WRITE-gated on the target.

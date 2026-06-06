@@ -127,6 +127,66 @@ step "CLI: messages recent --entity '${chat_id}' (numeric resolver)"
 telegram-assistant messages recent --entity "${chat_id}" --limit 1 \
     | jq '{telegram_chat_id, count}'
 
+# --- media / scheduled send, reactions, forward, folder round-trip ---------
+# All of these target only the test chat created above; they are
+# conservative and re-runnable. The scheduled send lands in the test chat
+# only and is deferred far enough to be cancellable by hand if needed.
+
+step "CLI: messages send (media) — attach a small generated text file"
+media_tmp=$(mktemp --suffix=.txt)
+printf 'e2e media attachment\n' > "${media_tmp}"
+media_json=$(telegram-assistant messages send \
+    --chat-id "${chat_id}" \
+    --text "cli media caption" \
+    --file "${media_tmp}")
+echo "${media_json}" | jq '{telegram_message_id, scheduled}'
+rm -f "${media_tmp}"
+react_message_id=$(echo "${media_json}" | jq -r '.telegram_message_id')
+
+step "CLI: messages send (scheduled) — defer by 10m into the test chat"
+telegram-assistant messages send \
+    --chat-id "${chat_id}" \
+    --text "cli scheduled ping (10m)" \
+    --delay 10m | jq '{scheduled, telegram_message_id}'
+
+step "CLI: messages react --emoji 👍 on message ${react_message_id} (dry-run)"
+telegram-assistant messages react \
+    --chat-id "${chat_id}" \
+    --message-id "${react_message_id}" \
+    --emoji 👍 --dry-run | jq .
+
+if [[ -n "${react_message_id}" && "${react_message_id}" != "null" ]]; then
+    step "CLI: messages react --emoji 👍 on message ${react_message_id} (set)"
+    telegram-assistant messages react \
+        --chat-id "${chat_id}" \
+        --message-id "${react_message_id}" \
+        --emoji 👍 | jq '{telegram_message_id, emoji, cleared}'
+
+    step "CLI: messages react --clear on message ${react_message_id} (remove)"
+    telegram-assistant messages react \
+        --chat-id "${chat_id}" \
+        --message-id "${react_message_id}" \
+        --clear | jq '{telegram_message_id, emoji, cleared}'
+
+    step "CLI: messages forward — forward message ${react_message_id} into the same test chat"
+    telegram-assistant messages forward \
+        --from-chat-id "${chat_id}" \
+        --to-chat-id "${chat_id}" \
+        --message-id "${react_message_id}" | jq '{from_chat_id, to_chat_id, telegram_message_ids}'
+fi
+
+step "CLI: notifications mute --chat-id ${chat_id} (dry-run, 1h window)"
+telegram-assistant notifications mute \
+    --chat-id "${chat_id}" --duration 1 --dry-run | jq .
+
+step "CLI: folders remove-chat then add-chat (round-trip for chat ${chat_id})"
+telegram-assistant folders remove-chat \
+    --chat-id "${chat_id}" \
+    --folder-name "${FOLDER}" | jq '{folder_id, already_absent}'
+telegram-assistant folders add-chat \
+    --chat-id "${chat_id}" \
+    --folder-name "${FOLDER}" | jq '{folder_id, already_in_folder}'
+
 # --- access allowlist (deny-by-default) ------------------------------------
 # Derive a config that allows WRITE only on folder "${FOLDER}"; everything
 # else is denied. A permitted read succeeds; an unlisted chat (Saved Messages
