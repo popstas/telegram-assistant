@@ -21,7 +21,9 @@ they are not naturally pinned to a Planfix task id).
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any, Protocol
 
 from telegram_assistant.access.service import AccessDenied, AccessLevel, Authorizer
@@ -91,8 +93,14 @@ class MessageBackend(Protocol):
     """
 
     async def send_message(
-        self, *, chat_id: int, text: str, topic_id: int | None = None
-    ) -> int:
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        topic_id: int | None = None,
+        files: tuple[str, ...] = (),
+        schedule_at: datetime | None = None,
+    ) -> int | Sequence[int]:
         ...
 
 
@@ -137,6 +145,45 @@ class MessageReadBackend(Protocol):
 
 
 @dataclass(frozen=True)
+class MessageAttachmentRequest:
+    """Attachment reference supplied by a caller.
+
+    ``reference`` is either a server-local file path or a URL. The domain only
+    persists the reference; validation of local file metadata belongs to the
+    HTTP/CLI boundary that knows which paths are acceptable to expose.
+    """
+
+    kind: str
+    reference: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"kind": self.kind, "reference": self.reference}
+
+
+@dataclass(frozen=True)
+class MessageAttachmentResult:
+    """Attachment reference echoed in a send result."""
+
+    kind: str
+    reference: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"kind": self.kind, "reference": self.reference}
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> MessageAttachmentResult:
+        return cls(kind=str(payload["kind"]), reference=str(payload["reference"]))
+
+
+@dataclass(frozen=True)
+class SendMessageBackendResult:
+    """Normalized backend result for single-message and album sends."""
+
+    telegram_message_id: int | None
+    telegram_message_ids: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
 class SendMessageRequest:
     """Input to :func:`send_message`.
 
@@ -152,6 +199,18 @@ class SendMessageRequest:
     operation_id: str | None = None
     chat_name: str | None = None
     topic_name: str | None = None
+    files: tuple[str, ...] = ()
+    file_urls: tuple[str, ...] = ()
+    schedule_at: datetime | None = None
+
+    def attachments(self) -> tuple[MessageAttachmentRequest, ...]:
+        return tuple(
+            MessageAttachmentRequest(kind="file", reference=path)
+            for path in self.files
+        ) + tuple(
+            MessageAttachmentRequest(kind="url", reference=url)
+            for url in self.file_urls
+        )
 
     def to_payload(self) -> dict[str, Any]:
         redacted = (
@@ -167,6 +226,14 @@ class SendMessageRequest:
             "operation_id": self.operation_id,
             "chat_name": self.chat_name,
             "topic_name": self.topic_name,
+            "files": list(self.files),
+            "file_urls": list(self.file_urls),
+            "attachments": [item.to_dict() for item in self.attachments()],
+            "schedule_at": (
+                self.schedule_at.isoformat()
+                if self.schedule_at is not None
+                else None
+            ),
         }
 
 
@@ -180,6 +247,10 @@ class SendMessageResult:
     is_service_command: bool
     chat_name: str | None = None
     topic_name: str | None = None
+    attachments: tuple[MessageAttachmentResult, ...] = ()
+    scheduled: bool = False
+    schedule_at: datetime | None = None
+    telegram_message_ids: tuple[int, ...] = ()
     replayed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -187,14 +258,23 @@ class SendMessageResult:
             "telegram_chat_id": self.telegram_chat_id,
             "telegram_topic_id": self.telegram_topic_id,
             "telegram_message_id": self.telegram_message_id,
+            "telegram_message_ids": list(self.telegram_message_ids),
             "is_service_command": self.is_service_command,
             "chat_name": self.chat_name,
             "topic_name": self.topic_name,
+            "attachments": [item.to_dict() for item in self.attachments],
+            "scheduled": self.scheduled,
+            "schedule_at": (
+                self.schedule_at.isoformat()
+                if self.schedule_at is not None
+                else None
+            ),
             "replayed": self.replayed,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> SendMessageResult:
+        schedule_at = payload.get("schedule_at")
         return cls(
             telegram_chat_id=int(payload["telegram_chat_id"]),
             telegram_topic_id=(
@@ -210,8 +290,70 @@ class SendMessageResult:
             is_service_command=bool(payload.get("is_service_command", False)),
             chat_name=payload.get("chat_name"),
             topic_name=payload.get("topic_name"),
+            attachments=tuple(
+                MessageAttachmentResult.from_dict(item)
+                for item in payload.get("attachments", [])
+            ),
+            scheduled=bool(payload.get("scheduled", False)),
+            schedule_at=(
+                datetime.fromisoformat(str(schedule_at))
+                if schedule_at is not None
+                else None
+            ),
+            telegram_message_ids=tuple(
+                int(item) for item in payload.get("telegram_message_ids", [])
+            ),
             replayed=True,
         )
+
+
+def _validate_send_request(request: SendMessageRequest) -> None:
+    has_text = bool(request.text and request.text.strip())
+    attachments = request.attachments()
+    if not has_text and not attachments:
+        raise ValueError("send_message requires text or at least one attachment")
+    empty_refs = [
+        item
+        for item in attachments
+        if not item.reference or not item.reference.strip()
+    ]
+    if empty_refs:
+        raise ValueError("send_message attachment references must be non-empty")
+
+
+def _backend_files(request: SendMessageRequest) -> tuple[str, ...]:
+    return tuple(request.files) + tuple(request.file_urls)
+
+
+async def _send_with_backend(
+    backend: MessageBackend, *, request: SendMessageRequest
+) -> SendMessageBackendResult:
+    files = _backend_files(request)
+    kwargs: dict[str, Any] = {
+        "chat_id": request.telegram_chat_id,
+        "text": request.text,
+        "topic_id": request.telegram_topic_id,
+    }
+    if files:
+        kwargs["files"] = files
+    if request.schedule_at is not None:
+        kwargs["schedule_at"] = request.schedule_at
+
+    raw = await backend.send_message(**kwargs)
+    if isinstance(raw, SendMessageBackendResult):
+        return raw
+    if isinstance(raw, Sequence) and not isinstance(raw, (str, bytes, bytearray)):
+        ids = tuple(int(item) for item in raw if item is not None)
+        return SendMessageBackendResult(
+            telegram_message_id=ids[0] if ids else None,
+            telegram_message_ids=ids,
+        )
+    return SendMessageBackendResult(
+        telegram_message_id=int(raw) if raw is not None else None,
+        telegram_message_ids=(
+            (int(raw),) if raw is not None else ()
+        ),
+    )
 
 
 async def send_message(
@@ -234,8 +376,7 @@ async def send_message(
     WRITE on the target chat or :class:`AccessDenied` is raised before any
     operation row is created.
     """
-    if not request.text or not request.text.strip():
-        raise ValueError("send_message requires non-empty text")
+    _validate_send_request(request)
 
     if authorizer is not None:
         await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
@@ -268,11 +409,7 @@ async def send_message(
 
     operation_id = begin.operation.id
     try:
-        message_id = await backend.send_message(
-            chat_id=request.telegram_chat_id,
-            text=request.text,
-            topic_id=request.telegram_topic_id,
-        )
+        backend_result = await _send_with_backend(backend, request=request)
     except FloodWaitError as exc:
         # FLOOD_WAIT is transient — marking the op `failed` would lock the
         # idempotency key on a terminal state and the retry would surface
@@ -289,10 +426,17 @@ async def send_message(
     result = SendMessageResult(
         telegram_chat_id=request.telegram_chat_id,
         telegram_topic_id=request.telegram_topic_id,
-        telegram_message_id=int(message_id) if message_id is not None else None,
+        telegram_message_id=backend_result.telegram_message_id,
+        telegram_message_ids=backend_result.telegram_message_ids,
         is_service_command=is_service_command(request.text),
         chat_name=request.chat_name,
         topic_name=request.topic_name,
+        attachments=tuple(
+            MessageAttachmentResult(kind=item.kind, reference=item.reference)
+            for item in request.attachments()
+        ),
+        scheduled=request.schedule_at is not None,
+        schedule_at=request.schedule_at,
     )
     op = store.complete_operation(operation_id, result.to_dict())
     return result, op
@@ -616,12 +760,15 @@ __all__ = [
     "MassSendItemResult",
     "MassSendRequest",
     "MassSendResult",
+    "MessageAttachmentRequest",
+    "MessageAttachmentResult",
     "MessageBackend",
     "MessageReadBackend",
     "MessageSendFailed",
     "MessageSendNeedsReview",
     "MessageSendPending",
     "RecentMessage",
+    "SendMessageBackendResult",
     "SendMessageRequest",
     "SendMessageResult",
     "get_recent_messages",

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
+from telegram_assistant.access import AccessDenied, AccessLevel
 from telegram_assistant.cli import main as cli_main
 from telegram_assistant.config import load_config_from_text
 from telegram_assistant.folders import (
@@ -48,23 +51,40 @@ class FakeMessageBackend:
         topics_per_chat: dict[int, list[TopicSummary]] | None = None,
         fail_send: bool = False,
         next_id: int = 100,
+        next_result: int | list[int] | None = None,
     ) -> None:
         self._topics_per_chat = topics_per_chat or {}
         self._fail_send = fail_send
         self._next_id = next_id
+        self._next_result = next_result
         self.sent: list[dict[str, Any]] = []
 
     async def send_message(
-        self, *, chat_id: int, text: str, topic_id: int | None = None
-    ) -> int:
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        topic_id: int | None = None,
+        files: tuple[str, ...] = (),
+        schedule_at: datetime | None = None,
+    ) -> int | list[int]:
         if self._fail_send:
             raise RuntimeError("telegram error")
-        msg_id = self._next_id
-        self._next_id += 1
+        result = self._next_result
+        if result is None:
+            result = self._next_id
+            self._next_id += 1
         self.sent.append(
-            {"chat_id": chat_id, "text": text, "topic_id": topic_id, "id": msg_id}
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "topic_id": topic_id,
+                "files": files,
+                "schedule_at": schedule_at,
+                "id": result,
+            }
         )
-        return msg_id
+        return result
 
     async def create_topic(self, *, chat_id: int, name: str) -> int:
         raise NotImplementedError
@@ -105,6 +125,14 @@ class FakeFolderBackend:
 @pytest.fixture()
 def store(tmp_path: Path) -> OperationStore:
     return OperationStore(tmp_path / "state.db")
+
+
+def _operation_count(store: OperationStore) -> int:
+    conn = sqlite3.connect(store._database_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM operations").fetchone()[0]
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +270,182 @@ async def test_send_message_rejects_empty_text(store: OperationStore) -> None:
                 telegram_chat_id=-100, text="", operation_id="op"
             ),
         )
+
+
+async def test_send_message_keeps_text_only_compatibility(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="plain text",
+        operation_id="text-compatible",
+    )
+
+    result, op = await send_message(backend=backend, store=store, request=req)
+
+    assert result.telegram_message_id == 100
+    assert result.telegram_message_ids == (100,)
+    assert result.attachments == ()
+    assert result.scheduled is False
+    assert backend.sent[0]["files"] == ()
+    assert backend.sent[0]["schedule_at"] is None
+    assert op.request_payload["files"] == []
+    assert op.request_payload["file_urls"] == []
+
+
+async def test_send_message_allows_media_only(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="",
+        files=("/tmp/report.pdf",),
+        operation_id="media-only",
+    )
+
+    result, op = await send_message(backend=backend, store=store, request=req)
+
+    assert result.telegram_message_id == 100
+    assert [item.to_dict() for item in result.attachments] == [
+        {"kind": "file", "reference": "/tmp/report.pdf"}
+    ]
+    assert backend.sent[0]["text"] == ""
+    assert backend.sent[0]["files"] == ("/tmp/report.pdf",)
+    assert op.request_payload["files"] == ["/tmp/report.pdf"]
+    assert op.request_payload["attachments"] == [
+        {"kind": "file", "reference": "/tmp/report.pdf"}
+    ]
+
+
+async def test_send_message_allows_media_with_caption_and_schedule(
+    store: OperationStore,
+) -> None:
+    scheduled_at = datetime(2026, 6, 7, 12, 0, tzinfo=UTC)
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="caption",
+        files=("/tmp/a.jpg",),
+        file_urls=("https://example.test/b.png",),
+        schedule_at=scheduled_at,
+        operation_id="media-caption",
+    )
+
+    result, op = await send_message(backend=backend, store=store, request=req)
+
+    assert result.scheduled is True
+    assert result.schedule_at == scheduled_at
+    assert [item.to_dict() for item in result.attachments] == [
+        {"kind": "file", "reference": "/tmp/a.jpg"},
+        {"kind": "url", "reference": "https://example.test/b.png"},
+    ]
+    assert backend.sent[0]["text"] == "caption"
+    assert backend.sent[0]["files"] == (
+        "/tmp/a.jpg",
+        "https://example.test/b.png",
+    )
+    assert backend.sent[0]["schedule_at"] == scheduled_at
+    assert op.request_payload["schedule_at"] == scheduled_at.isoformat()
+
+
+async def test_send_message_allows_album_result_ids(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend(next_result=[501, 502, 503])
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="album",
+        files=("/tmp/1.jpg", "/tmp/2.jpg", "/tmp/3.jpg"),
+        operation_id="album",
+    )
+
+    result, op = await send_message(backend=backend, store=store, request=req)
+
+    assert result.telegram_message_id == 501
+    assert result.telegram_message_ids == (501, 502, 503)
+    assert op.result_payload is not None
+    assert op.result_payload["telegram_message_ids"] == [501, 502, 503]
+
+
+async def test_send_message_rejects_empty_attachment_reference(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    with pytest.raises(ValueError):
+        await send_message(
+            backend=backend,
+            store=store,
+            request=SendMessageRequest(
+                telegram_chat_id=-100,
+                text="caption",
+                files=(" ",),
+                operation_id="bad-attachment",
+            ),
+        )
+    assert backend.sent == []
+    assert _operation_count(store) == 0
+
+
+async def test_send_message_access_denied_before_media_operation_creation(
+    store: OperationStore,
+) -> None:
+    class DenyingAuthorizer:
+        async def require(self, chat_ref: object, level: AccessLevel) -> None:
+            raise AccessDenied(chat_ref=chat_ref, required_level=level)
+
+    backend = FakeMessageBackend()
+    with pytest.raises(AccessDenied):
+        await send_message(
+            backend=backend,
+            store=store,
+            request=SendMessageRequest(
+                telegram_chat_id=-200,
+                text="caption",
+                files=("/tmp/a.jpg",),
+                operation_id="media-denied",
+            ),
+            authorizer=DenyingAuthorizer(),
+        )
+
+    assert backend.sent == []
+    assert _operation_count(store) == 0
+
+
+async def test_send_message_replays_media_result_without_backend_call(
+    store: OperationStore,
+) -> None:
+    scheduled_at = datetime(2026, 6, 7, 12, 0, tzinfo=UTC)
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="/task 12345",
+        files=("/tmp/a.jpg",),
+        schedule_at=scheduled_at,
+        operation_id="media-replay",
+    )
+    first, first_op = await send_message(
+        backend=FakeMessageBackend(next_result=[701, 702]),
+        store=store,
+        request=req,
+    )
+
+    second_backend = FakeMessageBackend()
+    second, second_op = await send_message(
+        backend=second_backend,
+        store=store,
+        request=req,
+    )
+
+    assert second.replayed is True
+    assert first_op.id == second_op.id
+    assert second_backend.sent == []
+    assert second.telegram_message_id == first.telegram_message_id
+    assert second.telegram_message_ids == first.telegram_message_ids
+    assert second.attachments == first.attachments
+    assert second.schedule_at == scheduled_at
+    assert first_op.request_payload["text"] == "/task [redacted]"
+    assert first_op.request_payload["files"] == ["/tmp/a.jpg"]
 
 
 # ---------------------------------------------------------------------------
