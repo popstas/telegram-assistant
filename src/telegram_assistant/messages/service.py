@@ -22,7 +22,7 @@ they are not naturally pinned to a Planfix task id).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Protocol
 
 from telegram_assistant.access.service import AccessDenied, AccessLevel, Authorizer
@@ -38,6 +38,92 @@ from telegram_assistant.persistence.models import (
 from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.topics import TopicBackend, TopicSummary
 from telegram_assistant.worker.queue import FloodWaitError
+
+
+class ScheduleError(ValueError):
+    """Invalid scheduling input — bad delay, conflicting modes, or a past time.
+
+    Surface layers map this to CLI exit code 2 / HTTP 400. Kept distinct from
+    plain :class:`ValueError` so callers can translate it without catching every
+    validation error.
+    """
+
+
+_DELAY_UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_delay(value: str) -> int:
+    """Parse a relative delay like ``10m``/``2h``/``1d``/``30s`` into seconds.
+
+    The magnitude must be a positive integer and the trailing unit one of
+    ``s``/``m``/``h``/``d``. Anything else raises :class:`ScheduleError`.
+    """
+    text = (value or "").strip().lower()
+    if not text:
+        raise ScheduleError("delay must be a non-empty duration like '10m', '2h', '1d'")
+    unit = text[-1]
+    if unit not in _DELAY_UNITS:
+        raise ScheduleError(
+            f"invalid delay {value!r}: must end with one of s, m, h, d "
+            "(e.g. '10m', '2h', '1d')"
+        )
+    magnitude = text[:-1]
+    if not magnitude.isdigit():
+        raise ScheduleError(
+            f"invalid delay {value!r}: magnitude must be a positive integer"
+        )
+    amount = int(magnitude)
+    if amount <= 0:
+        raise ScheduleError(f"invalid delay {value!r}: must be a positive duration")
+    return amount * _DELAY_UNITS[unit]
+
+
+def parse_schedule_at(value: str) -> datetime:
+    """Parse an ISO-8601 ``--schedule-at`` value into a :class:`datetime`.
+
+    Invalid input raises :class:`ScheduleError`. Whether the time is in the
+    future is checked separately by :func:`resolve_schedule_at`.
+    """
+    try:
+        return datetime.fromisoformat((value or "").strip())
+    except ValueError as exc:
+        raise ScheduleError(
+            f"invalid schedule_at {value!r}: expected an ISO-8601 datetime"
+        ) from exc
+
+
+def resolve_schedule_at(
+    *,
+    schedule_at: datetime | None = None,
+    delay_seconds: int | None = None,
+    now: datetime | None = None,
+) -> datetime | None:
+    """Resolve the two scheduling modes into a single future ``datetime``.
+
+    Exactly one of ``schedule_at`` / ``delay_seconds`` may be supplied. A delay
+    is added to ``now`` (defaulting to the current time, matching the tz of an
+    aware reference); an absolute ``schedule_at`` must be strictly in the future.
+    Returns ``None`` when no scheduling was requested.
+    """
+    if schedule_at is not None and delay_seconds is not None:
+        raise ScheduleError("provide only one of schedule_at or delay")
+    if delay_seconds is not None:
+        if delay_seconds <= 0:
+            raise ScheduleError("delay must be a positive duration")
+        base = now if now is not None else datetime.now()
+        return base + timedelta(seconds=delay_seconds)
+    if schedule_at is not None:
+        reference = now
+        if reference is None:
+            reference = (
+                datetime.now(schedule_at.tzinfo)
+                if schedule_at.tzinfo is not None
+                else datetime.now()
+            )
+        if schedule_at <= reference:
+            raise ScheduleError("schedule_at must be in the future")
+        return schedule_at
+    return None
 
 
 class MessageSendFailed(RuntimeError):
@@ -737,11 +823,15 @@ __all__ = [
     "MessageSendNeedsReview",
     "MessageSendPending",
     "RecentMessage",
+    "ScheduleError",
     "SendMessageRequest",
     "SendMessageResult",
     "get_recent_messages",
     "is_service_command",
     "mass_send_message",
+    "parse_delay",
+    "parse_schedule_at",
     "redact_message_text",
+    "resolve_schedule_at",
     "send_message",
 ]

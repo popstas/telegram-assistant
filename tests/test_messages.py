@@ -837,7 +837,9 @@ def _patch_cli_message_backends(
         config = load_config(config_path)
 
         async def _open() -> Any:
-            return backend, folder_backend
+            # Production returns (message_backend, topic_backend, folder_backend);
+            # the fake doubles as both message and topic backend.
+            return backend, backend, folder_backend
 
         return config, _FakeManager(), store, _open
 
@@ -991,3 +993,392 @@ def test_cli_messages_send_requires_chat_or_topic_for_mass(
     )
     # No chat-id and no topic-name → can't decide between targeted and mass.
     assert result.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# Scheduling helpers (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_delay_units() -> None:
+    from telegram_assistant.messages import parse_delay
+
+    assert parse_delay("30s") == 30
+    assert parse_delay("10m") == 600
+    assert parse_delay("2h") == 7200
+    assert parse_delay("1d") == 86400
+
+
+@pytest.mark.parametrize("bad", ["10x", "abc", "", "-5m", "0h", "m", "1.5h"])
+def test_parse_delay_invalid(bad: str) -> None:
+    from telegram_assistant.messages import ScheduleError, parse_delay
+
+    with pytest.raises(ScheduleError):
+        parse_delay(bad)
+
+
+def test_resolve_schedule_at_delay_adds_to_now() -> None:
+    from datetime import datetime
+
+    from telegram_assistant.messages import resolve_schedule_at
+
+    now = datetime(2026, 1, 1, 12, 0, 0)
+    resolved = resolve_schedule_at(delay_seconds=600, now=now)
+    assert resolved == datetime(2026, 1, 1, 12, 10, 0)
+
+
+def test_resolve_schedule_at_rejects_both_modes() -> None:
+    from datetime import datetime
+
+    from telegram_assistant.messages import ScheduleError, resolve_schedule_at
+
+    with pytest.raises(ScheduleError):
+        resolve_schedule_at(
+            schedule_at=datetime(2030, 1, 1), delay_seconds=60, now=datetime(2026, 1, 1)
+        )
+
+
+def test_resolve_schedule_at_rejects_past() -> None:
+    from datetime import datetime
+
+    from telegram_assistant.messages import ScheduleError, resolve_schedule_at
+
+    now = datetime(2026, 1, 1, 12, 0, 0)
+    with pytest.raises(ScheduleError):
+        resolve_schedule_at(schedule_at=datetime(2026, 1, 1, 11, 0, 0), now=now)
+
+
+def test_resolve_schedule_at_future_passes_through() -> None:
+    from datetime import datetime
+
+    from telegram_assistant.messages import resolve_schedule_at
+
+    now = datetime(2026, 1, 1, 12, 0, 0)
+    future = datetime(2026, 1, 1, 13, 0, 0)
+    assert resolve_schedule_at(schedule_at=future, now=now) == future
+
+
+def test_parse_schedule_at_invalid() -> None:
+    from telegram_assistant.messages import ScheduleError, parse_schedule_at
+
+    with pytest.raises(ScheduleError):
+        parse_schedule_at("not-a-date")
+
+
+# ---------------------------------------------------------------------------
+# CLI media / scheduled sends (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_messages_send_dry_run_includes_attachments_and_schedule(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    media = tmp_path / "pic.txt"
+    media.write_text("hello")
+    backend = FakeMessageBackend()
+    folder_backend = FakeFolderBackend([])
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--text",
+            "caption",
+            "--chat-id",
+            "-100",
+            "--file",
+            str(media),
+            "--file-url",
+            "https://example.com/a.jpg",
+            "--delay",
+            "10m",
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    resolved = payload["resolved"]
+    assert resolved["files"] == [str(media)]
+    assert resolved["file_urls"] == ["https://example.com/a.jpg"]
+    assert resolved["scheduled"] is True
+    assert resolved["schedule_at"] is not None
+    # Dry-run must not touch the backend.
+    assert backend.sent == []
+
+
+def test_cli_messages_send_media_real(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    media = tmp_path / "doc.txt"
+    media.write_text("content")
+    backend = FakeMessageBackend()
+    folder_backend = FakeFolderBackend([])
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--text",
+            "",
+            "--chat-id",
+            "-100",
+            "--file",
+            str(media),
+            "--operation-id",
+            "media-1",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert backend.sent[0]["files"] == (str(media),)
+    assert backend.sent[0]["chat_id"] == -100
+
+
+def test_cli_messages_send_scheduled_real(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeMessageBackend()
+    folder_backend = FakeFolderBackend([])
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--text",
+            "later",
+            "--chat-id",
+            "-100",
+            "--delay",
+            "2h",
+            "--operation-id",
+            "sched-1",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["scheduled"] is True
+    assert backend.sent[0]["schedule_at"] is not None
+
+
+def test_cli_messages_send_rejects_past_schedule(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeMessageBackend()
+    folder_backend = FakeFolderBackend([])
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--text",
+            "hi",
+            "--chat-id",
+            "-100",
+            "--schedule-at",
+            "2000-01-01T00:00:00",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 2
+    assert backend.sent == []
+
+
+def test_cli_messages_send_rejects_invalid_delay(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeMessageBackend()
+    folder_backend = FakeFolderBackend([])
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--text",
+            "hi",
+            "--chat-id",
+            "-100",
+            "--delay",
+            "10x",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 2
+
+
+def test_cli_messages_send_rejects_missing_local_file(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeMessageBackend()
+    folder_backend = FakeFolderBackend([])
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--text",
+            "hi",
+            "--chat-id",
+            "-100",
+            "--file",
+            str(tmp_path / "missing.bin"),
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# HTTP media / scheduled sends (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def test_http_send_media_via_urls(minimal_config_yaml: str) -> None:
+    backend = FakeMessageBackend()
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "text": "caption",
+            "file_urls": [
+                "https://example.com/a.jpg",
+                "https://example.com/b.jpg",
+            ],
+            "operation_id": "http-media",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Two attachments → album → list of ids.
+    assert body["telegram_message_ids"] is not None
+    assert len(body["telegram_message_ids"]) == 2
+    assert backend.sent[0]["files"] == (
+        "https://example.com/a.jpg",
+        "https://example.com/b.jpg",
+    )
+
+
+def test_http_send_scheduled_via_delay(minimal_config_yaml: str) -> None:
+    backend = FakeMessageBackend()
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "text": "later",
+            "delay_seconds": 3600,
+            "operation_id": "http-sched",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["scheduled"] is True
+    assert backend.sent[0]["schedule_at"] is not None
+
+
+def test_http_send_rejects_past_schedule(minimal_config_yaml: str) -> None:
+    backend = FakeMessageBackend()
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "text": "hi",
+            "schedule_at": "2000-01-01T00:00:00",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert backend.sent == []
+
+
+def test_http_send_rejects_conflicting_schedule_modes(
+    minimal_config_yaml: str,
+) -> None:
+    backend = FakeMessageBackend()
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "text": "hi",
+            "schedule_at": "2030-01-01T00:00:00",
+            "delay_seconds": 60,
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+def test_http_send_rejects_media_in_mass_mode(minimal_config_yaml: str) -> None:
+    backend = FakeMessageBackend()
+    folder_backend = FakeFolderBackend([])
+    client = _http_client(
+        minimal_config_yaml,
+        message_backend=backend,
+        topic_backend=backend,
+        folder_backend=folder_backend,
+    )
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "folder_name": "Planfix clients",
+            "topic_name": "Daily",
+            "text": "ping",
+            "file_urls": ["https://example.com/a.jpg"],
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 422, resp.text

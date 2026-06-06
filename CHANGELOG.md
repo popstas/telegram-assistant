@@ -5,6 +5,7 @@
 
 ### Features
 
+- TelethonMessageBackend for text/media/scheduled sends
 - Media/scheduled send request model and domain behavior
 
 ### Documentation

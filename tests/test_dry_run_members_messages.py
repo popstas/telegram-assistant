@@ -146,7 +146,9 @@ def _patch_message_backends(
         config = load_config(config_path)
 
         async def _open() -> Any:
-            return backend, folder_backend
+            # Production returns (message_backend, topic_backend, folder_backend);
+            # the fake doubles as both message and topic backend.
+            return backend, backend, folder_backend
 
         return config, _FakeManager(), store, _open
 

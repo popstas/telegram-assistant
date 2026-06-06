@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, model_validator
 
 from telegram_assistant.access import AccessDenied
 from telegram_assistant.folders import (
@@ -24,16 +25,21 @@ from telegram_assistant.http_api.access import (
 )
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.messages import (
+    AttachmentError,
     MassSendRequest,
     MessageBackend,
     MessageReadBackend,
     MessageSendFailed,
     MessageSendNeedsReview,
     MessageSendPending,
+    ScheduleError,
     SendMessageRequest,
     get_recent_messages,
     mass_send_message,
+    resolve_schedule_at,
     send_message,
+    validate_file_urls,
+    validate_local_files,
 )
 from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.topics import (
@@ -45,7 +51,9 @@ from telegram_assistant.topics import (
 
 
 class MessageSendBody(BaseModel):
-    text: str = Field(..., min_length=1)
+    # ``text`` doubles as the caption and may be empty when attachments are
+    # present (media-only send), so it is optional with an empty-string default.
+    text: str = ""
     telegram_chat_id: int | None = None
     chat_name: str | None = None
     # Flexible entity reference (numeric id with/without -100, @username, t.me /
@@ -56,6 +64,13 @@ class MessageSendBody(BaseModel):
     telegram_topic_id: int | None = None
     topic_name: str | None = None
     operation_id: str | None = None
+    # Attachments: ``files`` are server-side local paths, ``file_urls`` are
+    # http(s) URLs handed to Telethon as-is. Scheduling: exactly one of
+    # ``schedule_at`` (ISO-8601) / ``delay_seconds`` may be set.
+    files: list[str] | None = None
+    file_urls: list[str] | None = None
+    schedule_at: datetime | None = None
+    delay_seconds: int | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> MessageSendBody:
@@ -65,6 +80,15 @@ class MessageSendBody(BaseModel):
         has_folder = self.folder_name is not None
         has_topic_name = self.topic_name is not None
         has_topic_id = self.telegram_topic_id is not None
+
+        has_attachments = bool(self.files or self.file_urls)
+        if not (self.text and self.text.strip()) and not has_attachments:
+            raise ValueError(
+                "must provide non-empty text or at least one files/file_urls "
+                "attachment"
+            )
+        if self.schedule_at is not None and self.delay_seconds is not None:
+            raise ValueError("provide only one of schedule_at or delay_seconds")
 
         # ``entity`` is a direct chat reference, equivalent to telegram_chat_id
         # for shape purposes (no folder lookup needed).
@@ -86,6 +110,15 @@ class MessageSendBody(BaseModel):
                 raise ValueError(
                     "telegram_topic_id is not valid in mass mode; "
                     "use topic_name to resolve per chat"
+                )
+            if (
+                has_attachments
+                or self.schedule_at is not None
+                or self.delay_seconds is not None
+            ):
+                raise ValueError(
+                    "files/file_urls/schedule_at/delay_seconds are only supported "
+                    "for targeted sends, not mass mode"
                 )
             return self
 
@@ -300,6 +333,26 @@ def build_router() -> APIRouter:
                 ) from exc
             topic_name_for_log = body.topic_name
 
+        files = tuple(body.files or ())
+        file_urls = tuple(body.file_urls or ())
+        try:
+            validate_local_files(files)
+            validate_file_urls(file_urls)
+        except AttachmentError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        try:
+            resolved_schedule_at = resolve_schedule_at(
+                schedule_at=body.schedule_at,
+                delay_seconds=body.delay_seconds,
+            )
+        except ScheduleError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
         domain_request = SendMessageRequest(
             telegram_chat_id=telegram_chat_id,
             text=body.text,
@@ -307,6 +360,9 @@ def build_router() -> APIRouter:
             operation_id=body.operation_id,
             chat_name=chat_name_for_log,
             topic_name=topic_name_for_log,
+            files=files,
+            file_urls=file_urls,
+            schedule_at=resolved_schedule_at,
         )
 
         authorizer = build_authorizer(

@@ -2420,12 +2420,12 @@ app.add_typer(messages_app, name="messages")
 
 
 def _build_message_backends(config_path: Path | None):
-    """Open the Telethon-backed topic + folder backends + store for messaging.
+    """Open the Telethon-backed message + topic + folder backends + store.
 
-    The topic backend doubles as the message backend in production (the
-    Telethon adapter for topics already implements ``send_message``); we
-    reuse it here so HTTP and CLI never disagree on which client sends the
-    message.
+    ``_open`` returns ``(message_backend, topic_backend, folder_backend)``. The
+    dedicated :class:`TelethonMessageBackend` handles text/media/scheduled sends
+    while the topic backend still serves topic-name resolution and mass send;
+    the folder backend resolves chats and folders.
     """
     config = _load_config_or_exit(config_path)
     manager = TelethonSessionManager(config.telegram)
@@ -2433,6 +2433,9 @@ def _build_message_backends(config_path: Path | None):
 
     async def _open():
         from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonMessageBackend,
+        )
         from telegram_assistant.topics.telethon_backend import (
             TelethonTopicBackend,
         )
@@ -2443,8 +2446,9 @@ def _build_message_backends(config_path: Path | None):
                 "Telethon session is not authorized; run "
                 "`telegram-assistant auth` first."
             )
+        message_backend = TelethonMessageBackend(client)
         topic_backend = TelethonTopicBackend(client)
-        return topic_backend, TelethonFolderBackend(client)
+        return message_backend, topic_backend, TelethonFolderBackend(client)
 
     return config, manager, store, _open
 
@@ -2500,6 +2504,27 @@ def messages_send(
         "--operation-id",
         help="Idempotency anchor; reuse to replay the saved result instead of re-sending.",
     ),
+    file: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--file",
+        help="Local server-side file to attach (repeatable; many files send an album).",
+    ),
+    file_url: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--file-url",
+        help="http(s) URL to attach, handed to Telegram as-is (repeatable).",
+    ),
+    schedule_at: str | None = typer.Option(
+        None,
+        "--schedule-at",
+        help="Defer delivery to an ISO-8601 datetime (mutually exclusive with --delay).",
+    ),
+    delay: str | None = typer.Option(
+        None,
+        "--delay",
+        help="Defer delivery by a relative duration like 10m, 2h, 1d "
+        "(mutually exclusive with --schedule-at).",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -2520,15 +2545,22 @@ def messages_send(
         resolve_folder,
     )
     from telegram_assistant.messages import (
+        AttachmentError,
         MassSendRequest,
         MessageSendFailed,
         MessageSendNeedsReview,
         MessageSendPending,
+        ScheduleError,
         SendMessageRequest,
         is_service_command,
         mass_send_message,
+        parse_delay,
+        parse_schedule_at,
         redact_message_text,
+        resolve_schedule_at,
         send_message,
+        validate_file_urls,
+        validate_local_files,
     )
     from telegram_assistant.topics import (
         AmbiguousTopicNameError,
@@ -2560,6 +2592,44 @@ def messages_send(
         )
         raise typer.Exit(code=2)
 
+    files = tuple(file or ())
+    file_urls = tuple(file_url or ())
+    has_attachments = bool(files or file_urls)
+    has_schedule_input = schedule_at is not None or delay is not None
+
+    # Media and scheduling are targeted-only; mass mode iterates many chats and
+    # has no single attachment/schedule semantics.
+    if is_mass and (has_attachments or has_schedule_input):
+        typer.echo(
+            "--file/--file-url/--schedule-at/--delay are only supported for "
+            "targeted sends, not mass mode",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # Resolve scheduling (rejects conflicting modes and past absolute times) and
+    # validate attachments before opening any backend, so bad input fails fast
+    # with exit code 2 in both dry-run and real runs.
+    try:
+        parsed_schedule_at = (
+            parse_schedule_at(schedule_at) if schedule_at is not None else None
+        )
+        delay_seconds = parse_delay(delay) if delay is not None else None
+        resolved_schedule_at = resolve_schedule_at(
+            schedule_at=parsed_schedule_at,
+            delay_seconds=delay_seconds,
+        )
+    except ScheduleError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    try:
+        validate_local_files(files)
+        validate_file_urls(file_urls)
+    except AttachmentError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
     config, manager, store, open_backends = _build_message_backends(config_path)
 
     # Mass mode and chat_name resolution both need the folder default.
@@ -2573,8 +2643,12 @@ def messages_send(
         effective_folder_id = folder_id
 
     if dry_run:
-        if not text or not text.strip():
-            typer.echo("messages send requires non-empty --text", err=True)
+        if not (text and text.strip()) and not has_attachments:
+            typer.echo(
+                "messages send requires non-empty --text or at least one "
+                "--file/--file-url attachment",
+                err=True,
+            )
             raise typer.Exit(code=2)
         if is_mass and not (topic_name or "").strip():
             typer.echo(
@@ -2588,7 +2662,7 @@ def messages_send(
 
         async def _resolve_send() -> dict[str, object]:
             try:
-                topic_backend, folder_backend = await open_backends()
+                _msg_backend, topic_backend, folder_backend = await open_backends()
                 if is_mass:
                     snapshot = await resolve_folder(
                         folder_backend,
@@ -2776,6 +2850,14 @@ def messages_send(
                 "text": display_text,
                 "is_service_command": service,
                 "operation_id": operation_id,
+                "files": list(files),
+                "file_urls": list(file_urls),
+                "schedule_at": (
+                    resolved_schedule_at.isoformat()
+                    if resolved_schedule_at is not None
+                    else None
+                ),
+                "scheduled": resolved_schedule_at is not None,
             }
             if chat_name is not None:
                 resolved_payload["folder_name"] = resolved_folder_name
@@ -2798,8 +2880,7 @@ def messages_send(
 
     async def _run() -> dict[str, object]:
         try:
-            topic_backend, folder_backend = await open_backends()
-            message_backend = topic_backend
+            message_backend, topic_backend, folder_backend = await open_backends()
 
             # Build a resolver only when the policy or --entity actually needs
             # one, so the common allow-all/no-entity path never touches the
@@ -2869,6 +2950,9 @@ def messages_send(
                 operation_id=operation_id,
                 chat_name=resolved_chat_name,
                 topic_name=resolved_topic_name,
+                files=files,
+                file_urls=file_urls,
+                schedule_at=resolved_schedule_at,
             )
             result_single, op = await send_message(
                 backend=message_backend,
