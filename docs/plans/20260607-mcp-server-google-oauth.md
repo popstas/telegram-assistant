@@ -112,14 +112,14 @@ authenticate with Google and drive Telegram operations through the same safety r
 
 ### Task 3: Mount the FastMCP streamable-HTTP server at `/mcp`
 
-- [ ] Add the official `mcp` SDK to project dependencies
-- [ ] Construct a `FastMCP` server and mount its streamable-HTTP ASGI app at `/mcp` in `create_app()`,
+- [x] Add the official `mcp` SDK to project dependencies
+- [x] Construct a `FastMCP` server and mount its streamable-HTTP ASGI app at `/mcp` in `create_app()`,
       gated on `mcp.enabled` (absent/disabled ⇒ no `/mcp` route)
-- [ ] Enforce the Task 2 token validation on `/mcp` requests (reject missing/invalid/expired/wrong-
+- [x] Enforce the Task 2 token validation on `/mcp` requests (reject missing/invalid/expired/wrong-
       audience/insufficient-scope tokens)
-- [ ] Verify `/health` stays open and `/telegram/*` bearer auth is unchanged when MCP is enabled
-- [ ] write tests for the mount toggle, `initialize`/`tools/list` reachability, and token enforcement
-- [ ] run project tests - must pass before next task
+- [x] Verify `/health` stays open and `/telegram/*` bearer auth is unchanged when MCP is enabled
+- [x] write tests for the mount toggle, `initialize`/`tools/list` reachability, and token enforcement
+- [x] run project tests - must pass before next task
 
 ### Task 4: Expose `telegram_` tools over the domain services
 

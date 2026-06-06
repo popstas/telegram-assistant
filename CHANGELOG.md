@@ -5,6 +5,7 @@
 
 ### Features
 
+- Build local oauth authorization server
 - Add mcp config validation
 
 ### Documentation

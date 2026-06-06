@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, Request
@@ -21,6 +21,7 @@ from telegram_assistant.http_api.groups import build_router as build_groups_rout
 from telegram_assistant.http_api.mcp import (
     GoogleOidcProvider,
     OAuthAuthorizationServer,
+    build_fastmcp_server,
     build_oauth_router,
 )
 from telegram_assistant.http_api.members import build_router as build_members_router
@@ -395,6 +396,20 @@ def create_app(
         except Exception:
             session_manager = None
 
+    mcp_oauth_server: OAuthAuthorizationServer | None = None
+    mcp_fastmcp_server = None
+    mcp_asgi_app = None
+    if config.mcp is not None and config.mcp.enabled:
+        mcp_oauth_server = OAuthAuthorizationServer(
+            config.mcp,
+            google_provider=mcp_google_provider,
+        )
+        mcp_fastmcp_server = build_fastmcp_server(
+            config,
+            oauth_server=mcp_oauth_server,
+        )
+        mcp_asgi_app = mcp_fastmcp_server.streamable_http_app()
+
     lifespan: Callable[[FastAPI], AsyncIterator[None]] | None = None
     if auto_constructed_manager and session_manager is not None:
         manager_ref = session_manager
@@ -442,6 +457,21 @@ def create_app(
                     pass
 
         lifespan = _lifespan
+
+    if mcp_fastmcp_server is not None:
+        telegram_lifespan = lifespan
+
+        @asynccontextmanager
+        async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
+            async with AsyncExitStack() as stack:
+                if telegram_lifespan is not None:
+                    await stack.enter_async_context(telegram_lifespan(app))
+                await stack.enter_async_context(
+                    mcp_fastmcp_server.session_manager.run()
+                )
+                yield
+
+        lifespan = _combined_lifespan
 
     app = FastAPI(
         title="telegram-assistant",
@@ -519,15 +549,11 @@ def create_app(
             # 503 on demand rather than failing at app startup.
             app.state.operation_store = None
 
-    if config.mcp is not None and config.mcp.enabled:
-        mcp_oauth_server = OAuthAuthorizationServer(
-            config.mcp,
-            google_provider=mcp_google_provider,
-        )
-        app.state.mcp_oauth_server = mcp_oauth_server
+    app.state.mcp_oauth_server = mcp_oauth_server
+    app.state.mcp_fastmcp_server = mcp_fastmcp_server
+    app.state.mcp_asgi_app = mcp_asgi_app
+    if mcp_oauth_server is not None:
         app.include_router(build_oauth_router(mcp_oauth_server))
-    else:
-        app.state.mcp_oauth_server = None
 
     app.include_router(_build_health_router())
     app.include_router(_build_protected_router(), prefix="/telegram")
@@ -537,5 +563,7 @@ def create_app(
     app.include_router(build_members_router(), prefix="/telegram")
     app.include_router(build_messages_router(), prefix="/telegram")
     app.include_router(build_notifications_router(), prefix="/telegram")
+    if mcp_asgi_app is not None:
+        app.mount("/", mcp_asgi_app)
 
     return app
