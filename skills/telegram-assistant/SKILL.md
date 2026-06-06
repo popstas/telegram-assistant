@@ -60,7 +60,7 @@ Commands fall into three buckets:
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `topics create`, `topics close`, `messages send` (single chat),
-   `messages react`, `notifications mute`, `notifications unmute`,
+   `messages react`, `messages forward`, `notifications mute`, `notifications unmute`,
    `folders add-chat`, `folders remove-chat`, `operations retry`. Always: prepare command → run
    with `--dry-run` →
    show the plan and dry-run output → wait for explicit human confirmation
@@ -137,7 +137,8 @@ not skip steps, even if the request looks obvious.
    `--dry-run` first. The supported set is: `groups create`,
    `groups set-layout`, `topics create`, `topics bulk-create`,
    `topics close`, `members bulk-add`, `members bulk-remove`,
-   `messages send`, `messages react`, `notifications mute`, `notifications unmute`,
+   `messages send`, `messages react`, `messages forward`,
+   `notifications mute`, `notifications unmute`,
    `folders add-chat`, `folders remove-chat`, `operations retry`.
 8. Present a short plan to the human: what was found (chat id, folder,
    matched users), the full command that would run, and the relevant parts
@@ -186,6 +187,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
 | `messages` | `react` | Set or clear an emoji reaction on a message in one chat. | `telegram-assistant messages react ...` |
+| `messages` | `forward` | Forward one or more messages from one chat to another. | `telegram-assistant messages forward ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `notifications` | `mute` | Mute notifications for one chat, indefinitely or for a duration in hours. | `telegram-assistant notifications mute ...` |
 | `notifications` | `unmute` | Restore normal notifications for one chat. | `telegram-assistant notifications unmute ...` |
@@ -205,7 +207,8 @@ from `data/config.yml`; **Temp file** = whether `/tmp/...` is needed;
 when a real (non-dry-run) call is allowed; **Typical errors** = error
 messages the agent must surface verbatim instead of paraphrasing.
 
-Most chat-targeting commands (`messages send`, `messages react`, `messages recent`,
+Most chat-targeting commands (`messages send`, `messages react`, `messages forward`,
+`messages recent`,
 `notifications mute`/`unmute`,
 `topics create`/`close`/`bulk-create`, `members bulk-add`/`bulk-remove`,
 `folders add-chat` / `folders remove-chat`) also accept `--entity` as a flexible alternative to
@@ -760,6 +763,28 @@ Request: «Напомни во всех чатах Planfix clients в топик
    would actually happen.
 4. Require an explicit confirmation that names the chat count before
    re-running without `--dry-run`.
+
+### `messages forward`
+
+Request: «Перешли сообщения 101 и 102 из чата Клиент / источник в чат
+Клиент / проект.»
+
+1. Resource/action: `messages` / `forward`.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant messages forward \
+     --from-entity "Клиент / источник" \
+     --to-entity "Клиент / проект" \
+     --message-id 101 \
+     --message-id 102 \
+     --dry-run
+   ```
+
+3. Show resolved source chat id, target chat id, message ids, and planned
+   actions. Forwarding requires READ on the source and WRITE on the target
+   when access control is configured.
+4. Wait for confirmation, then re-run without `--dry-run`.
 
 ### `messages recent`
 

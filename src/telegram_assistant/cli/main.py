@@ -3178,6 +3178,227 @@ def messages_react(
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
 
 
+@messages_app.command("forward")
+def messages_forward(
+    message_ids: list[int] | None = typer.Option(  # noqa: B008
+        None,
+        "--message-id",
+        help="Telegram message id to forward; repeat for multiple messages.",
+    ),
+    from_chat_id: int | None = typer.Option(
+        None,
+        "--from-chat-id",
+        help="Numeric Telegram chat id to forward from.",
+    ),
+    from_entity: str | None = typer.Option(
+        None,
+        "--from-entity",
+        help="Flexible entity reference to forward from.",
+    ),
+    target_chat_id: int | None = typer.Option(
+        None,
+        "--to-chat-id",
+        "--chat-id",
+        help="Numeric Telegram chat id to forward to.",
+    ),
+    target_chat_name: str | None = typer.Option(
+        None,
+        "--to-chat-name",
+        "--chat-name",
+        help="Target chat title (resolved within --folder-name).",
+    ),
+    target_entity: str | None = typer.Option(
+        None,
+        "--to-entity",
+        "--entity",
+        help="Flexible entity reference to forward to.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for target --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional target folder id cross-check.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without forwarding messages.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Forward messages from one chat to another (READ source, WRITE target)."""
+    from telegram_assistant.folders import FolderError, resolve_chat_in_folder
+    from telegram_assistant.messages import (
+        ForwardMessagesRequest,
+        forward_messages,
+    )
+
+    ids = tuple(message_ids or ())
+    if not ids or any(message_id <= 0 for message_id in ids):
+        typer.echo("--message-id must be supplied at least once and be positive", err=True)
+        raise typer.Exit(code=2)
+    source_refs = sum([from_chat_id is not None, from_entity is not None])
+    if source_refs != 1:
+        typer.echo(
+            "exactly one of --from-chat-id or --from-entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    target_refs = sum(
+        [
+            target_chat_id is not None,
+            target_chat_name is not None,
+            target_entity is not None,
+        ]
+    )
+    if target_refs != 1:
+        typer.echo(
+            "exactly one target reference must be supplied: --to-chat-id, "
+            "--to-chat-name, or --to-entity",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    config, manager, _store, open_backends = _build_message_backends(config_path)
+
+    if target_chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _resolve() -> tuple[int, int, object, object]:
+        message_backend, _topic_backend, folder_backend = _split_message_backends(
+            await open_backends()
+        )
+        resolver = None
+        if (
+            config.telegram.access is not None
+            or from_entity is not None
+            or target_entity is not None
+        ):
+            from telegram_assistant.entities import TelethonEntityResolver
+
+            resolver = TelethonEntityResolver(await manager.get_client())
+
+        if from_entity is not None:
+            assert resolver is not None
+            source_chat_id = (await resolver.resolve(from_entity)).chat_id
+        else:
+            assert from_chat_id is not None
+            source_chat_id = from_chat_id
+
+        if target_entity is not None:
+            assert resolver is not None
+            target_resolved_chat_id = (await resolver.resolve(target_entity)).chat_id
+        elif target_chat_id is not None:
+            target_resolved_chat_id = target_chat_id
+        else:
+            resolved = await resolve_chat_in_folder(
+                folder_backend,
+                folder_name=resolved_folder_name or "",
+                chat_name=target_chat_name or "",
+                folder_id=effective_folder_id,
+            )
+            target_resolved_chat_id = resolved.chat_id
+
+        authorizer = _cli_authorizer(
+            config, resolver=resolver, folder_backend=folder_backend
+        )
+        return source_chat_id, target_resolved_chat_id, authorizer, message_backend
+
+    if dry_run:
+        try:
+            source_chat_id, target_resolved_chat_id, _authorizer, _backend = (
+                asyncio.run(_resolve())
+            )
+        except FolderError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"messages forward failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        finally:
+            try:
+                asyncio.run(manager.disconnect())
+            except Exception:
+                pass
+
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "messages.forward",
+            "would": (
+                f"forward {len(ids)} message(s) from chat {source_chat_id} "
+                f"to chat {target_resolved_chat_id}"
+            ),
+            "resolved": {
+                "source_chat_id": source_chat_id,
+                "target_chat_id": target_resolved_chat_id,
+                "message_ids": list(ids),
+            },
+            "planned_actions": [
+                f"would forward message {message_id} from chat "
+                f"{source_chat_id} to chat {target_resolved_chat_id}"
+                for message_id in ids
+            ],
+            "warnings": [],
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            source_chat_id, target_resolved_chat_id, authorizer, backend = (
+                await _resolve()
+            )
+            result = await forward_messages(
+                backend=backend,
+                request=ForwardMessagesRequest(
+                    source_chat_id=source_chat_id,
+                    target_chat_id=target_resolved_chat_id,
+                    message_ids=ids,
+                ),
+                authorizer=authorizer,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"messages forward failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
 def _build_message_read_backends(config_path: Path | None):
     """Open the Telethon-backed read + folder backends + resolver for reads.
 

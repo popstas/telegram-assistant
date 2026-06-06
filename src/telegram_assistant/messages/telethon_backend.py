@@ -97,6 +97,23 @@ class TelethonMessageBackend:
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
 
+    async def forward_messages(
+        self,
+        *,
+        source_chat_id: int,
+        target_chat_id: int,
+        message_ids: tuple[int, ...],
+    ) -> tuple[int, ...]:
+        try:
+            sent = await self._client.forward_messages(
+                target_chat_id,
+                message_ids,
+                from_peer=source_chat_id,
+            )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        return _message_ids(sent)
+
 
 class TelethonMessageReadBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`MessageReadBackend`."""

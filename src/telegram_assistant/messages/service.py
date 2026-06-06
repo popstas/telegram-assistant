@@ -157,6 +157,19 @@ class MessageReactionBackend(Protocol):
         ...
 
 
+class MessageForwardBackend(Protocol):
+    """Telethon-facing surface needed to forward messages between chats."""
+
+    async def forward_messages(
+        self,
+        *,
+        source_chat_id: int,
+        target_chat_id: int,
+        message_ids: tuple[int, ...],
+    ) -> Sequence[int] | ForwardMessagesBackendResult:
+        ...
+
+
 @dataclass(frozen=True)
 class MessageAttachmentRequest:
     """Attachment reference supplied by a caller.
@@ -345,6 +358,40 @@ class MessageReactionResult:
             "telegram_message_id": self.telegram_message_id,
             "emoji": self.emoji,
             "cleared": self.cleared,
+        }
+
+
+@dataclass(frozen=True)
+class ForwardMessagesBackendResult:
+    """Normalized backend result for forwarded message ids."""
+
+    forwarded_message_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ForwardMessagesRequest:
+    """Input to :func:`forward_messages`."""
+
+    source_chat_id: int
+    target_chat_id: int
+    message_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class ForwardMessagesResult:
+    """Result returned by :func:`forward_messages`."""
+
+    source_chat_id: int
+    target_chat_id: int
+    message_ids: tuple[int, ...]
+    forwarded_message_ids: tuple[int, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_chat_id": self.source_chat_id,
+            "target_chat_id": self.target_chat_id,
+            "message_ids": list(self.message_ids),
+            "forwarded_message_ids": list(self.forwarded_message_ids),
         }
 
 
@@ -552,6 +599,60 @@ async def set_message_reaction(
         telegram_message_id=request.telegram_message_id,
         emoji=emoji,
         cleared=request.clear,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Message forwarding (read source, write target)
+# ---------------------------------------------------------------------------
+
+
+def _validate_forward_request(request: ForwardMessagesRequest) -> None:
+    if not request.message_ids:
+        raise ValueError("forward_messages requires one or more positive message_ids")
+    if any(message_id <= 0 for message_id in request.message_ids):
+        raise ValueError("forward_messages requires positive message_ids")
+
+
+async def _forward_with_backend(
+    backend: MessageForwardBackend, *, request: ForwardMessagesRequest
+) -> ForwardMessagesBackendResult:
+    raw = await backend.forward_messages(
+        source_chat_id=request.source_chat_id,
+        target_chat_id=request.target_chat_id,
+        message_ids=request.message_ids,
+    )
+    if isinstance(raw, ForwardMessagesBackendResult):
+        return raw
+    return ForwardMessagesBackendResult(
+        forwarded_message_ids=tuple(int(item) for item in raw if item is not None)
+    )
+
+
+async def forward_messages(
+    *,
+    backend: MessageForwardBackend,
+    request: ForwardMessagesRequest,
+    authorizer: Authorizer | None = None,
+) -> ForwardMessagesResult:
+    """Forward one or more messages from ``source_chat_id`` to ``target_chat_id``.
+
+    Forwarding reads from the source chat and mutates the target chat, so an
+    enabled access policy must grant READ on the source and WRITE on the target
+    before the backend is called.
+    """
+    _validate_forward_request(request)
+
+    if authorizer is not None:
+        await authorizer.require(request.source_chat_id, AccessLevel.READ)
+        await authorizer.require(request.target_chat_id, AccessLevel.WRITE)
+
+    backend_result = await _forward_with_backend(backend, request=request)
+    return ForwardMessagesResult(
+        source_chat_id=request.source_chat_id,
+        target_chat_id=request.target_chat_id,
+        message_ids=request.message_ids,
+        forwarded_message_ids=backend_result.forwarded_message_ids,
     )
 
 

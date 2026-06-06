@@ -25,6 +25,7 @@ from telegram_assistant.http_api.access import (
 )
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.messages import (
+    ForwardMessagesRequest,
     MassSendRequest,
     MessageBackend,
     MessageReactionRequest,
@@ -33,6 +34,7 @@ from telegram_assistant.messages import (
     MessageSendNeedsReview,
     MessageSendPending,
     SendMessageRequest,
+    forward_messages,
     get_recent_messages,
     mass_send_message,
     normalize_attachment_inputs,
@@ -145,6 +147,34 @@ class MessageReactionBody(BaseModel):
             )
         if self.chat_name is not None and not self.folder_name:
             raise ValueError("chat_name requires folder_name")
+        return self
+
+
+class MessageForwardBody(BaseModel):
+    from_chat_id: int | None = None
+    from_entity: str | int | None = None
+    to_chat_id: int | None = None
+    to_entity: str | int | None = None
+    message_ids: list[int]
+
+    @model_validator(mode="after")
+    def _shape(self) -> MessageForwardBody:
+        source_refs = sum(
+            [
+                self.from_chat_id is not None,
+                self.from_entity is not None,
+            ]
+        )
+        target_refs = sum(
+            [
+                self.to_chat_id is not None,
+                self.to_entity is not None,
+            ]
+        )
+        if source_refs != 1:
+            raise ValueError("provide exactly one of from_chat_id or from_entity")
+        if target_refs != 1:
+            raise ValueError("provide exactly one of to_chat_id or to_entity")
         return self
 
 
@@ -410,6 +440,44 @@ def build_router() -> APIRouter:
         payload["operation_status"] = op.status.value
         payload["mode"] = "targeted"
         return payload
+
+    @router.post("/messages/forward")
+    async def forward(
+        body: MessageForwardBody, request: Request
+    ) -> dict[str, Any]:
+        backend = _message_backend_or_503(request)
+
+        if body.from_entity is not None:
+            source_chat_id = await resolve_entity_chat_id(request, body.from_entity)
+        else:
+            source_chat_id = body.from_chat_id
+        if body.to_entity is not None:
+            target_chat_id = await resolve_entity_chat_id(request, body.to_entity)
+        else:
+            target_chat_id = body.to_chat_id
+        assert source_chat_id is not None  # noqa: S101 - validated by Pydantic
+        assert target_chat_id is not None  # noqa: S101 - validated by Pydantic
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        try:
+            result = await forward_messages(
+                backend=backend,
+                request=ForwardMessagesRequest(
+                    source_chat_id=source_chat_id,
+                    target_chat_id=target_chat_id,
+                    message_ids=tuple(body.message_ids),
+                ),
+                authorizer=authorizer,
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        return result.to_dict()
 
     @router.post("/messages/reactions")
     async def react(
