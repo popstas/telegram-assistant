@@ -60,7 +60,7 @@ Commands fall into three buckets:
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `topics create`, `topics close`, `messages send` (single chat),
-   `folders add-chat`, `operations retry`. Always: prepare command → run
+   `folders add-chat`, `folders remove-chat`, `operations retry`. Always: prepare command → run
    with `--dry-run` →
    show the plan and dry-run output → wait for explicit human confirmation
    → run the same command without `--dry-run`.
@@ -136,7 +136,7 @@ not skip steps, even if the request looks obvious.
    `--dry-run` first. The supported set is: `groups create`,
    `groups set-layout`, `topics create`, `topics bulk-create`,
    `topics close`, `members bulk-add`, `members bulk-remove`,
-   `messages send`, `folders add-chat`, `operations retry`.
+   `messages send`, `folders add-chat`, `folders remove-chat`, `operations retry`.
 8. Present a short plan to the human: what was found (chat id, folder,
    matched users), the full command that would run, and the relevant parts
    of the dry-run output (`status = dry_run`, planned actions, validation
@@ -186,6 +186,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
 | `folders` | `add-chat` | Move an existing chat into a folder. | `telegram-assistant folders add-chat ...` |
+| `folders` | `remove-chat` | Remove an existing chat from a folder. | `telegram-assistant folders remove-chat ...` |
 | `operations` | `status` | Read-only: show queue status for a previously created operation. | `telegram-assistant operations status ...` |
 | `operations` | `retry` | Reset a failed or `needs_review` operation so the worker can re-run it. | `telegram-assistant operations retry ...` |
 
@@ -201,7 +202,7 @@ messages the agent must surface verbatim instead of paraphrasing.
 
 Most chat-targeting commands (`messages send`, `messages recent`,
 `topics create`/`close`/`bulk-create`, `members bulk-add`/`bulk-remove`,
-`folders add-chat`) also accept `--entity` as a flexible alternative to
+`folders add-chat` / `folders remove-chat`) also accept `--entity` as a flexible alternative to
 `--chat-id` / `--chat-name`. `--entity` takes a numeric id (with or
 without the `-100` prefix), an `@username`, a `t.me` / invite link, a
 phone, or an exact chat title; exactly one of `--chat-id` / `--chat-name`
@@ -440,17 +441,31 @@ edits `data/config.yml` to widen access on its own.
 
 #### `folders` / `add-chat`
 
-- Extract: chat reference (`--chat-name` / `--chat-id`), optional
+- Extract: chat reference (`--chat-name` / `--chat-id` / `--entity`), optional
   `--folder-name`.
-- Required flags: exactly one of `--chat-name` / `--chat-id`.
+- Required flags: exactly one of `--chat-name` / `--chat-id` / `--entity`.
 - From config: `--folder-name` default.
 - Temp file: no.
 - Automation: none beyond defaulting the folder name.
 - Confirmation: required after dry-run; if the dry-run reports
   `already_in_folder: true`, restate that to the human and skip the
   real run unless they insist.
-- Typical errors: `exactly one of --chat-id or --chat-name must be
-  supplied`, `FolderError`.
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity
+  must be supplied`, `FolderError`.
+
+#### `folders` / `remove-chat`
+
+- Extract: chat reference (`--chat-name` / `--chat-id` / `--entity`), optional
+  `--folder-name`.
+- Required flags: exactly one of `--chat-name` / `--chat-id` / `--entity`.
+- From config: `--folder-name` default.
+- Temp file: no.
+- Automation: none beyond defaulting the folder name.
+- Confirmation: required after dry-run; if the dry-run reports
+  `already_absent: true`, restate that to the human and skip the
+  real run unless they insist.
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity
+  must be supplied`, `FolderError`.
 
 #### `operations` / `status`
 
@@ -774,6 +789,25 @@ Request: «Перенеси чат Клиент / проект в папку Pla
 
 3. Show `folder_id`, resolved chat, and `already_in_folder`. If the
    chat is already there, restate that and skip the real run unless
+   the human insists.
+4. Otherwise wait for confirmation, then run without `--dry-run`.
+
+### `folders remove-chat`
+
+Request: «Убери чат Клиент / проект из папки Planfix clients.»
+
+1. Resource/action: `folders` / `remove-chat`.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant folders remove-chat \
+     --folder-name "Planfix clients" \
+     --chat-name "Клиент / проект" \
+     --dry-run
+   ```
+
+3. Show `folder_id`, resolved chat, and `already_absent`. If the
+   chat is already absent, restate that and skip the real run unless
    the human insists.
 4. Otherwise wait for confirmation, then run without `--dry-run`.
 

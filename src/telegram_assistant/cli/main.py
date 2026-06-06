@@ -3458,6 +3458,215 @@ def folders_add_chat(
     typer.echo(json.dumps(payload, sort_keys=True))
 
 
+@folders_app.command("remove-chat")
+def folders_remove_chat(
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder name (defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (must match exactly one existing chat in the folder).",
+    ),
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id.",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without removing the chat.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Remove an existing chat from a folder."""
+    from telegram_assistant.folders import (
+        FolderError,
+        remove_chat_from_folder,
+        resolve_chat_in_folder,
+        resolve_folder,
+    )
+
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    resolved_name, default_fid, cfg_path = _resolve_folder_name(
+        folder_name, config_path
+    )
+    effective_fid = folder_id if folder_id is not None else default_fid
+    _config, manager, open_backend = _build_folder_backend(cfg_path)
+
+    if dry_run:
+        async def _preview() -> dict[str, object]:
+            try:
+                backend = await open_backend()
+                snapshot = await resolve_folder(
+                    backend,
+                    folder_name=resolved_name,
+                    folder_id=effective_fid,
+                )
+                if entity is not None:
+                    from telegram_assistant.entities import (
+                        TelethonEntityResolver,
+                    )
+
+                    resolved_entity = await TelethonEntityResolver(
+                        await manager.get_client()
+                    ).resolve(entity)
+                    chat = await backend.resolve_chat(resolved_entity.chat_id)
+                elif chat_id is not None:
+                    chat = await backend.resolve_chat(chat_id)
+                else:
+                    chat = await resolve_chat_in_folder(
+                        backend,
+                        folder_name=resolved_name,
+                        chat_name=chat_name or "",
+                        folder_id=effective_fid,
+                    )
+                present = any(c.chat_id == chat.chat_id for c in snapshot.chats)
+                return {
+                    "folder_id": snapshot.folder_id,
+                    "folder_name": snapshot.folder_name,
+                    "chat_id": chat.chat_id,
+                    "chat_title": chat.title,
+                    "already_absent": not present,
+                }
+            finally:
+                try:
+                    await manager.disconnect()
+                except Exception:
+                    pass
+
+        try:
+            preview = asyncio.run(_preview())
+        except FolderError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"folders remove-chat failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        warnings: list[str] = []
+        if preview["already_absent"]:
+            warnings.append(
+                f"chat {preview['chat_id']} is already absent from folder "
+                f"{preview['folder_name']!r}; real run would be a no-op"
+            )
+            planned_actions: list[str] = [
+                f"no-op: chat {preview['chat_id']} already absent from folder "
+                f"{preview['folder_name']!r}"
+            ]
+        else:
+            planned_actions = [
+                f"remove chat {preview['chat_id']} ({preview['chat_title']!r}) from "
+                f"folder {preview['folder_name']!r} (folder_id={preview['folder_id']})"
+            ]
+        resolved_payload: dict[str, object] = {
+            "folder_id": preview["folder_id"],
+            "folder_name": preview["folder_name"],
+            "chat_id": preview["chat_id"],
+            "chat_title": preview["chat_title"],
+            "already_absent": preview["already_absent"],
+        }
+        if chat_name is not None:
+            resolved_payload["chat_name"] = chat_name
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "folders.remove_chat",
+            "would": (
+                f"remove chat {preview['chat_id']} from folder "
+                f"{preview['folder_name']!r}"
+            ),
+            "resolved": resolved_payload,
+            "planned_actions": planned_actions,
+            "warnings": warnings,
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            from telegram_assistant.access import Authorizer
+
+            backend = await open_backend()
+            access_cfg = (
+                getattr(_config.telegram, "access", None)
+                if _config is not None
+                else None
+            )
+            resolver = None
+            if access_cfg is not None or entity is not None:
+                from telegram_assistant.entities import TelethonEntityResolver
+
+                resolver = TelethonEntityResolver(await manager.get_client())
+            if entity is not None:
+                assert resolver is not None
+                chat_ref: str | int = (await resolver.resolve(entity)).chat_id
+            elif chat_id is not None:
+                chat_ref = chat_id
+            else:
+                resolved = await resolve_chat_in_folder(
+                    backend,
+                    folder_name=resolved_name,
+                    chat_name=chat_name or "",
+                    folder_id=effective_fid,
+                )
+                chat_ref = resolved.chat_id
+            authorizer = Authorizer(
+                access_cfg, resolver=resolver, folder_backend=backend
+            )
+            return await remove_chat_from_folder(
+                backend,
+                folder_name=resolved_name,
+                chat_ref=chat_ref,
+                folder_id=effective_fid,
+                authorizer=authorizer,
+            )
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"folders remove-chat failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True))
+
+
 # --- operations -------------------------------------------------------------
 
 operations_app = typer.Typer(help="Inspect and retry queued operations.", no_args_is_help=True)

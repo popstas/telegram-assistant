@@ -39,6 +39,14 @@ def _entity_title(entity: Any) -> str:
     return joined or str(getattr(entity, "username", "") or "")
 
 
+def _peer_key(peer: Any) -> tuple[str, int] | None:
+    for attr in ("channel_id", "chat_id", "user_id"):
+        value = getattr(peer, attr, None)
+        if value is not None:
+            return attr, int(value)
+    return None
+
+
 class TelethonFolderBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`FolderBackend`."""
 
@@ -120,6 +128,49 @@ class TelethonFolderBackend:
         if input_peer not in include_peers:
             include_peers.append(input_peer)
             target.include_peers = include_peers
+        try:
+            await self._client(
+                UpdateDialogFilterRequest(id=folder_id, filter=target)
+            )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+
+    async def remove_chat_from_folder(self, folder_id: int, chat_id: int) -> None:
+        from telethon.tl.functions.messages import (
+            UpdateDialogFilterRequest,
+        )
+
+        filters = await self._fetch_filters()
+        target = next(
+            (f for f in filters if getattr(f, "id", None) == folder_id),
+            None,
+        )
+        if target is None:
+            raise FolderNotFoundError(
+                f"folder id {folder_id} no longer exists in Telegram folder list"
+            )
+        try:
+            input_peer = await self._client.get_input_entity(chat_id)
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        input_key = _peer_key(input_peer)
+
+        def _without_target(peers: list[Any]) -> list[Any]:
+            result: list[Any] = []
+            for peer in peers:
+                if peer == input_peer:
+                    continue
+                if input_key is not None and _peer_key(peer) == input_key:
+                    continue
+                result.append(peer)
+            return result
+
+        target.include_peers = _without_target(
+            list(getattr(target, "include_peers", []) or [])
+        )
+        target.pinned_peers = _without_target(
+            list(getattr(target, "pinned_peers", []) or [])
+        )
         try:
             await self._client(
                 UpdateDialogFilterRequest(id=folder_id, filter=target)

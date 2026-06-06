@@ -151,19 +151,19 @@ ruff check src tests
 
 ### Task 4: Folder remove-chat domain, Telethon adapter, CLI, and HTTP
 
-- [ ] Extend `FolderBackend` with `remove_chat_from_folder(folder_id: int, chat_id: int) -> None`.
-- [ ] Add `remove_chat_from_folder(...)` to `folders/service.py`:
+- [x] Extend `FolderBackend` with `remove_chat_from_folder(folder_id: int, chat_id: int) -> None`.
+- [x] Add `remove_chat_from_folder(...)` to `folders/service.py`:
   - resolve folder;
   - resolve chat;
   - require WRITE on the resolved chat;
   - if absent, return `already_absent=True`;
   - if present, call backend and return serializable result.
-- [ ] Implement Telethon removal by editing the target dialog filter `include_peers` and `pinned_peers`, then calling `UpdateDialogFilterRequest`.
-- [ ] Add `folders remove-chat` CLI with `--dry-run`, mirroring `folders add-chat`.
-- [ ] Add `DELETE /telegram/folders/{folder_name}/chats` with the same body shape as add-chat.
-- [ ] Add tests in `tests/test_folders.py`, `tests/test_dry_run_folders_operations.py`, and HTTP coverage for absent/idempotent, present/remove, access denied, and backend failure.
-- [ ] Update README and skill catalog for `folders remove-chat`.
-- [ ] Run `.venv/bin/pytest -q tests/test_folders.py tests/test_dry_run_folders_operations.py tests/test_skill_inventory.py`.
+- [x] Implement Telethon removal by editing the target dialog filter `include_peers` and `pinned_peers`, then calling `UpdateDialogFilterRequest`.
+- [x] Add `folders remove-chat` CLI with `--dry-run`, mirroring `folders add-chat`.
+- [x] Add `DELETE /telegram/folders/{folder_name}/chats` with the same body shape as add-chat.
+- [x] Add tests in `tests/test_folders.py`, `tests/test_dry_run_folders_operations.py`, and HTTP coverage for absent/idempotent, present/remove, access denied, and backend failure.
+- [x] Update README and skill catalog for `folders remove-chat`.
+- [x] Run `.venv/bin/pytest -q tests/test_folders.py tests/test_dry_run_folders_operations.py tests/test_skill_inventory.py`.
 
 ### Task 5: Notifications mute/unmute
 

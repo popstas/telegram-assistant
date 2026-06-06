@@ -5,6 +5,7 @@
 
 ### Features
 
+- Wire media and scheduled message sends
 - Add Telethon media message backend
 - Expand message send domain
 

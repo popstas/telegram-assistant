@@ -1,4 +1,4 @@
-"""Dry-run tests for ``folders add-chat`` and ``operations retry`` (Task 4)."""
+"""Dry-run tests for folder commands and ``operations retry`` (Task 4)."""
 
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ class _FakeFolderBackend:
     def __init__(self, folders: list[FolderSnapshot]) -> None:
         self._folders = folders
         self.added: list[tuple[int, int]] = []
+        self.removed: list[tuple[int, int]] = []
 
     async def list_folders(self) -> list[FolderSnapshot]:
         return [
@@ -62,6 +63,10 @@ class _FakeFolderBackend:
     async def add_chat_to_folder(self, folder_id: int, chat_id: int) -> None:
         # Should not be called during dry-run; make it explicit.
         self.added.append((folder_id, chat_id))
+
+    async def remove_chat_from_folder(self, folder_id: int, chat_id: int) -> None:
+        # Should not be called during dry-run; make it explicit.
+        self.removed.append((folder_id, chat_id))
 
 
 def _patch_folder_backend(
@@ -242,6 +247,110 @@ def test_folders_add_chat_dry_run_requires_chat_ref(
         ],
     )
     # Exact same error as the real run when no chat ref is provided.
+    assert result.exit_code == 2
+
+
+def test_folders_remove_chat_dry_run_envelope_by_id(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = _FakeFolderBackend([_sample_folder()])
+    _patch_folder_backend(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "folders",
+            "remove-chat",
+            "--folder-name",
+            "Planfix clients",
+            "--chat-id",
+            "100",
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert_dry_run_envelope(
+        payload,
+        command="folders.remove_chat",
+        resolved_keys=(
+            "folder_id",
+            "folder_name",
+            "chat_id",
+            "already_absent",
+        ),
+    )
+    assert payload["resolved"]["chat_id"] == 100
+    assert payload["resolved"]["already_absent"] is False
+    assert backend.removed == []
+    assert any("remove chat 100" in line for line in payload["planned_actions"])
+
+
+def test_folders_remove_chat_dry_run_already_absent_warns(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = _FakeFolderBackend([_sample_folder()])
+    _patch_folder_backend(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "folders",
+            "remove-chat",
+            "--folder-name",
+            "Planfix clients",
+            "--chat-id",
+            "300",
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert_dry_run_envelope(
+        payload,
+        command="folders.remove_chat",
+        resolved_keys=("already_absent",),
+    )
+    assert payload["resolved"]["already_absent"] is True
+    assert payload["warnings"]
+    assert any("already absent" in w for w in payload["warnings"])
+    assert backend.removed == []
+
+
+def test_folders_remove_chat_dry_run_requires_chat_ref(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = _FakeFolderBackend([_sample_folder()])
+    _patch_folder_backend(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "folders",
+            "remove-chat",
+            "--folder-name",
+            "Planfix clients",
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
     assert result.exit_code == 2
 
 

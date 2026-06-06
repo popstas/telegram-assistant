@@ -53,7 +53,7 @@ class AmbiguousChatNameError(FolderError):
 
 
 class FolderPeerFailureError(NeedsReviewError):
-    """Adding the chat to the folder failed in a way we can't auto-retry."""
+    """Changing folder membership failed in a way we can't auto-retry."""
 
 
 @dataclass(frozen=True)
@@ -101,6 +101,9 @@ class FolderBackend(Protocol):
         ...
 
     async def add_chat_to_folder(self, folder_id: int, chat_id: int) -> None:
+        ...
+
+    async def remove_chat_from_folder(self, folder_id: int, chat_id: int) -> None:
         ...
 
 
@@ -232,4 +235,51 @@ async def add_chat_to_folder(
         "chat_id": chat.chat_id,
         "title": chat.title,
         "already_in_folder": False,
+    }
+
+
+async def remove_chat_from_folder(
+    backend: FolderBackend,
+    *,
+    folder_name: str,
+    chat_ref: str | int,
+    folder_id: int | None = None,
+    authorizer: Authorizer | None = None,
+) -> dict[str, Any]:
+    """Remove ``chat_ref`` from ``folder_name``.
+
+    The operation is idempotent: if the chat is already absent, returns
+    ``already_absent=True`` without calling the backend mutation. WRITE is
+    required on the resolved chat because folder membership changes the chat's
+    placement in the technical account.
+    """
+    snapshot = await resolve_folder(
+        backend, folder_name=folder_name, folder_id=folder_id
+    )
+    chat = await backend.resolve_chat(chat_ref)
+    if authorizer is not None:
+        await authorizer.require(chat.chat_id, AccessLevel.WRITE)
+    present = any(c.chat_id == chat.chat_id for c in snapshot.chats)
+    if not present:
+        return {
+            "folder_id": snapshot.folder_id,
+            "folder_name": snapshot.folder_name,
+            "chat_id": chat.chat_id,
+            "title": chat.title,
+            "already_absent": True,
+        }
+    try:
+        await backend.remove_chat_from_folder(snapshot.folder_id, chat.chat_id)
+    except FolderError:
+        raise
+    except Exception as exc:
+        raise FolderPeerFailureError(
+            f"failed to remove chat {chat.chat_id} from folder {folder_name!r}: {exc}"
+        ) from exc
+    return {
+        "folder_id": snapshot.folder_id,
+        "folder_name": snapshot.folder_name,
+        "chat_id": chat.chat_id,
+        "title": chat.title,
+        "already_absent": False,
     }
