@@ -155,6 +155,61 @@ class HttpConfig(BaseModel):
         return v
 
 
+class McpConfig(BaseModel):
+    """Optional Streamable-HTTP MCP server and local OAuth AS config.
+
+    ``None`` at the app-config level means the MCP interface is absent.
+    ``enabled: false`` means the block is present but still disabled, so OAuth
+    settings may be omitted for local templates and staged rollout.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    server_url: str | None = Field(default=None, min_length=1)
+    issuer_url: str | None = Field(default=None, min_length=1)
+    google_client_id: str | None = Field(default=None, min_length=1)
+    google_client_secret: str | None = Field(default=None, min_length=1)
+    allowed_emails: list[str] = Field(default_factory=list)
+    allowed_domains: list[str] = Field(default_factory=list)
+    required_scopes: list[str] = Field(default_factory=lambda: ["mcp"])
+    access_token_ttl_seconds: int = Field(default=3600, ge=1)
+    refresh_token_ttl_seconds: int = Field(default=2592000, ge=1)
+    signing_secret: str | None = Field(default=None, min_length=1)
+
+    @field_validator("allowed_emails", "allowed_domains", "required_scopes")
+    @classmethod
+    def _entries_non_empty(cls, v: list[str]) -> list[str]:
+        if any(item == "" for item in v):
+            raise ValueError("list entries must be non-empty strings")
+        return v
+
+    @model_validator(mode="after")
+    def _enabled_requires_oauth_settings(self) -> McpConfig:
+        if not self.enabled:
+            return self
+
+        missing = [
+            field_name
+            for field_name in (
+                "server_url",
+                "issuer_url",
+                "google_client_id",
+                "google_client_secret",
+                "signing_secret",
+            )
+            if getattr(self, field_name) is None
+        ]
+        if not (self.allowed_emails or self.allowed_domains):
+            missing.append("allowed_emails or allowed_domains")
+
+        if missing:
+            raise ValueError(
+                "mcp.enabled requires: " + ", ".join(missing)
+            )
+        return self
+
+
 class QueueConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -254,3 +309,4 @@ class AppConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     alerts: AlertsConfig = Field(default_factory=AlertsConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
+    mcp: McpConfig | None = None

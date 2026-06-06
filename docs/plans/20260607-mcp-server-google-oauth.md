@@ -84,16 +84,16 @@ authenticate with Google and drive Telegram operations through the same safety r
 
 ### Task 1: Add `mcp:` config model and validation
 
-- [ ] Add an `McpConfig` Pydantic model in `config/models.py` (fields: `enabled` default false,
+- [x] Add an `McpConfig` Pydantic model in `config/models.py` (fields: `enabled` default false,
       `server_url`, `issuer_url`, Google `client_id`/`client_secret`, `allowed_emails`,
       `allowed_domains`, `required_scopes`, token TTLs, `signing_secret`) and attach it as optional
       `mcp` on the telegram/app config
-- [ ] Define validation rules: when `enabled` is true, the credentials/secret/issuer needed to run
+- [x] Define validation rules: when `enabled` is true, the credentials/secret/issuer needed to run
       the AS must be present; when `mcp` is omitted the server is fully disabled (backward compatible)
-- [ ] Ensure `config.loader.load_config()` surfaces clear errors for an incomplete enabled `mcp:` block
-- [ ] write tests for config parsing/validation (absent block, disabled block, valid enabled block,
+- [x] Ensure `config.loader.load_config()` surfaces clear errors for an incomplete enabled `mcp:` block
+- [x] write tests for config parsing/validation (absent block, disabled block, valid enabled block,
       enabled-but-incomplete block)
-- [ ] run project tests - must pass before next task
+- [x] run project tests - must pass before next task
 
 ### Task 2: Build the local OAuth Authorization Server
 
