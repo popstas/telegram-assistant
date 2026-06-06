@@ -18,5 +18,5 @@
   domains, required scopes, token TTLs, and signing secret. Cover config validation, fake-Google OAuth flow, token
   audience/scope checks, MCP `initialize` / `tools/list` / representative `tools/call`, unchanged `/telegram/*` bearer
   auth, and fake-backend tool behavior. Implemented in
-  `docs/plans/20260607-mcp-server-google-oauth.md`; manual Inspector/live
+  `docs/plans/completed/20260607-mcp-server-google-oauth.md`; manual Inspector/live
   Google-Telegram checks remain post-completion/manual.
