@@ -675,8 +675,11 @@ def _http_client(
     topic_backend: FakeMessageBackend | None = None,
     folder_backend: FakeFolderBackend | None = None,
     store: OperationStore | None = None,
+    media_root: str | None = None,
 ) -> TestClient:
     config = load_config_from_text(minimal_config_yaml)
+    if media_root is not None:
+        config.http.media_root = media_root
     if store is None:
         import tempfile
 
@@ -798,7 +801,11 @@ def test_http_send_media_and_schedule(
     media = tmp_path / "report.txt"
     media.write_text("report")
     backend = FakeMessageBackend(next_result=[701, 702])
-    client = _http_client(minimal_config_yaml, message_backend=backend)
+    client = _http_client(
+        minimal_config_yaml,
+        message_backend=backend,
+        media_root=str(tmp_path),
+    )
     resp = client.post(
         "/telegram/messages",
         json={
@@ -834,7 +841,11 @@ def test_http_send_accepts_delay_seconds(
     media = tmp_path / "report.txt"
     media.write_text("report")
     backend = FakeMessageBackend()
-    client = _http_client(minimal_config_yaml, message_backend=backend)
+    client = _http_client(
+        minimal_config_yaml,
+        message_backend=backend,
+        media_root=str(tmp_path),
+    )
     before = datetime.now()
     resp = client.post(
         "/telegram/messages",
@@ -865,6 +876,51 @@ def test_http_send_rejects_past_schedule(
             "text": "hi",
             "schedule_at": "2000-01-01T00:00:00+00:00",
         },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert backend.sent == []
+
+
+def test_http_send_rejects_local_files_without_media_root(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+) -> None:
+    # Default-deny: with no http.media_root configured, server-local file paths
+    # over HTTP are rejected so a bearer-token holder cannot exfiltrate
+    # arbitrary process-readable files.
+    media = tmp_path / "report.txt"
+    media.write_text("report")
+    backend = FakeMessageBackend()
+    client = _http_client(minimal_config_yaml, message_backend=backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={"telegram_chat_id": -100, "files": [str(media)]},
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 400, resp.text
+    assert backend.sent == []
+
+
+def test_http_send_rejects_files_outside_media_root(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+) -> None:
+    # A path outside the allowlisted root (e.g. the session/config file) is
+    # rejected even when media_root is configured.
+    allowed = tmp_path / "media"
+    allowed.mkdir()
+    secret = tmp_path / "config.yml"
+    secret.write_text("bearer_token: secret_token")
+    backend = FakeMessageBackend()
+    client = _http_client(
+        minimal_config_yaml,
+        message_backend=backend,
+        media_root=str(allowed),
+    )
+    resp = client.post(
+        "/telegram/messages",
+        json={"telegram_chat_id": -100, "files": [str(secret)]},
         headers={"Authorization": "Bearer secret_token"},
     )
     assert resp.status_code == 400, resp.text

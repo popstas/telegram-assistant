@@ -100,6 +100,40 @@ def normalize_attachment_inputs(
     return local_files, urls
 
 
+def enforce_media_root(
+    files: Iterable[str],
+    *,
+    media_root: str | None,
+) -> None:
+    """Restrict server-local attachment paths to an allowlisted root.
+
+    Enforced only at the HTTP boundary, where ``files`` are supplied by a
+    bearer-token holder. Without this, any caller with WRITE access to a chat
+    could attach arbitrary process-readable server files (e.g. ``config.yml``,
+    the Telethon session) by their path and read them back from the chat.
+
+    ``media_root is None`` disables server-local paths over HTTP entirely; the
+    caller must use ``file_urls`` instead. When set, each path must resolve —
+    symlinks included — to a location inside the root. The CLI does not call
+    this; operator-supplied local paths there are trusted.
+    """
+    paths = tuple(files)
+    if not paths:
+        return
+    if media_root is None:
+        raise ValueError(
+            "server-local file paths are not allowed over HTTP; configure "
+            "http.media_root to an allowlisted directory, or use file_urls"
+        )
+    root = Path(media_root).resolve()
+    for item in paths:
+        resolved = Path(item).resolve()
+        if resolved != root and root not in resolved.parents:
+            raise ValueError(
+                f"file path is outside the allowed media root: {item}"
+            )
+
+
 def _now_for_relative(now: datetime | None) -> datetime:
     return now or datetime.now()
 

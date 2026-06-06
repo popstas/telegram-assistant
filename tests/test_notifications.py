@@ -338,4 +338,6 @@ async def test_telethon_notification_backend_constructs_mute_and_unmute_requests
     assert client.requests[0].peer.peer is client.peer
     assert client.requests[0].settings.mute_until == until
     assert client.requests[1].settings.mute_until == FOREVER_MUTE_UNTIL
-    assert client.requests[2].settings.mute_until is None
+    # Unmute must send an explicit epoch-0 clear; ``None`` would omit the flag
+    # and leave any existing mute in place.
+    assert client.requests[2].settings.mute_until == 0

@@ -146,6 +146,17 @@ class HttpConfig(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8085
     bearer_token: str = Field(..., min_length=1)
+    media_root: str | None = Field(
+        default=None,
+        description=(
+            "Allowlisted directory for server-local message attachments supplied "
+            "over HTTP (the `files` field). Omitted (None) disables server-local "
+            "paths over HTTP entirely — callers must use `file_urls` instead. When "
+            "set, every HTTP `files` path must resolve to a location inside this "
+            "root, preventing a bearer-token holder from exfiltrating arbitrary "
+            "process-readable files (config, session). The CLI is unaffected."
+        ),
+    )
 
     @field_validator("port")
     @classmethod

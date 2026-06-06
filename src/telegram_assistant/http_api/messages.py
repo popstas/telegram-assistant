@@ -34,6 +34,7 @@ from telegram_assistant.messages import (
     MessageSendNeedsReview,
     MessageSendPending,
     SendMessageRequest,
+    enforce_media_root,
     forward_messages,
     get_recent_messages,
     mass_send_message,
@@ -280,6 +281,16 @@ def build_router() -> APIRouter:
         backend = _message_backend_or_503(request)
         store = _store_or_503(request)
         try:
+            # Server-local paths over HTTP are confined to an allowlisted root
+            # (deny-by-default) so a bearer-token holder cannot exfiltrate
+            # arbitrary process-readable files by their path. Enforced *before*
+            # normalize_attachment_inputs so denied paths are rejected without
+            # any filesystem probing (is_file/stat would otherwise leak an
+            # oracle distinguishing missing/empty/existing files outside root).
+            enforce_media_root(
+                body.files or (),
+                media_root=request.app.state.config.http.media_root,
+            )
             files, file_urls = normalize_attachment_inputs(
                 files=body.files,
                 file_urls=body.file_urls,

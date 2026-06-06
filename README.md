@@ -107,7 +107,7 @@ Folder add/remove is idempotent. Adding a chat already in the folder returns `al
 
 HTTP mirrors the CLI:
 
-- `POST /telegram/messages` accepts `text`, `telegram_chat_id` or `entity` or `chat_name` + `folder_name`, optional `telegram_topic_id` or `topic_name`, repeated attachments as `files` and `file_urls`, and one scheduling field: `schedule_at` or `delay_seconds`.
+- `POST /telegram/messages` accepts `text`, `telegram_chat_id` or `entity` or `chat_name` + `folder_name`, optional `telegram_topic_id` or `topic_name`, repeated attachments as `files` and `file_urls`, and one scheduling field: `schedule_at` or `delay_seconds`. Server-local `files` paths are deny-by-default over HTTP: they are accepted only when `http.media_root` is configured and each path resolves inside that directory (otherwise use `file_urls`). This prevents a bearer-token holder from attaching arbitrary process-readable server files. The CLI `--file` flag is unrestricted.
 - `POST /telegram/messages/reactions` accepts `message_id` plus either `emoji` or `clear=true`.
 - `POST /telegram/messages/forward` accepts `from_chat_id` or `from_entity`, `to_chat_id` or `to_entity`, and `message_ids`.
 - `POST /telegram/notifications/mute` and `POST /telegram/notifications/unmute` accept `chat_id`, `entity`, or `chat_name` + `folder_name`; mute also accepts `duration_hours`.
@@ -155,6 +155,17 @@ telegram:
 `topics_layout` controls how the forum opens after `groups create`: `"list"` shows topics as a vertical list (Telegram's default), `"tabs"` shows them as horizontal tabs. The CLI `groups create --topics-layout` and `groups set-layout --layout` flags, and the `POST /telegram/groups` / `POST /telegram/groups/layout` bodies (`topics_layout`), override the default per call.
 
 `default_member_permissions` sets the new group's default banned rights so ordinary members can `create_topics` and `pin_messages`. Other default rights are left untouched.
+
+### HTTP attachment media root
+
+`http.media_root` allowlists a directory for server-local message attachments supplied over HTTP (the `files` field of `POST /telegram/messages`):
+
+```yaml
+http:
+  media_root: "/data/media"   # omit to disable server-local file paths over HTTP
+```
+
+It is **omitted by default**, which disables server-local paths over HTTP entirely — callers must use `file_urls` instead. When set, every HTTP `files` path must resolve (symlinks included) to a location inside this root. This stops a bearer-token holder with WRITE access to a chat from attaching arbitrary process-readable files (e.g. `config.yml`, the Telethon session) by path and reading them back. The CLI `--file` flag runs locally under the operator and is not restricted.
 
 ### Idempotency anchor
 
