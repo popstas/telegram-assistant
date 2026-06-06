@@ -1,6 +1,6 @@
 ---
 name: telegram-assistant
-description: Translate human Telegram requests into safe `telegram-assistant` CLI calls. Use when the user asks to create or close Telegram groups/topics, add or remove members, send messages, inspect or move chats between Telegram folders, or check/retry queued operations through the `telegram-assistant` project. Triggers on phrases like «добавь @username в чат», «создай топик», «закрой топик», «отправь сообщение в чат», «перенеси чат в folder», «проверь операцию», «health».
+description: Translate human Telegram requests into safe `telegram-assistant` CLI calls. Use when the user asks to create or close Telegram groups/topics, add or remove members, send messages, mute/unmute chats, inspect or move chats between Telegram folders, or check/retry queued operations through the `telegram-assistant` project. Triggers on phrases like «добавь @username в чат», «создай топик», «закрой топик», «отправь сообщение в чат», «заглуши чат», «верни уведомления», «перенеси чат в folder», «проверь операцию», «health».
 ---
 
 # telegram-assistant skill
@@ -60,7 +60,8 @@ Commands fall into three buckets:
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `topics create`, `topics close`, `messages send` (single chat),
-   `folders add-chat`, `folders remove-chat`, `operations retry`. Always: prepare command → run
+   `notifications mute`, `notifications unmute`, `folders add-chat`,
+   `folders remove-chat`, `operations retry`. Always: prepare command → run
    with `--dry-run` →
    show the plan and dry-run output → wait for explicit human confirmation
    → run the same command without `--dry-run`.
@@ -136,7 +137,8 @@ not skip steps, even if the request looks obvious.
    `--dry-run` first. The supported set is: `groups create`,
    `groups set-layout`, `topics create`, `topics bulk-create`,
    `topics close`, `members bulk-add`, `members bulk-remove`,
-   `messages send`, `folders add-chat`, `folders remove-chat`, `operations retry`.
+   `messages send`, `notifications mute`, `notifications unmute`,
+   `folders add-chat`, `folders remove-chat`, `operations retry`.
 8. Present a short plan to the human: what was found (chat id, folder,
    matched users), the full command that would run, and the relevant parts
    of the dry-run output (`status = dry_run`, planned actions, validation
@@ -184,6 +186,8 @@ agent stops and asks for clarification — it does not invent a new path.
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
+| `notifications` | `mute` | Mute notifications for one chat, indefinitely or for a duration in hours. | `telegram-assistant notifications mute ...` |
+| `notifications` | `unmute` | Restore normal notifications for one chat. | `telegram-assistant notifications unmute ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
 | `folders` | `add-chat` | Move an existing chat into a folder. | `telegram-assistant folders add-chat ...` |
 | `folders` | `remove-chat` | Remove an existing chat from a folder. | `telegram-assistant folders remove-chat ...` |
@@ -201,6 +205,7 @@ when a real (non-dry-run) call is allowed; **Typical errors** = error
 messages the agent must surface verbatim instead of paraphrasing.
 
 Most chat-targeting commands (`messages send`, `messages recent`,
+`notifications mute`/`unmute`,
 `topics create`/`close`/`bulk-create`, `members bulk-add`/`bulk-remove`,
 `folders add-chat` / `folders remove-chat`) also accept `--entity` as a flexible alternative to
 `--chat-id` / `--chat-name`. `--entity` takes a numeric id (with or

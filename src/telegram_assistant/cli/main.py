@@ -3667,6 +3667,328 @@ def folders_remove_chat(
     typer.echo(json.dumps(payload, sort_keys=True))
 
 
+# --- notifications ----------------------------------------------------------
+
+notifications_app = typer.Typer(
+    help="Mute and unmute chat notifications.",
+    no_args_is_help=True,
+)
+app.add_typer(notifications_app, name="notifications")
+
+
+def _build_notification_backends(config_path: Path | None):
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.notifications import TelethonNotificationBackend
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return TelethonNotificationBackend(client), TelethonFolderBackend(client)
+
+    return config, manager, _open
+
+
+def _validate_notification_target(
+    *,
+    chat_id: int | None,
+    chat_name: str | None,
+    entity: str | None,
+) -> None:
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+
+def _notification_dry_run_payload(
+    *,
+    command: str,
+    action: str,
+    chat_id: int,
+    duration_hours: int | None = None,
+) -> dict[str, object]:
+    resolved: dict[str, object] = {
+        "telegram_chat_id": chat_id,
+        "muted": action == "mute",
+    }
+    if action == "mute":
+        resolved["duration_hours"] = duration_hours
+        resolved["muted_forever"] = duration_hours is None
+    return {
+        "status": "dry_run",
+        "dry_run": True,
+        "command": command,
+        "would": f"{action} notifications for chat {chat_id}",
+        "resolved": resolved,
+        "planned_actions": [f"{action} notifications for chat {chat_id}"],
+        "warnings": [],
+    }
+
+
+@notifications_app.command("mute")
+def notifications_mute(
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id.",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, or exact title).",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    duration: int | None = typer.Option(
+        None,
+        "--duration",
+        help="Mute duration in hours. Omit to mute indefinitely.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without muting.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Mute notifications for one chat."""
+    from datetime import timedelta
+
+    from telegram_assistant.folders import FolderError
+    from telegram_assistant.notifications import MuteRequest, mute_chat
+
+    _validate_notification_target(
+        chat_id=chat_id, chat_name=chat_name, entity=entity
+    )
+    if duration is not None and duration <= 0:
+        typer.echo("--duration must be a positive number of hours", err=True)
+        raise typer.Exit(code=2)
+
+    resolved_name, default_fid, cfg_path = _resolve_folder_name(
+        folder_name, config_path
+    )
+    effective_fid = folder_id if folder_id is not None else default_fid
+    config, manager, open_backends = _build_notification_backends(cfg_path)
+
+    async def _resolve():
+        notification_backend, folder_backend = await open_backends()
+        resolved_chat_id, authorizer = await _cli_resolve_chat_and_authorizer(
+            manager=manager,
+            config=config,
+            folder_backend=folder_backend,
+            chat_id=chat_id,
+            chat_name=chat_name,
+            entity=entity,
+            folder_name=resolved_name,
+            folder_id=effective_fid,
+        )
+        return notification_backend, resolved_chat_id, authorizer
+
+    async def _preview() -> dict[str, object]:
+        from telegram_assistant.access import AccessLevel
+
+        try:
+            _notification_backend, resolved_chat_id, authorizer = await _resolve()
+            await authorizer.require(resolved_chat_id, AccessLevel.WRITE)
+            return _notification_dry_run_payload(
+                command="notifications.mute",
+                action="mute",
+                chat_id=resolved_chat_id,
+                duration_hours=duration,
+            )
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    async def _run() -> dict[str, object]:
+        try:
+            notification_backend, resolved_chat_id, authorizer = await _resolve()
+            result = await mute_chat(
+                backend=notification_backend,
+                request=MuteRequest(
+                    telegram_chat_id=resolved_chat_id,
+                    duration=(
+                        timedelta(hours=duration) if duration is not None else None
+                    ),
+                ),
+                authorizer=authorizer,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        if dry_run:
+            payload = asyncio.run(_preview())
+        else:
+            payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"notifications mute failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
+@notifications_app.command("unmute")
+def notifications_unmute(
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id.",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, or exact title).",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without unmuting.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Unmute notifications for one chat."""
+    from telegram_assistant.folders import FolderError
+    from telegram_assistant.notifications import MuteRequest, unmute_chat
+
+    _validate_notification_target(
+        chat_id=chat_id, chat_name=chat_name, entity=entity
+    )
+    resolved_name, default_fid, cfg_path = _resolve_folder_name(
+        folder_name, config_path
+    )
+    effective_fid = folder_id if folder_id is not None else default_fid
+    config, manager, open_backends = _build_notification_backends(cfg_path)
+
+    async def _resolve():
+        notification_backend, folder_backend = await open_backends()
+        resolved_chat_id, authorizer = await _cli_resolve_chat_and_authorizer(
+            manager=manager,
+            config=config,
+            folder_backend=folder_backend,
+            chat_id=chat_id,
+            chat_name=chat_name,
+            entity=entity,
+            folder_name=resolved_name,
+            folder_id=effective_fid,
+        )
+        return notification_backend, resolved_chat_id, authorizer
+
+    async def _preview() -> dict[str, object]:
+        from telegram_assistant.access import AccessLevel
+
+        try:
+            _notification_backend, resolved_chat_id, authorizer = await _resolve()
+            await authorizer.require(resolved_chat_id, AccessLevel.WRITE)
+            return _notification_dry_run_payload(
+                command="notifications.unmute",
+                action="unmute",
+                chat_id=resolved_chat_id,
+            )
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    async def _run() -> dict[str, object]:
+        try:
+            notification_backend, resolved_chat_id, authorizer = await _resolve()
+            result = await unmute_chat(
+                backend=notification_backend,
+                request=MuteRequest(telegram_chat_id=resolved_chat_id),
+                authorizer=authorizer,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        if dry_run:
+            payload = asyncio.run(_preview())
+        else:
+            payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"notifications unmute failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
 # --- operations -------------------------------------------------------------
 
 operations_app = typer.Typer(help="Inspect and retry queued operations.", no_args_is_help=True)

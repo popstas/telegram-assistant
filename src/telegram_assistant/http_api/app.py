@@ -20,9 +20,13 @@ from telegram_assistant.http_api.folders import build_router as build_folders_ro
 from telegram_assistant.http_api.groups import build_router as build_groups_router
 from telegram_assistant.http_api.members import build_router as build_members_router
 from telegram_assistant.http_api.messages import build_router as build_messages_router
+from telegram_assistant.http_api.notifications import (
+    build_router as build_notifications_router,
+)
 from telegram_assistant.http_api.topics import build_router as build_topics_router
 from telegram_assistant.members import MemberAddBackend, MemberRemoveBackend
 from telegram_assistant.messages import MessageBackend, MessageReadBackend
+from telegram_assistant.notifications import NotificationBackend
 from telegram_assistant.observability.logging import configure_logging
 from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.plugins import build_registry
@@ -38,6 +42,7 @@ MemberBackendFactory = Callable[[Request], MemberAddBackend | None]
 MemberRemoveBackendFactory = Callable[[Request], MemberRemoveBackend | None]
 MessageBackendFactory = Callable[[Request], MessageBackend | None]
 MessageReadBackendFactory = Callable[[Request], MessageReadBackend | None]
+NotificationBackendFactory = Callable[[Request], NotificationBackend | None]
 ResolverFactory = Callable[[Request], EntityResolver | None]
 
 
@@ -224,6 +229,24 @@ def _default_message_backend_factory(
     return _factory
 
 
+def _default_notification_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> NotificationBackendFactory:
+    """Build a Telethon-backed notification backend factory."""
+
+    def _factory(_request: Request) -> NotificationBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.notifications import TelethonNotificationBackend
+
+        return TelethonNotificationBackend(client)
+
+    return _factory
+
+
 def _default_resolver_factory(
     session_manager: TelethonSessionManager | None,
 ) -> ResolverFactory:
@@ -259,6 +282,7 @@ def create_app(
     member_remove_backend_factory: MemberRemoveBackendFactory | None = None,
     message_backend_factory: MessageBackendFactory | None = None,
     message_read_backend_factory: MessageReadBackendFactory | None = None,
+    notification_backend_factory: NotificationBackendFactory | None = None,
     resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
 ) -> FastAPI:
@@ -393,6 +417,11 @@ def create_app(
         if message_read_backend_factory is not None
         else _default_message_read_backend_factory(session_manager)
     )
+    app.state.notification_backend_factory = (
+        notification_backend_factory
+        if notification_backend_factory is not None
+        else _default_notification_backend_factory(session_manager)
+    )
     if operation_store is not None:
         app.state.operation_store = operation_store
     else:
@@ -416,5 +445,6 @@ def create_app(
     app.include_router(build_topics_router(), prefix="/telegram")
     app.include_router(build_members_router(), prefix="/telegram")
     app.include_router(build_messages_router(), prefix="/telegram")
+    app.include_router(build_notifications_router(), prefix="/telegram")
 
     return app

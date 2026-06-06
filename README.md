@@ -57,6 +57,11 @@ Top-level:
 
 Most chat-targeting commands accept `--entity` (a numeric id with/without `-100`, `@username`, `t.me`/invite link, phone, or exact title) as a flexible alternative to `--chat-id`/`--chat-name`.
 
+`notifications` — manage per-chat notification settings:
+
+- `notifications mute` — mute notifications for a chat, indefinitely or for `--duration` hours.
+- `notifications unmute` — restore normal notifications for a chat.
+
 `folders` — inspect and manage chat folders:
 
 - `folders inspect` — inspect a chat folder and list its chats.

@@ -71,6 +71,7 @@ def test_cli_exposes_required_subcommand_groups() -> None:
         "topics",
         "members",
         "messages",
+        "notifications",
         "folders",
         "operations",
     ):
