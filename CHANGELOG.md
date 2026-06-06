@@ -15,10 +15,6 @@
 
 ### Bug Fixes
 
-- Address code review findings
-- Address code review findings
-- Address code review findings
-- Address code review findings
 - review: Secure mcp oauth tools
 
 ### Documentation
