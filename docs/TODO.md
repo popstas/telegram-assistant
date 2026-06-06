@@ -1,6 +1,21 @@
 # TODO
 
 - [ ] Add an **HTTP MCP server** exposing the assistant's operations as MCP tools, with **OAuth via Google**.
-  Stand up a streamable-HTTP MCP endpoint that maps the domain ops (send/media/forward/reactions/get-recent/groups/topics/members/folders) to MCP tools, reusing the same service layer + access-restrictions (read/write scoping) as the HTTP API. Auth = Google OAuth (decide flow + which Google accounts/domain are allowed → maps to an identity, then to access scope). Decide whether it lives in the existing FastAPI app or a separate process, and how it coexists with the current bearer-token `/telegram/*` auth.
-- [ ] Add an integration/agent-setup layer — an `INTEGRATION.md` guide (à la [obsidian-agent-base/INTEGRATION.md](https://github.com/popstas/obsidian-agent-base/blob/main/INTEGRATION.md)) that lets Claude Code wire this assistant into another project.
-  Should be an interactive, agent-driven setup: ask one question at a time (with defaults), then scaffold/edit the consuming project's files. Cover: `data/config.yml` (folder name, defaults, postfix, cleanup flags, bearer token), Telethon `auth` session bootstrap, HTTP-vs-CLI choice, Planfix wiring, and a final validation checklist. Keep it in sync with `SKILL.md`/`README.md`.
+  Build an optional Streamable-HTTP MCP endpoint mounted at `/mcp` in the existing FastAPI app, disabled by default.
+  Use the official `mcp` Python SDK (FastMCP) — build a `FastMCP` server and mount its streamable-HTTP ASGI app at
+  `/mcp` inside the existing app. Reuse the current domain services, backend factories, `OperationStore`, entity
+  resolver, plugin registry, and `telegram.access` read/write policy.
+
+  Auth plan: add a local MCP-compatible OAuth Authorization Server in the same FastAPI process. It uses Google OAuth/
+  OIDC for login, then mints audience-bound MCP access tokens. Google identity is only a login gate: allowed emails/
+  domains share the existing instance-level Telegram access policy.
+
+  Tool plan: expose `telegram_`-prefixed MCP tools for health, messages, recent messages, forwarding, reactions,
+  groups, topic layout, topics, members, folders, notifications, and operations. Mutating tools execute directly like
+  the HTTP API, with MCP annotations, OAuth, access checks, and existing idempotency.
+
+  Config/test plan: add optional `mcp:` config for server URL, issuer URL, Google client credentials, allowed emails/
+  domains, required scopes, token TTLs, and signing secret. Cover config validation, fake-Google OAuth flow, token
+  audience/scope checks, MCP `initialize` / `tools/list` / representative `tools/call`, unchanged `/telegram/*` bearer
+  auth, and fake-backend tool behavior. Manual e2e = MCP Inspector with fake/test OAuth; live Google/Telegram e2e
+  documented as optional/skipped when credentials/session are unavailable.

@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Documentation
+
+- Move plans
+
 ### Task
 
 - Clear completed items from TODO (shipped in v0.4.0)
