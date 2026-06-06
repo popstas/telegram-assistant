@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import (
     BaseModel,
@@ -172,20 +173,61 @@ class McpConfig(BaseModel):
     google_client_secret: str | None = Field(default=None, min_length=1)
     allowed_emails: list[str] = Field(default_factory=list)
     allowed_domains: list[str] = Field(default_factory=list)
+    admin_emails: list[str] = Field(default_factory=list)
+    admin_domains: list[str] = Field(default_factory=list)
+    allowed_redirect_uris: list[str] = Field(default_factory=list)
+    allowed_redirect_hosts: list[str] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1", "::1"]
+    )
     required_scopes: list[str] = Field(default_factory=lambda: ["mcp"])
     access_token_ttl_seconds: int = Field(default=3600, ge=1)
     refresh_token_ttl_seconds: int = Field(default=2592000, ge=1)
-    signing_secret: str | None = Field(default=None, min_length=1)
+    signing_secret: str | None = Field(default=None, min_length=32)
 
-    @field_validator("allowed_emails", "allowed_domains", "required_scopes")
+    @field_validator(
+        "allowed_emails",
+        "allowed_domains",
+        "admin_emails",
+        "admin_domains",
+        "allowed_redirect_uris",
+        "allowed_redirect_hosts",
+        "required_scopes",
+    )
     @classmethod
     def _entries_non_empty(cls, v: list[str]) -> list[str]:
         if any(item == "" for item in v):
             raise ValueError("list entries must be non-empty strings")
         return v
 
+    @field_validator("signing_secret")
+    @classmethod
+    def _signing_secret_strong(cls, v: str | None) -> str | None:
+        if v == "replace-with-a-long-random-secret":
+            raise ValueError("signing_secret must be a generated secret, not the docs placeholder")
+        return v
+
+    @field_validator("server_url", "issuer_url")
+    @classmethod
+    def _absolute_http_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        parsed = urlparse(v)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("must be an absolute http(s) URL")
+        return v
+
     @model_validator(mode="after")
     def _enabled_requires_oauth_settings(self) -> McpConfig:
+        self.allowed_redirect_hosts = list(
+            dict.fromkeys(
+                [
+                    *self.allowed_redirect_hosts,
+                    "localhost",
+                    "127.0.0.1",
+                    "::1",
+                ]
+            )
+        )
         if not self.enabled:
             return self
 
@@ -202,6 +244,10 @@ class McpConfig(BaseModel):
         ]
         if not (self.allowed_emails or self.allowed_domains):
             missing.append("allowed_emails or allowed_domains")
+        if "telegram:admin" in self.required_scopes and not (
+            self.admin_emails or self.admin_domains
+        ):
+            missing.append("admin_emails or admin_domains for telegram:admin")
 
         if missing:
             raise ValueError(

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any, Literal, NoReturn
 
 from fastapi import HTTPException, status
+from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 from pydantic import ValidationError
@@ -113,6 +114,7 @@ from telegram_assistant.http_api.notifications import (
     _resolve_target as _notification_resolve_target,
 )
 from telegram_assistant.http_api.topics import (
+    BulkTopicItemBody,
     TopicCloseBody,
     TopicCreateBody,
     _enforce_write,
@@ -187,6 +189,7 @@ from telegram_assistant.topics import (
 from telegram_assistant.worker.queue import FloodWaitError
 
 AppStateProvider = Callable[[], Any]
+MCP_ADMIN_SCOPE = "telegram:admin"
 
 
 class McpToolError(RuntimeError):
@@ -262,6 +265,26 @@ def _raise_tool_error(
     if detail is not None:
         payload["detail"] = detail
     raise McpToolError(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _require_mcp_scope(scope: str) -> None:
+    token = get_access_token()
+    if token is None or scope not in token.scopes:
+        _raise_tool_error(
+            code="insufficient_scope",
+            status_code=status.HTTP_403_FORBIDDEN,
+            message=f"Required scope: {scope}",
+        )
+
+
+def _resolve_legacy_chat_id(
+    *,
+    chat_id: int | None,
+    telegram_chat_id: int | None,
+) -> int | None:
+    if chat_id is not None and telegram_chat_id is not None and chat_id != telegram_chat_id:
+        raise ValueError("provide either chat_id or telegram_chat_id, not both")
+    return telegram_chat_id if telegram_chat_id is not None else chat_id
 
 
 def _raise_from_http(exc: HTTPException) -> NoReturn:
@@ -615,6 +638,13 @@ async def _resolve_message_send(
     files = tuple(body.files or ())
     if files:
         await authorizer.require(telegram_chat_id, AccessLevel.WRITE)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "MCP server-local files are not supported; use file_urls "
+                "with http(s) URLs"
+            ),
+        )
     file_urls = tuple(body.file_urls or ())
     validate_file_urls(file_urls)
 
@@ -962,13 +992,16 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         """Read or set a group's forum topics layout."""
         request = _request(provider)
         try:
-            backend, _ = _group_backends_or_503(request)  # type: ignore[arg-type]
+            backend, folder_backend = _group_backends_or_503(request)  # type: ignore[arg-type]
+            authorizer = build_authorizer(request, folder_backend=folder_backend)  # type: ignore[arg-type]
             if layout is None:
+                await authorizer.require(chat_id, AccessLevel.READ)
                 current = await get_topics_layout(
                     backend=backend,
                     telegram_chat_id=chat_id,
                 )
                 return {"chat_id": chat_id, "layout": current}
+            await authorizer.require(chat_id, AccessLevel.WRITE)
             store = _group_store_or_503(request)  # type: ignore[arg-type]
             result, op = await set_topics_layout(
                 backend=backend,
@@ -1055,7 +1088,15 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         """Create several forum topics in a Telegram group."""
         request = _request(provider)
         try:
-            body_items = [BulkTopicItem(**item) for item in items]
+            parsed_items = [BulkTopicItemBody(**item) for item in items]
+            body_items = [
+                BulkTopicItem(
+                    topic_name=item.topic_name,
+                    external_ref=item.effective_external_ref,
+                    message=item.message,
+                )
+                for item in parsed_items
+            ]
             backend = _topic_backend_or_503(request)  # type: ignore[arg-type]
             store = _topic_store_or_503(request)  # type: ignore[arg-type]
             chat_id = await _resolve_chat_id_generic(
@@ -1091,7 +1132,8 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         structured_output=True,
     )
     async def telegram_topics_close(
-        topic_id: int,
+        topic_id: int | None = None,
+        topic_name: str | None = None,
         telegram_chat_id: int | None = None,
         chat_name: str | None = None,
         entity: str | int | None = None,
@@ -1102,7 +1144,9 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         """Close a forum topic."""
         request = _request(provider)
         try:
-            if topic_id <= 0:
+            if (topic_id is None) == (topic_name is None):
+                raise ValueError("provide exactly one of topic_id or topic_name")
+            if topic_id is not None and topic_id <= 0:
                 raise ValueError("topic_id must be a positive integer")
             body = TopicCloseBody(
                 telegram_chat_id=telegram_chat_id,
@@ -1123,12 +1167,21 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 request=request,  # type: ignore[arg-type]
             )
             await _enforce_write(request, chat_id)  # type: ignore[arg-type]
+            effective_topic_id = (
+                topic_id
+                if topic_id is not None
+                else await resolve_topic_id_by_name(
+                    backend=backend,
+                    telegram_chat_id=chat_id,
+                    topic_name=topic_name or "",
+                )
+            )
             result, op = await close_topic(
                 backend=backend,
                 store=store,
                 request=TopicCloseRequest(
                     telegram_chat_id=chat_id,
-                    telegram_topic_id=topic_id,
+                    telegram_topic_id=effective_topic_id,
                     reason=body.reason,
                 ),
             )
@@ -1145,8 +1198,13 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         structured_output=True,
     )
     async def telegram_members_add(
-        chat_id: int,
         items: list[dict[str, str]],
+        chat_id: int | None = None,
+        telegram_chat_id: int | None = None,
+        chat_name: str | None = None,
+        entity: str | int | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
         continue_on_error: bool = True,
         operation_id: str | None = None,
     ) -> dict[str, Any]:
@@ -1160,12 +1218,22 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
             )
             backend = _member_backend_or_503(request)  # type: ignore[arg-type]
             store = _member_store_or_503(request)  # type: ignore[arg-type]
+            resolved_chat_id = await _resolve_chat_id_generic(
+                telegram_chat_id=_resolve_legacy_chat_id(
+                    chat_id=chat_id, telegram_chat_id=telegram_chat_id
+                ),
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                request=request,  # type: ignore[arg-type]
+            )
             result, op = await bulk_add_members(
                 backend=backend,
                 store=store,
                 queue=_member_worker_queue_for_request(request),  # type: ignore[arg-type]
                 request=BulkMemberAddRequest(
-                    telegram_chat_id=chat_id,
+                    telegram_chat_id=resolved_chat_id,
                     items=tuple(
                         BulkMemberItem(user=item.user, role=item.role)
                         for item in body.items
@@ -1190,8 +1258,13 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         structured_output=True,
     )
     async def telegram_members_remove(
-        chat_id: int,
         items: list[dict[str, str]],
+        chat_id: int | None = None,
+        telegram_chat_id: int | None = None,
+        chat_name: str | None = None,
+        entity: str | int | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
         mode: str = "ban_unban",
         continue_on_error: bool = True,
         operation_id: str | None = None,
@@ -1209,6 +1282,16 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
             )
             backend = _member_remove_backend_or_503(request)  # type: ignore[arg-type]
             store = _member_store_or_503(request)  # type: ignore[arg-type]
+            resolved_chat_id = await _resolve_chat_id_generic(
+                telegram_chat_id=_resolve_legacy_chat_id(
+                    chat_id=chat_id, telegram_chat_id=telegram_chat_id
+                ),
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                request=request,  # type: ignore[arg-type]
+            )
             if not body.force:
                 config = getattr(request.app.state, "config", None)
                 if config is not None and getattr(config, "telegram", None) is not None:
@@ -1240,7 +1323,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 store=store,
                 queue=_member_worker_queue_for_request(request),  # type: ignore[arg-type]
                 request=BulkMemberRemoveRequest(
-                    telegram_chat_id=chat_id,
+                    telegram_chat_id=resolved_chat_id,
                     items=tuple(
                         BulkMemberRemoveItem(user=item.user) for item in body.items
                     ),
@@ -1272,6 +1355,8 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         request = _request(provider)
         try:
             backend = _message_folder_backend_or_503(request)  # type: ignore[arg-type]
+            authorizer = build_authorizer(request, folder_backend=backend)  # type: ignore[arg-type]
+            await authorizer.require_folder(folder_name, AccessLevel.READ)
             snapshot = await inspect_folder(
                 backend,
                 folder_name=folder_name,
@@ -1463,6 +1548,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         """Inspect a persisted operation."""
         request = _request(provider)
         try:
+            _require_mcp_scope(MCP_ADMIN_SCOPE)
             return _operation_summary(_store_or_unavailable(request), operation_id)
         except Exception as exc:
             _raise_from_exception(exc)
@@ -1479,6 +1565,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         """Reset a failed or needs-review operation for retry."""
         request = _request(provider)
         try:
+            _require_mcp_scope(MCP_ADMIN_SCOPE)
             return _retry_operation(
                 _store_or_unavailable(request),
                 operation_id,

@@ -5,12 +5,21 @@
 
 ### Features
 
+- Verify mcp acceptance criteria
 - Document optional mcp server
 - Add mcp oauth integration tests
 - Expose MCP Telegram tools
 - Mount fastmcp streamable http server
 - Build local oauth authorization server
 - Add mcp config validation
+
+### Bug Fixes
+
+- Address code review findings
+- Address code review findings
+- Address code review findings
+- Address code review findings
+- review: Secure mcp oauth tools
 
 ### Documentation
 

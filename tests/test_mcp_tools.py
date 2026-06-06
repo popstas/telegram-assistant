@@ -8,9 +8,11 @@ from typing import Any
 from fastapi.testclient import TestClient
 
 from telegram_assistant.config import load_config_from_text
+from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.http_api import create_app
 from telegram_assistant.messages import RecentMessage
 from telegram_assistant.persistence import OperationStore
+from telegram_assistant.topics import TopicSummary
 from tests.test_mcp_mount import (
     FakeGoogleOidcProvider,
     FakeSessionManager,
@@ -58,6 +60,93 @@ class FakeMessageBackend:
         return 777
 
 
+class FakeLayoutBackend:
+    def __init__(self, *, forum_tabs: bool = False) -> None:
+        self.forum_tabs = forum_tabs
+        self.get_calls: list[int] = []
+        self.set_calls: list[tuple[int, bool]] = []
+
+    async def get_topics_layout(self, *, chat_id: int) -> bool:
+        self.get_calls.append(chat_id)
+        return self.forum_tabs
+
+    async def set_topics_layout(self, *, chat_id: int, tabs: bool) -> None:
+        self.set_calls.append((chat_id, tabs))
+        self.forum_tabs = tabs
+
+
+class FakeTopicBackend:
+    def __init__(self) -> None:
+        self.created: list[dict[str, Any]] = []
+        self.closed: list[dict[str, int]] = []
+        self.sent: list[dict[str, Any]] = []
+        self.topics = [
+            TopicSummary(topic_id=42, title="Kickoff", closed=False),
+        ]
+
+    async def create_topic(self, *, chat_id: int, name: str) -> int:
+        topic_id = 1000 + len(self.created)
+        self.created.append({"chat_id": chat_id, "name": name, "topic_id": topic_id})
+        return topic_id
+
+    async def send_message(
+        self, *, chat_id: int, text: str, topic_id: int | None = None
+    ) -> int:
+        self.sent.append({"chat_id": chat_id, "text": text, "topic_id": topic_id})
+        return 2000 + len(self.sent)
+
+    async def close_topic(self, *, chat_id: int, topic_id: int) -> None:
+        self.closed.append({"chat_id": chat_id, "topic_id": topic_id})
+
+    async def list_topics(self, *, chat_id: int) -> list[TopicSummary]:
+        return list(self.topics)
+
+
+class FakeMemberBackend:
+    def __init__(self) -> None:
+        self.added: list[dict[str, Any]] = []
+        self.banned: list[dict[str, Any]] = []
+        self.unbanned: list[dict[str, Any]] = []
+
+    async def add_member(self, *, chat_id: int, user: str) -> None:
+        self.added.append({"chat_id": chat_id, "user": user})
+
+    async def promote_admin(self, *, chat_id: int, user: str) -> None:
+        return None
+
+    async def ban_member(self, *, chat_id: int, user: str) -> None:
+        self.banned.append({"chat_id": chat_id, "user": user})
+
+    async def unban_member(self, *, chat_id: int, user: str) -> None:
+        self.unbanned.append({"chat_id": chat_id, "user": user})
+
+
+class FakeFolderBackend:
+    def __init__(self, folders: list[FolderSnapshot]) -> None:
+        self._folders = folders
+
+    async def list_folders(self) -> list[FolderSnapshot]:
+        return [
+            FolderSnapshot(
+                folder_id=folder.folder_id,
+                folder_name=folder.folder_name,
+                chats=list(folder.chats),
+            )
+            for folder in self._folders
+        ]
+
+    async def resolve_chat(self, chat_ref: str | int) -> FolderChat:
+        if isinstance(chat_ref, int):
+            return FolderChat(chat_id=chat_ref, title=f"Chat {chat_ref}")
+        raise LookupError(f"unknown chat ref {chat_ref!r}")
+
+    async def add_chat_to_folder(self, folder_id: int, chat_id: int) -> None:
+        raise NotImplementedError
+
+    async def remove_chat_from_folder(self, folder_id: int, chat_id: int) -> None:
+        raise NotImplementedError
+
+
 def _messages() -> list[RecentMessage]:
     return [
         RecentMessage(id=1, sender="alice", date=None, reply_to=None, text="one"),
@@ -79,13 +168,35 @@ def _client(
     *,
     read_backend: FakeReadBackend | None = None,
     message_backend: FakeMessageBackend | None = None,
+    group_backend: FakeLayoutBackend | None = None,
+    topic_backend: FakeTopicBackend | None = None,
+    member_backend: FakeMemberBackend | None = None,
+    folder_backend: FakeFolderBackend | None = None,
+    required_scopes: tuple[str, ...] = ("mcp", "telegram:read"),
+    admin: str = "",
 ) -> TestClient:
-    config = load_config_from_text(_enabled_mcp_yaml(config_yaml))
+    config = load_config_from_text(
+        _enabled_mcp_yaml(config_yaml, required_scopes=required_scopes, admin=admin)
+    )
     app = create_app(
         config,
         session_manager=FakeSessionManager(),  # type: ignore[arg-type]
         mcp_google_provider=FakeGoogleOidcProvider(),
-        folder_backend_factory=lambda _r: None,
+        group_backend_factory=(
+            (lambda _r: group_backend) if group_backend is not None else (lambda _r: None)
+        ),
+        topic_backend_factory=(
+            (lambda _r: topic_backend) if topic_backend is not None else (lambda _r: None)
+        ),
+        member_backend_factory=(
+            (lambda _r: member_backend) if member_backend is not None else (lambda _r: None)
+        ),
+        member_remove_backend_factory=(
+            (lambda _r: member_backend) if member_backend is not None else None
+        ),
+        folder_backend_factory=(
+            (lambda _r: folder_backend) if folder_backend is not None else (lambda _r: None)
+        ),
         message_read_backend_factory=(
             (lambda _r: read_backend) if read_backend is not None else (lambda _r: None)
         ),
@@ -188,6 +299,32 @@ def test_mcp_send_message_uses_operation_store_idempotency(
     assert len(backend.sent) == 1
 
 
+def test_mcp_send_message_rejects_server_local_files(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeMessageBackend()
+    with _client(minimal_config_yaml, tmp_path, message_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {
+                "telegram_chat_id": -100123,
+                "text": "secret",
+                "files": ["/etc/passwd"],
+            },
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "invalid_request"' in text
+    assert "server-local files are not supported" in text
+    assert backend.sent == []
+
+
 def test_mcp_tool_maps_access_denied_to_actionable_error(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:
@@ -209,6 +346,223 @@ def test_mcp_tool_maps_access_denied_to_actionable_error(
     assert '"error": "access_denied"' in text
     assert '"status": 403' in text
     assert backend.calls == []
+
+
+def test_mcp_topics_layout_requires_read_access(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeLayoutBackend(forum_tabs=True)
+    config_yaml = _with_access(minimal_config_yaml, "    rules: []\n")
+    with _client(config_yaml, tmp_path, group_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_layout",
+            {"chat_id": -100123},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "access_denied"' in text
+    assert backend.get_calls == []
+
+
+def test_mcp_topics_layout_requires_write_access(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeLayoutBackend(forum_tabs=False)
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        '    rules:\n      - all: true\n        permission: "read"\n',
+    )
+    with _client(config_yaml, tmp_path, group_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_layout",
+            {"chat_id": -100123, "layout": "tabs"},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "access_denied"' in text
+    assert backend.set_calls == []
+
+
+def test_mcp_topics_bulk_create_accepts_planfix_task_id_alias(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    with _client(minimal_config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_bulk_create",
+            {
+                "telegram_chat_id": -100123,
+                "items": [{"topic_name": "Alpha", "planfix_task_id": 123}],
+                "operation_id": "mcp-topic-alias",
+            },
+        )
+
+    assert result["isError"] is False
+    item = result["structuredContent"]["items"][0]
+    assert item["topic_name"] == "Alpha"
+    assert item["external_ref"] == 123
+    assert backend.created == [
+        {"chat_id": -100123, "name": "Alpha", "topic_id": 1000}
+    ]
+
+
+def test_mcp_topics_close_accepts_topic_name(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    with _client(minimal_config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_close",
+            {"telegram_chat_id": -100123, "topic_name": "Kickoff"},
+        )
+
+    assert result["isError"] is False
+    assert result["structuredContent"]["telegram_topic_id"] == 42
+    assert backend.closed == [{"chat_id": -100123, "topic_id": 42}]
+
+
+def test_mcp_members_add_accepts_generic_chat_resolution_args(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeMemberBackend()
+    with _client(minimal_config_yaml, tmp_path, member_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_members_add",
+            {"telegram_chat_id": -100123, "items": [{"user": "@alice"}]},
+        )
+
+    assert result["isError"] is False
+    assert backend.added == [{"chat_id": -100123, "user": "@alice"}]
+
+
+def test_mcp_members_remove_accepts_generic_chat_resolution_args(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeMemberBackend()
+    with _client(minimal_config_yaml, tmp_path, member_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_members_remove",
+            {"telegram_chat_id": -100123, "items": [{"user": "@alice"}]},
+        )
+
+    assert result["isError"] is False
+    assert backend.banned == [{"chat_id": -100123, "user": "@alice"}]
+    assert backend.unbanned == [{"chat_id": -100123, "user": "@alice"}]
+
+
+def test_mcp_folders_inspect_requires_folder_read_access(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    folder_backend = FakeFolderBackend(
+        [
+            FolderSnapshot(
+                folder_id=2,
+                folder_name="Clients",
+                chats=[FolderChat(chat_id=-100123, title="Acme")],
+            )
+        ]
+    )
+    config_yaml = _with_access(minimal_config_yaml, "    rules: []\n")
+    with _client(config_yaml, tmp_path, folder_backend=folder_backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_folders_inspect",
+            {"folder_name": "Clients"},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "access_denied"' in text
+    assert "Acme" not in text
+
+
+def test_mcp_operations_tools_require_admin_scope(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    store = OperationStore(tmp_path / "state.db")
+    op = store.begin_operation(
+        operation_type="message.send",
+        idempotency_key="op-1",
+        request_payload={"telegram_chat_id": -100123, "text": "hidden"},
+    ).operation
+    store.fail_operation(op.id, "boom")
+
+    with _client(
+        minimal_config_yaml,
+        tmp_path,
+        admin="""
+  admin_emails:
+    - "owner@example.test"
+""",
+    ) as client:
+        client.app.state.operation_store = store
+        token = _mint_token(client, scope="mcp telegram:read")
+        _initialize(client, token)
+
+        status_result = _call_tool(
+            client,
+            token,
+            "telegram_operations_status",
+            {"operation_id": op.id},
+        )
+        retry_result = _call_tool(
+            client,
+            token,
+            "telegram_operations_retry",
+            {"operation_id": op.id, "dry_run": True},
+        )
+        admin_token = _mint_token(client, scope="mcp telegram:read telegram:admin")
+        _initialize(client, admin_token)
+        admin_status = _call_tool(
+            client,
+            admin_token,
+            "telegram_operations_status",
+            {"operation_id": op.id},
+        )
+
+    for result in (status_result, retry_result):
+        assert result["isError"] is True
+        text = result["content"][0]["text"]
+        assert '"error": "insufficient_scope"' in text
+        assert "hidden" not in text
+    assert admin_status["isError"] is False
+    assert admin_status["structuredContent"]["request_payload"]["text"] == "hidden"
 
 
 def test_mcp_tool_maps_backend_unavailable_to_actionable_error(

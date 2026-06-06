@@ -70,7 +70,8 @@ authenticate with Google and drive Telegram operations through the same safety r
 - **Tools** — `telegram_`-prefixed, one per existing operation, executed directly like the HTTP API:
   `telegram_health`, `telegram_messages_send`, `telegram_messages_recent`, `telegram_messages_forward`,
   `telegram_messages_react`, `telegram_groups_create`, `telegram_topics_layout`,
-  `telegram_topics_create`/`telegram_topics_close`, `telegram_members_add`/`telegram_members_remove`,
+  `telegram_topics_create`/`telegram_topics_bulk_create`/`telegram_topics_close`,
+  `telegram_members_add`/`telegram_members_remove`,
   `telegram_folders_inspect`/`telegram_folders_add_chat`/`telegram_folders_remove_chat`,
   `telegram_notifications_mute`/`telegram_notifications_unmute`, and
   `telegram_operations_status`/`telegram_operations_retry`. Each carries MCP annotations
@@ -169,8 +170,9 @@ authenticate with Google and drive Telegram operations through the same safety r
 
 *Items requiring manual intervention - no checkboxes, informational only*
 
-- Manual e2e with MCP Inspector (`npx @modelcontextprotocol/inspector`) against `/mcp` using the
-  fake/test OAuth flow.
+- Manual e2e with MCP Inspector (`npx @modelcontextprotocol/inspector`) against `/mcp` using a real
+  configured Google OAuth Web client, preferably a test client/account. Fake Google is covered only
+  by `pytest`.
 - Live Google OAuth + live Telegram e2e require real Google client credentials and an authorized
   Telethon session at `data/sessions/.../session.session`; run only against a test account, and
   record as skipped when unavailable.

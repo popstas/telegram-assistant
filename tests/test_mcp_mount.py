@@ -44,6 +44,7 @@ def _enabled_mcp_yaml(
     *,
     required_scopes: tuple[str, ...] = ("mcp", "telegram:read"),
     access_token_ttl_seconds: int = 600,
+    admin: str = "",
 ) -> str:
     scopes_yaml = "\n".join(f'    - "{scope}"' for scope in required_scopes)
     return (
@@ -58,11 +59,14 @@ mcp:
   google_client_secret: "google-client-secret"
   allowed_emails:
     - "owner@example.test"
+  allowed_redirect_hosts:
+    - "client.example"
+{admin.rstrip()}
   required_scopes:
 {scopes_yaml}
   access_token_ttl_seconds: {access_token_ttl_seconds}
   refresh_token_ttl_seconds: 1200
-  signing_secret: "local-token-signing-secret"
+  signing_secret: "local-token-signing-secret-with-32-chars"
 """
     )
 

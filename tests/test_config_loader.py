@@ -108,12 +108,16 @@ mcp:
     - "owner@example.test"
   allowed_domains:
     - "example.test"
+  admin_emails:
+    - "admin@example.test"
+  admin_domains:
+    - "admins.example.test"
   required_scopes:
     - "mcp"
     - "telegram:read"
   access_token_ttl_seconds: 600
   refresh_token_ttl_seconds: 1200
-  signing_secret: "local-token-signing-secret"
+  signing_secret: "local-token-signing-secret-with-32-chars"
 """
     config = load_config_from_text(src)
     assert config.mcp is not None
@@ -124,10 +128,78 @@ mcp:
     assert config.mcp.google_client_secret == "google-client-secret"
     assert config.mcp.allowed_emails == ["owner@example.test"]
     assert config.mcp.allowed_domains == ["example.test"]
+    assert config.mcp.admin_emails == ["admin@example.test"]
+    assert config.mcp.admin_domains == ["admins.example.test"]
     assert config.mcp.required_scopes == ["mcp", "telegram:read"]
     assert config.mcp.access_token_ttl_seconds == 600
     assert config.mcp.refresh_token_ttl_seconds == 1200
-    assert config.mcp.signing_secret == "local-token-signing-secret"
+    assert config.mcp.signing_secret == "local-token-signing-secret-with-32-chars"
+
+
+@pytest.mark.parametrize(
+    "signing_secret",
+    [
+        "short-secret",
+        "replace-with-a-long-random-secret",
+    ],
+)
+def test_mcp_enabled_block_rejects_weak_signing_secret(
+    signing_secret: str,
+) -> None:
+    src = f"""
+telegram:
+  api_id: 1
+  api_hash: "h"
+  session_path: /tmp/s
+  default_chat_folder:
+    folder_name: "X"
+http:
+  bearer_token: "tok"
+mcp:
+  enabled: true
+  server_url: "https://assistant.example.test"
+  issuer_url: "https://assistant.example.test"
+  google_client_id: "google-client-id"
+  google_client_secret: "google-client-secret"
+  allowed_emails:
+    - "owner@example.test"
+  signing_secret: "{signing_secret}"
+"""
+    with pytest.raises(ConfigError) as excinfo:
+        load_config_from_text(src)
+
+    assert "signing_secret" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("field_name", ["server_url", "issuer_url"])
+def test_mcp_enabled_block_rejects_invalid_urls(field_name: str) -> None:
+    src = """
+telegram:
+  api_id: 1
+  api_hash: "h"
+  session_path: /tmp/s
+  default_chat_folder:
+    folder_name: "X"
+http:
+  bearer_token: "tok"
+mcp:
+  enabled: true
+  server_url: "https://assistant.example.test/mcp"
+  issuer_url: "https://assistant.example.test"
+  google_client_id: "google-client-id"
+  google_client_secret: "google-client-secret"
+  allowed_emails:
+    - "owner@example.test"
+  signing_secret: "local-token-signing-secret-with-32-chars"
+"""
+    src = src.replace(f'{field_name}: "https://assistant.example.test', f'{field_name}: "not-a-url')
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config_from_text(src)
+
+    msg = str(excinfo.value)
+    assert field_name in msg
+    assert "absolute http(s) URL" in msg
 
 
 def test_mcp_enabled_block_requires_authorization_server_settings() -> None:
@@ -154,6 +226,35 @@ mcp:
     assert "google_client_secret" in msg
     assert "signing_secret" in msg
     assert "allowed_emails or allowed_domains" in msg
+
+
+def test_mcp_admin_required_scope_requires_admin_allowlist() -> None:
+    src = """
+telegram:
+  api_id: 1
+  api_hash: "h"
+  session_path: /tmp/s
+  default_chat_folder:
+    folder_name: "X"
+http:
+  bearer_token: "tok"
+mcp:
+  enabled: true
+  server_url: "https://assistant.example.test"
+  issuer_url: "https://assistant.example.test"
+  google_client_id: "google-client-id"
+  google_client_secret: "google-client-secret"
+  allowed_emails:
+    - "owner@example.test"
+  required_scopes:
+    - "mcp"
+    - "telegram:admin"
+  signing_secret: "local-token-signing-secret-with-32-chars"
+"""
+    with pytest.raises(ConfigError) as excinfo:
+        load_config_from_text(src)
+
+    assert "admin_emails or admin_domains for telegram:admin" in str(excinfo.value)
 
 
 def test_topics_layout_tabs_parses() -> None:

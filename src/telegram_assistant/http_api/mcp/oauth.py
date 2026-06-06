@@ -18,6 +18,8 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response
 
 from telegram_assistant.config import McpConfig
 
+MCP_ADMIN_SCOPE = "telegram:admin"
+
 
 @dataclass(frozen=True)
 class GoogleIdentity:
@@ -249,6 +251,24 @@ def _normalize_audience(value: str) -> str:
     return urlunsplit((scheme, netloc, path, "", ""))
 
 
+def _normalize_redirect_uri(value: str) -> str:
+    parts = urlsplit(value)
+    return urlunsplit(
+        (
+            parts.scheme.lower(),
+            parts.netloc.lower(),
+            parts.path,
+            parts.query,
+            "",
+        )
+    )
+
+
+def _append_query(url: str, params: Mapping[str, str]) -> str:
+    separator = "&" if "?" in url else "?"
+    return url + separator + urlencode(params)
+
+
 def _scope_tuple(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
     if value is None or value.strip() == "":
         return default
@@ -286,16 +306,39 @@ class OAuthAuthorizationServer:
         self.resource = config.server_url.rstrip("/")
         self._normalized_resource = _normalize_audience(self.resource)
         self._signing_secret = config.signing_secret
-        self._supported_scopes = tuple(dict.fromkeys(config.required_scopes))
+        self._required_scopes = tuple(dict.fromkeys(config.required_scopes))
         self._allowed_emails = {email.lower() for email in config.allowed_emails}
         self._allowed_domains = {
             domain.lower().lstrip("@") for domain in config.allowed_domains
+        }
+        self._admin_emails = {email.lower() for email in config.admin_emails}
+        self._admin_domains = {
+            domain.lower().lstrip("@") for domain in config.admin_domains
+        }
+        supported_scopes = list(self._required_scopes)
+        if (
+            self._admin_emails
+            or self._admin_domains
+            or MCP_ADMIN_SCOPE in self._required_scopes
+        ):
+            supported_scopes.append(MCP_ADMIN_SCOPE)
+        self._supported_scopes = tuple(dict.fromkeys(supported_scopes))
+        self._allowed_redirect_uris = {
+            _normalize_redirect_uri(uri) for uri in config.allowed_redirect_uris
+        }
+        self._allowed_redirect_hosts = {
+            host.lower().strip("[]") for host in config.allowed_redirect_hosts
         }
         self._google_provider = google_provider or HttpGoogleOidcProvider(config)
         self._now = now or time.time
         self._clients: dict[str, RegisteredClient] = {}
         self._pending_google_logins: dict[str, PendingGoogleLogin] = {}
         self._authorization_codes: dict[str, AuthorizationCode] = {}
+        self._max_registered_clients = 1024
+        self._max_pending_google_logins = 1024
+        self._max_authorization_codes = 2048
+        self._registered_client_ttl_seconds = 24 * 60 * 60
+        self._pending_google_login_ttl_seconds = 300
 
     @property
     def authorization_endpoint(self) -> str:
@@ -336,6 +379,10 @@ class OAuthAuthorizationServer:
         }
 
     def register_client(self, data: Mapping[str, Any]) -> dict[str, Any]:
+        self._cleanup_ephemeral_state()
+        if len(self._clients) >= self._max_registered_clients:
+            self._evict_oldest_registered_client()
+
         redirect_uris_raw = data.get("redirect_uris")
         if not isinstance(redirect_uris_raw, list) or not redirect_uris_raw:
             raise OAuthHttpError(
@@ -350,9 +397,11 @@ class OAuthAuthorizationServer:
                 "redirect_uris entries must be non-empty strings",
             )
         redirect_uris = tuple(redirect_uris_raw)
+        for redirect_uri in redirect_uris:
+            self._validate_redirect_uri(redirect_uri)
 
         requested_scopes = self._validate_scopes(
-            _scope_tuple(_public_dict_value(data, "scope"), self._supported_scopes)
+            _scope_tuple(_public_dict_value(data, "scope"), self._required_scopes)
         )
         client_id = "mcp_" + secrets.token_urlsafe(24)
         client = RegisteredClient(
@@ -375,6 +424,7 @@ class OAuthAuthorizationServer:
         }
 
     def start_authorization(self, params: Mapping[str, str]) -> str:
+        self._cleanup_ephemeral_state()
         if params.get("response_type") != "code":
             raise OAuthHttpError(400, "unsupported_response_type", "response_type must be code")
 
@@ -393,7 +443,7 @@ class OAuthAuthorizationServer:
         self._validate_resource(resource)
 
         requested_scopes = self._validate_scopes(
-            _scope_tuple(params.get("scope"), self._supported_scopes)
+            _scope_tuple(params.get("scope"), self._required_scopes)
         )
         if not set(requested_scopes).issubset(set(client.scopes)):
             raise OAuthHttpError(
@@ -411,6 +461,12 @@ class OAuthAuthorizationServer:
                 400,
                 "invalid_request",
                 "code_challenge_method must be S256",
+            )
+        if len(self._pending_google_logins) >= self._max_pending_google_logins:
+            raise OAuthHttpError(
+                429,
+                "temporarily_unavailable",
+                "too many pending OAuth authorizations",
             )
 
         google_state = secrets.token_urlsafe(32)
@@ -433,15 +489,26 @@ class OAuthAuthorizationServer:
         return "code" in params and params.get("state") in self._pending_google_logins
 
     async def complete_google_login(self, *, state: str, code: str) -> str:
+        self._cleanup_ephemeral_state()
         pending = self._pending_google_logins.pop(state, None)
         if pending is None:
             raise OAuthHttpError(400, "invalid_request", "Unknown Google login state")
 
-        identity = await self._google_provider.authenticate(
-            code=code,
-            redirect_uri=self.authorization_endpoint,
-        )
-        self._validate_google_identity(identity)
+        try:
+            identity = await self._google_provider.authenticate(
+                code=code,
+                redirect_uri=self.authorization_endpoint,
+            )
+            self._validate_google_identity(identity)
+            self._validate_scope_identity(identity, pending.requested_scopes)
+            if len(self._authorization_codes) >= self._max_authorization_codes:
+                raise OAuthHttpError(
+                    429,
+                    "temporarily_unavailable",
+                    "too many pending OAuth authorization codes",
+                )
+        except OAuthHttpError as exc:
+            return self._authorization_error_redirect(pending, exc)
 
         authorization_code = secrets.token_urlsafe(32)
         self._authorization_codes[authorization_code] = AuthorizationCode(
@@ -459,8 +526,7 @@ class OAuthAuthorizationServer:
         redirect_params = {"code": authorization_code}
         if pending.client_state is not None:
             redirect_params["state"] = pending.client_state
-        separator = "&" if "?" in pending.redirect_uri else "?"
-        return pending.redirect_uri + separator + urlencode(redirect_params)
+        return _append_query(pending.redirect_uri, redirect_params)
 
     def exchange_token(self, data: Mapping[str, str]) -> dict[str, Any]:
         grant_type = data.get("grant_type")
@@ -496,7 +562,7 @@ class OAuthAuthorizationServer:
             raise TokenValidationError(401, "invalid_token", "token has expired")
 
         scopes = tuple(str(claims.get("scope", "")).split())
-        needed = tuple(required_scopes) if required_scopes is not None else self._supported_scopes
+        needed = tuple(required_scopes) if required_scopes is not None else self._required_scopes
         if not set(needed).issubset(set(scopes)):
             raise TokenValidationError(403, "insufficient_scope", "token scopes are insufficient")
 
@@ -513,6 +579,7 @@ class OAuthAuthorizationServer:
         )
 
     def _exchange_authorization_code(self, data: Mapping[str, str]) -> dict[str, Any]:
+        self._cleanup_ephemeral_state()
         code = data.get("code")
         if not code:
             raise OAuthHttpError(400, "invalid_request", "code is required")
@@ -563,6 +630,12 @@ class OAuthAuthorizationServer:
         self._validate_resource(resource)
 
         scopes = tuple(str(claims.get("scope", "")).split())
+        identity = GoogleIdentity(
+            subject=str(claims["sub"]),
+            email=str(claims["email"]),
+        )
+        self._validate_google_identity(identity)
+        self._validate_scope_identity(identity, scopes)
         return self._token_response(
             client_id=str(claims["client_id"]),
             subject=str(claims["sub"]),
@@ -570,6 +643,48 @@ class OAuthAuthorizationServer:
             scopes=scopes,
             resource=resource,
         )
+
+    def _authorization_error_redirect(
+        self,
+        pending: PendingGoogleLogin,
+        exc: OAuthHttpError,
+    ) -> str:
+        params = {
+            "error": exc.error,
+            "error_description": exc.description,
+        }
+        if pending.client_state is not None:
+            params["state"] = pending.client_state
+        return _append_query(pending.redirect_uri, params)
+
+    def _cleanup_ephemeral_state(self) -> None:
+        now_ts = self._timestamp()
+        client_cutoff = now_ts - self._registered_client_ttl_seconds
+        self._clients = {
+            client_id: client
+            for client_id, client in self._clients.items()
+            if client.issued_at > client_cutoff
+        }
+        pending_cutoff = now_ts - self._pending_google_login_ttl_seconds
+        self._pending_google_logins = {
+            state: pending
+            for state, pending in self._pending_google_logins.items()
+            if pending.created_at > pending_cutoff
+        }
+        self._authorization_codes = {
+            code: authorization_code
+            for code, authorization_code in self._authorization_codes.items()
+            if authorization_code.expires_at > now_ts
+        }
+
+    def _evict_oldest_registered_client(self) -> None:
+        if not self._clients:
+            return
+        oldest_client_id = min(
+            self._clients,
+            key=lambda client_id: self._clients[client_id].issued_at,
+        )
+        del self._clients[oldest_client_id]
 
     def _token_response(
         self,
@@ -631,6 +746,30 @@ class OAuthAuthorizationServer:
         if _normalize_audience(resource) != self._normalized_resource:
             raise OAuthHttpError(400, "invalid_target", "resource is not this MCP server")
 
+    def _validate_redirect_uri(self, redirect_uri: str) -> None:
+        parts = urlsplit(redirect_uri)
+        if parts.fragment:
+            raise OAuthHttpError(
+                400,
+                "invalid_client_metadata",
+                "redirect_uris must not contain fragments",
+            )
+        if parts.scheme.lower() not in {"http", "https"} or not parts.hostname:
+            raise OAuthHttpError(
+                400,
+                "invalid_client_metadata",
+                "redirect_uris must be absolute HTTP(S) URLs",
+            )
+        if _normalize_redirect_uri(redirect_uri) in self._allowed_redirect_uris:
+            return
+        if parts.hostname.lower() in self._allowed_redirect_hosts:
+            return
+        raise OAuthHttpError(
+            400,
+            "invalid_client_metadata",
+            "redirect_uris must use a configured trusted URI or host",
+        )
+
     def _validate_pkce(self, *, verifier: str | None, challenge: str) -> None:
         if not verifier:
             raise OAuthHttpError(400, "invalid_request", "code_verifier is required")
@@ -654,6 +793,23 @@ class OAuthAuthorizationServer:
         if email in self._allowed_emails or domain in self._allowed_domains:
             return
         raise OAuthHttpError(403, "access_denied", "Google account is not allowed")
+
+    def _validate_scope_identity(
+        self,
+        identity: GoogleIdentity,
+        scopes: tuple[str, ...],
+    ) -> None:
+        if MCP_ADMIN_SCOPE not in scopes:
+            return
+        email = identity.email.lower()
+        domain = email.rsplit("@", 1)[-1] if "@" in email else ""
+        if email in self._admin_emails or domain in self._admin_domains:
+            return
+        raise OAuthHttpError(
+            403,
+            "access_denied",
+            "Google account is not allowed to request telegram:admin",
+        )
 
     def _encode_signed_token(self, claims: Mapping[str, Any]) -> str:
         header = _json_b64({"alg": "HS256", "typ": "JWT"})

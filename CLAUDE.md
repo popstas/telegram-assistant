@@ -18,7 +18,7 @@ All runtime state — `config.yml`, Telethon session, SQLite DB, bearer token �
 
 - Run the API: `uvicorn telegram_assistant.http_api.app:create_app --factory --port 8085`
 - Run the CLI: `telegram-assistant <resource> <action> [options]` (e.g. `health`, `auth`, `groups create`, `topics bulk-create`, `members bulk-add`, `messages send`, `messages forward`, `notifications mute`, `folders inspect`, `operations status`)
-- Manual MCP smoke: enable `mcp:` in `data/config.yml`, run the API, then use `npx @modelcontextprotocol/inspector` against `http://localhost:8085/mcp` (see `docs/mcp-inspector-e2e.md`)
+- Manual MCP smoke: enable `mcp:` in `data/config.yml`, run the API, then use `npx @modelcontextprotocol/inspector` against `http://localhost:8085/mcp` (requires Node.js/npm; see `docs/mcp-inspector-e2e.md`)
 - Tests: `pytest` (asyncio mode auto). Single test: `pytest tests/test_groups.py::test_name` or filter with `-k pattern`
 - Lint: `ruff check src tests` (line-length 100, py312, ignores E501)
 - Generate changelog: `git-cliff -o CHANGELOG.md` (also runs via pre-commit on commit)
@@ -62,15 +62,15 @@ Operation states are `pending | completed | failed | needs_review`. `needs_revie
 
 `data/config.yml` is loaded by `config.loader.load_config()`. Schema (Pydantic) is in `config/models.py`. Notable: `telegram.default_chat_folder.folder_name` is the default for CLI `--folder-name` and for placing newly created groups; chat folders are never auto-created — if the configured folder is missing, the service returns an error.
 
-`telegram.defaults` knobs applied to new groups: `topics_layout` (overridable per call via `groups create --topics-layout` / the `topics_layout` HTTP field); `group_title_postfix`, appended to the Telegram title but deliberately kept out of the idempotency key so Planfix replays still match on the raw title; `default_member_permissions.{create_topics,pin_messages}`, set as the group's default member rights; and `cleanup_planfix_messages` (opt-in, default off) / `task_reply_wait_seconds`, which control deleting @planfix_bot's welcome, the `/task <id>` command, and the bot's reply after creation (best-effort — failures land in `skipped`).
+`telegram.defaults` knobs applied to new groups: `topics_layout` (overridable per call via `groups create --topics-layout` / the `topics_layout` HTTP field) and `default_member_permissions.{create_topics,pin_messages}`, set as the group's default member rights. Planfix-specific title postfix and bot-message cleanup settings live under `plugins.planfix.*`, not `telegram.defaults`.
 
 `telegram.access` (optional, `AccessConfig`) is the read/write policy. **Omitted ⇒ allow-all; present ⇒ deny-by-default** (an empty `rules: []` denies everything). Each `AccessRule` sets exactly one target — `chat` (entity ref), `folder` (name), or `all: true` (wildcard) — plus `permission` (`read`/`write`, default `write`). A common shape is a wildcard `all: read` baseline layered with targeted `folder`/`chat` `write` rules.
 
-`mcp` is optional and disabled by default. When `enabled: true`, the config must include `server_url` (normally the public `/mcp` URL and token audience), `issuer_url` (public OAuth AS base URL), Google OAuth client credentials, `signing_secret`, and at least one allowlist entry in `allowed_emails` or `allowed_domains`. `required_scopes` defaults to `["mcp"]`; access/refresh token TTLs default to 3600/2592000 seconds.
+`mcp` is optional and disabled by default. When `enabled: true`, the config must include `server_url` (normally the public `/mcp` URL and token audience), `issuer_url` (public OAuth AS base URL), Google OAuth client credentials, `signing_secret` (32+ characters), and at least one allowlist entry in `allowed_emails` or `allowed_domains`. OAuth client redirects must use trusted loopback hosts or configured `allowed_redirect_hosts` / `allowed_redirect_uris`. `required_scopes` defaults to `["mcp"]`; `telegram:admin` is an optional scope required only by MCP operation status/retry tools, and is advertised/granted only when `admin_emails` or `admin_domains` is configured. Access/refresh token TTLs default to 3600/2592000 seconds.
 
 ## Updating CLI/HTTP
 
-When you add or change a CLI command, HTTP endpoint, or MCP tool, update `skills/telegram-assistant/SKILL.md` and re-sync it to `~/.claude/skills/telegram-assistant/SKILL.md` in the same change. Update the Commands/usage sections in `README.md` too. The `tests/test_skill_inventory.py` guard will fail when the CLI catalog drifts from the skill.
+When you add or change a CLI command, HTTP endpoint, or MCP tool, update `skills/telegram-assistant/SKILL.md` and re-sync it to `~/.claude/skills/telegram-assistant/SKILL.md` in the same change. Update the Commands/usage sections in `README.md` too. When adding/renaming MCP tools, update README's MCP tool catalog and `EXPECTED_TOOL_NAMES` in `tests/test_mcp_mount.py`. The `tests/test_skill_inventory.py` guard will fail when the CLI catalog drifts from the skill.
 
 ## Tests
 

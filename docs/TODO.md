@@ -1,6 +1,6 @@
 # TODO
 
-- [ ] Add an **HTTP MCP server** exposing the assistant's operations as MCP tools, with **OAuth via Google**.
+- [x] Add an **HTTP MCP server** exposing the assistant's operations as MCP tools, with **OAuth via Google**.
   Build an optional Streamable-HTTP MCP endpoint mounted at `/mcp` in the existing FastAPI app, disabled by default.
   Use the official `mcp` Python SDK (FastMCP) — build a `FastMCP` server and mount its streamable-HTTP ASGI app at
   `/mcp` inside the existing app. Reuse the current domain services, backend factories, `OperationStore`, entity
@@ -17,5 +17,6 @@
   Config/test plan: add optional `mcp:` config for server URL, issuer URL, Google client credentials, allowed emails/
   domains, required scopes, token TTLs, and signing secret. Cover config validation, fake-Google OAuth flow, token
   audience/scope checks, MCP `initialize` / `tools/list` / representative `tools/call`, unchanged `/telegram/*` bearer
-  auth, and fake-backend tool behavior. Manual e2e = MCP Inspector with fake/test OAuth; live Google/Telegram e2e
-  documented as optional/skipped when credentials/session are unavailable.
+  auth, and fake-backend tool behavior. Implemented in
+  `docs/plans/20260607-mcp-server-google-oauth.md`; manual Inspector/live
+  Google-Telegram checks remain post-completion/manual.
