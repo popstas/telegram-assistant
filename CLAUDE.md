@@ -17,12 +17,12 @@ All runtime state — `config.yml`, Telethon session, SQLite DB, bearer token �
 ## Common commands
 
 - Run the API: `uvicorn telegram_assistant.http_api.app:create_app --factory --port 8085`
-- Run the CLI: `telegram-assistant <resource> <action> [options]` (e.g. `health`, `auth`, `groups create`, `topics bulk-create`, `members bulk-add`, `messages send`, `folders inspect`, `operations status`)
+- Run the CLI: `telegram-assistant <resource> <action> [options]` (e.g. `health`, `auth`, `groups create`, `topics bulk-create`, `members bulk-add`, `messages send`, `messages forward`, `notifications mute`, `folders inspect`, `operations status`)
 - Tests: `pytest` (asyncio mode auto). Single test: `pytest tests/test_groups.py::test_name` or filter with `-k pattern`
 - Lint: `ruff check src tests` (line-length 100, py312, ignores E501)
 - Generate changelog: `git-cliff -o CHANGELOG.md` (also runs via pre-commit on commit)
 - Docker smoke (build + `/health` poll + teardown): `bash scripts/docker-smoke.sh`
-- Live e2e against real Telegram: `bash scripts/e2e_test.sh`, `bash scripts/e2e_cli_test.sh`, `bash scripts/e2e_http_extras_test.sh` — require an authorized Telethon session at `data/sessions/expertizemeAssistant/session.session` and a Telegram folder `Clients` containing chat `Client chat test`. These scripts mutate the real test account; per the MVP plan they are mandatory, not skipped.
+- Live e2e against real Telegram: `bash scripts/e2e_test.sh`, `bash scripts/e2e_cli_test.sh`, `bash scripts/e2e_http_extras_test.sh` — require an authorized Telethon session at `data/sessions/expertizemeAssistant/session.session` and a Telegram folder `Clients` containing chat `Client chat test`. These scripts mutate the real test account, including media sends, scheduled sends, reactions, forwarding, notification mute/unmute, and folder remove/add round-trips. Run them only with an authorized test session/account; when that is unavailable, record them as skipped.
 
 The Telethon session is created **only** by `telegram-assistant auth` (interactive — prompts for phone, code, optional 2FA). There is no HTTP endpoint for login. Re-running `auth` for an authorized session prints the bound account and exits without re-prompting.
 
@@ -34,17 +34,19 @@ Three interfaces share one domain layer:
 - **CLI** (`src/telegram_assistant/cli/main.py`) — Typer. Every HTTP endpoint has a CLI analog plus admin commands (`auth`, `operations status`, `operations retry`).
 - **Worker/queue** (`src/telegram_assistant/worker/queue.py`) — async, bounded parallelism, handles `FLOOD_WAIT` as a normal pause (sleep + retry, not failure), persists per-item bulk progress so a restart resumes the last incomplete item.
 
-Each domain area (`groups/`, `topics/`, `members/`, `messages/`, `folders/`) follows the same shape:
+Each domain area (`groups/`, `topics/`, `members/`, `messages/`, `folders/`, `notifications/`) follows the same shape:
 
 - `service.py` — pure domain logic; defines a `Backend` protocol it depends on.
 - `telethon_backend.py` — production Telethon adapter implementing that protocol.
 
-This split is what lets tests inject fakes without spinning up Telethon. The HTTP layer mirrors the pattern via **backend factories** on `app.state.*_backend_factory` (including `resolver_factory` for the entity resolver and `message_read_backend_factory` for the get-recent read op). A factory returns `None` when the Telethon client isn't yet connected; the router then responds **503 Service Unavailable** instead of 500. When changing how backends are constructed, preserve this contract — `/health` must still respond even with an unauthorized session.
+`messages/` is split more narrowly: `attachments.py` holds surface-level attachment validation, `service.py` handles send/recent/mass send, `reactions.py` and `forwarding.py` hold their small domain operations, and `messages/telethon_backend.py` contains the send/read/reaction/forward Telethon adapters.
+
+This split is what lets tests inject fakes without spinning up Telethon. The HTTP layer mirrors the pattern via **backend factories** on `app.state.*_backend_factory` (including `message_backend_factory`, `message_read_backend_factory`, `reaction_backend_factory`, `forward_backend_factory`, `notification_backend_factory`, and `resolver_factory`). A factory returns `None` when the Telethon client isn't yet connected; the router then responds **503 Service Unavailable** instead of 500. `TelethonMessageBackend` is the default send backend for text/media/scheduled sends; do not fall back to the topic backend for message sends. When changing how backends are constructed, preserve this contract — `/health` must still respond even with an unauthorized session.
 
 Two shared domain modules sit alongside the per-area ones:
 
 - **`entities/`** — turns any chat reference (numeric id with or without the `-100` marker, `@username`, `t.me`/invite link, phone, exact title) into a numeric `chat_id`. Resolution order: numeric peer probe → `get_entity` → exact-title dialog scan (none → `EntityNotFoundError`, several → `AmbiguousEntityError`). Holds a per-request cache; propagates `FloodWaitError` rather than swallowing it. Surfaced as CLI `--entity` and an HTTP `entity` request field. `EntityRef.numeric_id` strips the `-100` marker to the bare id.
-- **`access/`** — a config-driven read/write gate enforced in the domain layer. An optional `Authorizer` is threaded into the mutating/reading domain ops (send, member add/remove, topic create/close, folder add-chat → WRITE on the resolved chat; group create → WRITE on the destination folder; `messages recent` → READ). With `telegram.access` absent the authorizer is an allow-all no-op (backward compatible); when present it is deny-by-default. Rules union with the highest level winning, and `write` implies `read`. `require()` normalises the request `chat_id` to the same bare form the rule index uses, so marked and bare ids match the same rule. `AccessDenied` → CLI exit code **3** / HTTP **403**; entity-not-found → exit 2 / HTTP **404**; ambiguous entity → HTTP **409**.
+- **`access/`** — a config-driven read/write gate enforced in the domain layer. An optional `Authorizer` is threaded into the mutating/reading domain ops (send, media/scheduled send, reaction, notification mute/unmute, member add/remove, topic create/close, folder add-chat/remove-chat → WRITE on the resolved chat; group create → WRITE on the destination folder; `messages recent` and forward source → READ; forward target → WRITE). With `telegram.access` absent the authorizer is an allow-all no-op (backward compatible); when present it is deny-by-default. Rules union with the highest level winning, and `write` implies `read`. `require()` normalises the request `chat_id` to the same bare form the rule index uses, so marked and bare ids match the same rule. `AccessDenied` → CLI exit code **3** / HTTP **403**; entity-not-found → exit 2 / HTTP **404**; ambiguous entity → HTTP **409**.
 
 `OperationStore` (SQLite, `src/telegram_assistant/persistence/`) is the source of truth for idempotency and bulk progress. Idempotency keys (full spec in `docs/init-plan.md`):
 

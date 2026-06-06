@@ -14,13 +14,18 @@
 - [x] **Get recent messages** from an entity (default **5**). Promote the existing internal `get_recent_messages` (`groups/telethon_backend.py`) to a first-class read op across all entities; expose in CLI + HTTP with a `limit` (default 5). Returns id, sender, date, text/media summary. A **read** op — requires read-level access per the restrictions above.
 - [x] Publish **`telegram-assistant` to PyPI** so it can be `pip install`ed / `pipx install`ed instead of from source.
   Done: published `v0.2.1` to https://pypi.org/project/telegram-assistant/ (MIT). `release.yml` builds sdist+wheel (`twine check`) and publishes via `pypa/gh-action-pypi-publish` (API token `PYPI_API_TOKEN`) on `v*` tags; `[tool.bumpversion]` drives version bumps. Metadata (urls/classifiers/keywords/author email) finalized; install-from-PyPI smoke-checked. Follow-ups: update README install instructions to `pip install telegram-assistant`; swap the account-scoped PyPI token for a `telegram-assistant`-scoped one now that the project exists.
-- [ ] Support sending **media** — photos, videos, and files/documents (today messages are text-only, `messages/service.py:85`).
-  Extend the `MessageBackend.send_message` path to accept attachments via Telethon `send_file` (single + albums), with optional caption and caption formatting. Wire through CLI (`messages send` — accept local file path(s) / URL) and the HTTP send endpoint (file upload or URL/base64 — decide). Validate type/size, surface clear errors, and keep plain-text send working. Respect access-restrictions (resolve → authorize) and the entity resolver above.
-- [ ] **Scheduled / delayed messages** — send a message at a future time (Telethon `send_message(..., schedule=...)`). Expose `--schedule`/`schedule_at` in CLI + HTTP; accept absolute time or relative delay. Decide how it interacts with the worker queue and idempotency.
-- [ ] **Mute / unmute** a contact or chat (toggle notification settings via `UpdateNotifySettings`). CLI + HTTP, by entity; optional mute duration.
-- [ ] **Remove** a contact/chat from a folder (add already exists via `add_chat_to_folder`, `folders/service.py`). Add the inverse + make folder membership idempotent; CLI + HTTP, by entity. (Generalizes the access-restrictions folder handling.)
-- [ ] **Reactions** — set/remove an emoji reaction on a message (`SendReaction`). CLI + HTTP, by entity + message id + emoji.
-- [ ] **Forward** a message from one entity to another (`forward_messages`). CLI + HTTP, source entity + message id(s) → target entity; respect access-restrictions on the target.
+- [x] Support sending **media** — photos, videos, and files/documents.
+  Done in `docs/plans/20260606-message-operations-expansion.md`: `MessageBackend.send_message` accepts attachments via Telethon `send_file` (single + albums), with optional caption; CLI accepts local `--file` and URL `--file-url`; HTTP accepts URL media via `file_urls` and rejects server-local paths for safety. Plain-text send remains compatible and access-restricted.
+- [x] **Scheduled / delayed messages** — send a message at a future time.
+  Done in `docs/plans/20260606-message-operations-expansion.md`: CLI supports `--schedule-at` and `--delay`; HTTP supports `schedule_at` and `delay_seconds`; results include `scheduled` and `schedule_at` and replay through the operation store.
+- [x] **Mute / unmute** a contact or chat.
+  Done in `docs/plans/20260606-message-operations-expansion.md`: CLI and HTTP expose `notifications mute` / `notifications unmute`, with entity/chat-name/chat-id targeting and optional positive mute duration.
+- [x] **Remove** a contact/chat from a folder.
+  Done in `docs/plans/20260606-message-operations-expansion.md`: `folders remove-chat` and `DELETE /telegram/folders/{folder_name}/chats` are idempotent and WRITE-gated.
+- [x] **Reactions** — set/remove an emoji reaction on a message.
+  Done in `docs/plans/20260606-message-operations-expansion.md`: CLI and HTTP support set/clear by target chat plus message id, WRITE-gated.
+- [x] **Forward** a message from one entity to another.
+  Done in `docs/plans/20260606-message-operations-expansion.md`: CLI and HTTP forward one or more message ids, requiring READ on the source and WRITE on the target.
 - [ ] Add an **HTTP MCP server** exposing the assistant's operations as MCP tools, with **OAuth via Google**.
   Stand up a streamable-HTTP MCP endpoint that maps the domain ops (send/media/forward/reactions/get-recent/groups/topics/members/folders) to MCP tools, reusing the same service layer + access-restrictions (read/write scoping) as the HTTP API. Auth = Google OAuth (decide flow + which Google accounts/domain are allowed → maps to an identity, then to access scope). Decide whether it lives in the existing FastAPI app or a separate process, and how it coexists with the current bearer-token `/telegram/*` auth.
 - [ ] Add an integration/agent-setup layer — an `INTEGRATION.md` guide (à la [obsidian-agent-base/INTEGRATION.md](https://github.com/popstas/obsidian-agent-base/blob/main/INTEGRATION.md)) that lets Claude Code wire this assistant into another project.

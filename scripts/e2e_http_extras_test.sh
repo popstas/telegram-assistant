@@ -104,5 +104,69 @@ addchat_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
     "${BASE_URL}/telegram/folders/${FOLDER}/chats" || true)
 echo "${addchat_resp}" | jq . 2>/dev/null || echo "${addchat_resp}"
 
+# --- media / scheduled send, reactions, forward, mute, folder remove -------
+# These target only the test chat. The scheduled send is deferred far
+# enough to be cancellable by hand; the folder remove is rounded back with
+# an add so net membership is unchanged.
+
+step "POST /telegram/messages (media) — attach a remote URL"
+media_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "http media caption", file_urls: ["https://www.python.org/static/img/python-logo.png"]}')
+media_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${media_payload}" \
+    "${BASE_URL}/telegram/messages")
+echo "${media_resp}" | jq '{telegram_message_id, scheduled, operation_status}'
+message_id=$(echo "${media_resp}" | jq -r '.telegram_message_id')
+
+step "POST /telegram/messages (scheduled) — defer by 600s into the test chat"
+sched_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "http scheduled ping (10m)", delay_seconds: 600}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${sched_payload}" \
+    "${BASE_URL}/telegram/messages" | jq '{scheduled, telegram_message_id, operation_status}'
+
+if [[ -n "${message_id}" && "${message_id}" != "null" ]]; then
+    step "POST /telegram/messages/reactions (set 👍 on message ${message_id})"
+    react_payload=$(jq -nc --arg cid "${chat_id}" --argjson mid "${message_id}" \
+        '{telegram_chat_id: ($cid|tonumber), message_id: $mid, emoji: "👍"}')
+    curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+        -d "${react_payload}" \
+        "${BASE_URL}/telegram/messages/reactions" | jq '{telegram_message_id, emoji, cleared}'
+
+    step "POST /telegram/messages/reactions (clear on message ${message_id})"
+    clear_payload=$(jq -nc --arg cid "${chat_id}" --argjson mid "${message_id}" \
+        '{telegram_chat_id: ($cid|tonumber), message_id: $mid, clear: true}')
+    curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+        -d "${clear_payload}" \
+        "${BASE_URL}/telegram/messages/reactions" | jq '{telegram_message_id, emoji, cleared}'
+
+    step "POST /telegram/messages/forward (message ${message_id} into the same test chat)"
+    fwd_payload=$(jq -nc --arg cid "${chat_id}" --argjson mid "${message_id}" \
+        '{from_chat_id: ($cid|tonumber), to_chat_id: ($cid|tonumber), message_ids: [$mid]}')
+    curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+        -d "${fwd_payload}" \
+        "${BASE_URL}/telegram/messages/forward" | jq '{from_chat_id, to_chat_id, telegram_message_ids}'
+fi
+
+step "POST /telegram/notifications/mute then /unmute (round-trip for chat ${chat_id})"
+mute_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), duration_hours: 1}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${mute_payload}" \
+    "${BASE_URL}/telegram/notifications/mute" | jq '{telegram_chat_id, muted}'
+unmute_payload=$(jq -nc --arg cid "${chat_id}" '{telegram_chat_id: ($cid|tonumber)}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${unmute_payload}" \
+    "${BASE_URL}/telegram/notifications/unmute" | jq '{telegram_chat_id, muted}'
+
+step "DELETE /telegram/folders/${FOLDER}/chats then re-add (round-trip for chat ${chat_id})"
+remove_chat_payload=$(jq -nc --arg cid "${chat_id}" '{chat_id: ($cid|tonumber)}')
+curl -sS -X DELETE "${auth_header[@]}" "${json_header[@]}" \
+    -d "${remove_chat_payload}" \
+    "${BASE_URL}/telegram/folders/${FOLDER}/chats" | jq '{folder_id, already_absent}'
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${remove_chat_payload}" \
+    "${BASE_URL}/telegram/folders/${FOLDER}/chats" | jq '{folder_id, already_in_folder}'
+
 echo
 echo "http extras e2e flow completed — review the responses above and the chats on Telegram"

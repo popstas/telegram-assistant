@@ -2420,12 +2420,12 @@ app.add_typer(messages_app, name="messages")
 
 
 def _build_message_backends(config_path: Path | None):
-    """Open the Telethon-backed topic + folder backends + store for messaging.
+    """Open the Telethon-backed message + topic + folder backends + store.
 
-    The topic backend doubles as the message backend in production (the
-    Telethon adapter for topics already implements ``send_message``); we
-    reuse it here so HTTP and CLI never disagree on which client sends the
-    message.
+    ``_open`` returns ``(message_backend, topic_backend, folder_backend)``. The
+    dedicated :class:`TelethonMessageBackend` handles text/media/scheduled sends
+    while the topic backend still serves topic-name resolution and mass send;
+    the folder backend resolves chats and folders.
     """
     config = _load_config_or_exit(config_path)
     manager = TelethonSessionManager(config.telegram)
@@ -2433,6 +2433,9 @@ def _build_message_backends(config_path: Path | None):
 
     async def _open():
         from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonMessageBackend,
+        )
         from telegram_assistant.topics.telethon_backend import (
             TelethonTopicBackend,
         )
@@ -2443,15 +2446,16 @@ def _build_message_backends(config_path: Path | None):
                 "Telethon session is not authorized; run "
                 "`telegram-assistant auth` first."
             )
+        message_backend = TelethonMessageBackend(client)
         topic_backend = TelethonTopicBackend(client)
-        return topic_backend, TelethonFolderBackend(client)
+        return message_backend, topic_backend, TelethonFolderBackend(client)
 
     return config, manager, store, _open
 
 
 @messages_app.command("send")
 def messages_send(
-    text: str = typer.Option(..., "--text", help="Message text or service command."),
+    text: str = typer.Option("", "--text", help="Message text or service command."),
     chat_id: int | None = typer.Option(
         None,
         "--chat-id",
@@ -2500,6 +2504,27 @@ def messages_send(
         "--operation-id",
         help="Idempotency anchor; reuse to replay the saved result instead of re-sending.",
     ),
+    file: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--file",
+        help="Local server-side file to attach (repeatable; many files send an album).",
+    ),
+    file_url: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--file-url",
+        help="http(s) URL to attach, handed to Telegram as-is (repeatable).",
+    ),
+    schedule_at: str | None = typer.Option(
+        None,
+        "--schedule-at",
+        help="Defer delivery to an ISO-8601 datetime (mutually exclusive with --delay).",
+    ),
+    delay: str | None = typer.Option(
+        None,
+        "--delay",
+        help="Defer delivery by a relative duration like 10m, 2h, 1d "
+        "(mutually exclusive with --schedule-at).",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -2520,15 +2545,22 @@ def messages_send(
         resolve_folder,
     )
     from telegram_assistant.messages import (
+        AttachmentError,
         MassSendRequest,
         MessageSendFailed,
         MessageSendNeedsReview,
         MessageSendPending,
+        ScheduleError,
         SendMessageRequest,
         is_service_command,
         mass_send_message,
+        parse_delay,
+        parse_schedule_at,
         redact_message_text,
+        resolve_schedule_at,
         send_message,
+        validate_file_urls,
+        validate_local_files,
     )
     from telegram_assistant.topics import (
         AmbiguousTopicNameError,
@@ -2560,6 +2592,44 @@ def messages_send(
         )
         raise typer.Exit(code=2)
 
+    files = tuple(file or ())
+    file_urls = tuple(file_url or ())
+    has_attachments = bool(files or file_urls)
+    has_schedule_input = schedule_at is not None or delay is not None
+
+    # Media and scheduling are targeted-only; mass mode iterates many chats and
+    # has no single attachment/schedule semantics.
+    if is_mass and (has_attachments or has_schedule_input):
+        typer.echo(
+            "--file/--file-url/--schedule-at/--delay are only supported for "
+            "targeted sends, not mass mode",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    # Resolve scheduling (rejects conflicting modes and past absolute times) and
+    # validate attachments before opening any backend, so bad input fails fast
+    # with exit code 2 in both dry-run and real runs.
+    try:
+        parsed_schedule_at = (
+            parse_schedule_at(schedule_at) if schedule_at is not None else None
+        )
+        delay_seconds = parse_delay(delay) if delay is not None else None
+        resolved_schedule_at = resolve_schedule_at(
+            schedule_at=parsed_schedule_at,
+            delay_seconds=delay_seconds,
+        )
+    except ScheduleError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    try:
+        validate_local_files(files)
+        validate_file_urls(file_urls)
+    except AttachmentError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
     config, manager, store, open_backends = _build_message_backends(config_path)
 
     # Mass mode and chat_name resolution both need the folder default.
@@ -2573,8 +2643,12 @@ def messages_send(
         effective_folder_id = folder_id
 
     if dry_run:
-        if not text or not text.strip():
-            typer.echo("messages send requires non-empty --text", err=True)
+        if not (text and text.strip()) and not has_attachments:
+            typer.echo(
+                "messages send requires non-empty --text or at least one "
+                "--file/--file-url attachment",
+                err=True,
+            )
             raise typer.Exit(code=2)
         if is_mass and not (topic_name or "").strip():
             typer.echo(
@@ -2588,7 +2662,7 @@ def messages_send(
 
         async def _resolve_send() -> dict[str, object]:
             try:
-                topic_backend, folder_backend = await open_backends()
+                _msg_backend, topic_backend, folder_backend = await open_backends()
                 if is_mass:
                     snapshot = await resolve_folder(
                         folder_backend,
@@ -2776,6 +2850,14 @@ def messages_send(
                 "text": display_text,
                 "is_service_command": service,
                 "operation_id": operation_id,
+                "files": list(files),
+                "file_urls": list(file_urls),
+                "schedule_at": (
+                    resolved_schedule_at.isoformat()
+                    if resolved_schedule_at is not None
+                    else None
+                ),
+                "scheduled": resolved_schedule_at is not None,
             }
             if chat_name is not None:
                 resolved_payload["folder_name"] = resolved_folder_name
@@ -2798,8 +2880,7 @@ def messages_send(
 
     async def _run() -> dict[str, object]:
         try:
-            topic_backend, folder_backend = await open_backends()
-            message_backend = topic_backend
+            message_backend, topic_backend, folder_backend = await open_backends()
 
             # Build a resolver only when the policy or --entity actually needs
             # one, so the common allow-all/no-entity path never touches the
@@ -2869,6 +2950,9 @@ def messages_send(
                 operation_id=operation_id,
                 chat_name=resolved_chat_name,
                 topic_name=resolved_topic_name,
+                files=files,
+                file_urls=file_urls,
+                schedule_at=resolved_schedule_at,
             )
             result_single, op = await send_message(
                 backend=message_backend,
@@ -3058,6 +3142,885 @@ def messages_recent(
     except Exception as exc:
         _raise_for_access_or_entity_error(exc)
         typer.echo(f"messages recent failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _build_reaction_backends(config_path: Path | None):
+    """Open the Telethon-backed reaction + folder backends.
+
+    ``_open`` returns ``(reaction_backend, folder_backend)``. The folder backend
+    resolves ``--chat-name`` and feeds the authorizer's folder rules. Tests
+    monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonReactionBackend,
+        )
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonReactionBackend(client),
+            TelethonFolderBackend(client),
+        )
+
+    return config, manager, _open
+
+
+@messages_app.command("react")
+def messages_react(
+    message_id: int = typer.Option(
+        ..., "--message-id", help="Numeric id of the message to react to."
+    ),
+    emoji: str | None = typer.Option(
+        None, "--emoji", help="Reaction emoji to set (mutually exclusive with --clear)."
+    ),
+    clear: bool = typer.Option(
+        False,
+        "--clear",
+        help="Remove the existing reaction instead of setting one.",
+    ),
+    chat_id: int | None = typer.Option(
+        None, "--chat-id", help="Numeric Telegram chat id."
+    ),
+    chat_name: str | None = typer.Option(
+        None, "--chat-name", help="Chat title (resolved within --folder-name)."
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None, "--folder-id", help="Optional folder id cross-check."
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without changing the reaction.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Set or clear an emoji reaction on a message (WRITE-gated)."""
+    from telegram_assistant.folders import FolderError
+    from telegram_assistant.messages import (
+        SendReactionRequest,
+        set_message_reaction,
+    )
+
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if message_id <= 0:
+        typer.echo("--message-id must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+    has_emoji = bool(emoji and emoji.strip())
+    if has_emoji and clear:
+        typer.echo("provide either --emoji or --clear, not both", err=True)
+        raise typer.Exit(code=2)
+    if not has_emoji and not clear:
+        typer.echo("provide either --emoji to set or --clear to remove", err=True)
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_reaction_backends(config_path)
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _resolve_target(folder_backend):
+        from telegram_assistant.folders import resolve_chat_in_folder
+
+        resolver = None
+        if config.telegram.access is not None or entity is not None:
+            from telegram_assistant.entities import TelethonEntityResolver
+
+            resolver = TelethonEntityResolver(await manager.get_client())
+
+        if entity is not None:
+            assert resolver is not None
+            resolved_entity = await resolver.resolve(entity)
+            resolved_chat_id = resolved_entity.chat_id
+            chat_name_for_log = resolved_entity.title
+        elif chat_id is not None:
+            resolved_chat_id = chat_id
+            chat_name_for_log = None
+        else:
+            resolved = await resolve_chat_in_folder(
+                folder_backend,
+                folder_name=resolved_folder_name or "",
+                chat_name=chat_name or "",
+                folder_id=effective_folder_id,
+            )
+            resolved_chat_id = resolved.chat_id
+            chat_name_for_log = resolved.title
+
+        authorizer = _cli_authorizer(
+            config, resolver=resolver, folder_backend=folder_backend
+        )
+        return resolved_chat_id, chat_name_for_log, authorizer
+
+    if dry_run:
+
+        async def _resolve_only() -> tuple[int, str | None]:
+            try:
+                _backend, folder_backend = await open_backends()
+                tid, name, _auth = await _resolve_target(folder_backend)
+                return tid, name
+            finally:
+                try:
+                    await manager.disconnect()
+                except Exception:
+                    pass
+
+        try:
+            tid, name = asyncio.run(_resolve_only())
+        except FolderError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"messages react failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        action = "clear reaction" if clear else f"set reaction {emoji!r}"
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "messages.react",
+            "would": f"{action} on message {message_id} in chat {tid}",
+            "resolved": {
+                "telegram_chat_id": tid,
+                "chat_name": name,
+                "telegram_message_id": message_id,
+                "emoji": None if clear else emoji,
+                "cleared": clear,
+            },
+            "planned_actions": [
+                f"{action} on message {message_id} in chat {tid}"
+            ],
+            "warnings": [],
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            backend, folder_backend = await open_backends()
+            tid, name, authorizer = await _resolve_target(folder_backend)
+            result = await set_message_reaction(
+                backend,
+                request=SendReactionRequest(
+                    telegram_chat_id=tid,
+                    message_id=message_id,
+                    emoji=emoji,
+                    clear=clear,
+                    chat_name=name,
+                ),
+                authorizer=authorizer,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"messages react failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _build_forward_backends(config_path: Path | None):
+    """Open the Telethon-backed forward + folder backends.
+
+    ``_open`` returns ``(forward_backend, folder_backend)``. The folder backend
+    feeds the authorizer's folder rules. Tests monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonForwardBackend,
+        )
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonForwardBackend(client),
+            TelethonFolderBackend(client),
+        )
+
+    return config, manager, _open
+
+
+@messages_app.command("forward")
+def messages_forward(
+    message_id: list[int] = typer.Option(  # noqa: B008
+        None,
+        "--message-id",
+        help="Numeric id of a message to forward (repeatable).",
+    ),
+    from_chat_id: int | None = typer.Option(
+        None, "--from-chat-id", help="Numeric source Telegram chat id."
+    ),
+    from_entity: str | None = typer.Option(
+        None,
+        "--from-entity",
+        help="Flexible source entity reference (numeric id, @username, link, "
+        "phone, or exact title) resolved via the shared resolver.",
+    ),
+    to_chat_id: int | None = typer.Option(
+        None, "--to-chat-id", help="Numeric target Telegram chat id."
+    ),
+    to_entity: str | None = typer.Option(
+        None,
+        "--to-entity",
+        help="Flexible target entity reference (numeric id, @username, link, "
+        "phone, or exact title) resolved via the shared resolver.",
+    ),
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric target Telegram chat id (alias for --to-chat-id).",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Target chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible target entity reference (alias for --to-entity).",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name target lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None, "--folder-id", help="Optional target folder id cross-check."
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without forwarding.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Forward messages from a source chat to a target chat.
+
+    READ-gated on the source, WRITE-gated on the target.
+    """
+    from telegram_assistant.messages import (
+        ForwardMessagesRequest,
+        forward_messages,
+    )
+
+    message_ids = tuple(message_id or ())
+    if not message_ids:
+        typer.echo("at least one --message-id is required", err=True)
+        raise typer.Exit(code=2)
+    if any(mid <= 0 for mid in message_ids):
+        typer.echo("every --message-id must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+    if sum([from_chat_id is not None, from_entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --from-chat-id or --from-entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    target_refs = sum(
+        [
+            to_chat_id is not None,
+            to_entity is not None,
+            chat_id is not None,
+            chat_name is not None,
+            entity is not None,
+        ]
+    )
+    if target_refs != 1:
+        typer.echo(
+            "exactly one target must be supplied: --to-chat-id, --to-entity, "
+            "--chat-id, --chat-name, or --entity",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_forward_backends(config_path)
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _resolve_target(folder_backend):
+        from telegram_assistant.folders import resolve_chat_in_folder
+
+        resolver = None
+        if (
+            config.telegram.access is not None
+            or from_entity is not None
+            or to_entity is not None
+            or entity is not None
+        ):
+            from telegram_assistant.entities import TelethonEntityResolver
+
+            resolver = TelethonEntityResolver(await manager.get_client())
+
+        if from_entity is not None:
+            assert resolver is not None
+            resolved = await resolver.resolve(from_entity)
+            src_id = resolved.chat_id
+            src_name = resolved.title
+        else:
+            src_id = from_chat_id
+            src_name = None
+
+        if to_entity is not None or entity is not None:
+            assert resolver is not None
+            resolved = await resolver.resolve(
+                to_entity if to_entity is not None else entity
+            )
+            tgt_id = resolved.chat_id
+            tgt_name = resolved.title
+        elif to_chat_id is not None:
+            tgt_id = to_chat_id
+            tgt_name = None
+        elif chat_id is not None:
+            tgt_id = chat_id
+            tgt_name = None
+        else:
+            if folder_backend is None:
+                raise ValueError("--chat-name target requires a folder backend")
+            resolved = await resolve_chat_in_folder(
+                folder_backend,
+                folder_name=resolved_folder_name or "",
+                chat_name=chat_name or "",
+                folder_id=effective_folder_id,
+            )
+            tgt_id = resolved.chat_id
+            tgt_name = resolved.title
+
+        authorizer = _cli_authorizer(
+            config, resolver=resolver, folder_backend=folder_backend
+        )
+        return src_id, src_name, tgt_id, tgt_name, authorizer
+
+    if dry_run:
+
+        async def _resolve_only():
+            try:
+                _backend, folder_backend = await open_backends()
+                src_id, src_name, tgt_id, tgt_name, _auth = await _resolve_target(
+                    folder_backend
+                )
+                return src_id, src_name, tgt_id, tgt_name
+            finally:
+                try:
+                    await manager.disconnect()
+                except Exception:
+                    pass
+
+        try:
+            src_id, src_name, tgt_id, tgt_name = asyncio.run(_resolve_only())
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"messages forward failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        would = (
+            f"forward {list(message_ids)} from chat {src_id} to chat {tgt_id}"
+        )
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "messages.forward",
+            "would": would,
+            "resolved": {
+                "from_chat_id": src_id,
+                "from_chat_name": src_name,
+                "to_chat_id": tgt_id,
+                "to_chat_name": tgt_name,
+                "message_ids": list(message_ids),
+            },
+            "planned_actions": [would],
+            "warnings": [],
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            backend, folder_backend = await open_backends()
+            src_id, src_name, tgt_id, tgt_name, authorizer = (
+                await _resolve_target(folder_backend)
+            )
+            result = await forward_messages(
+                backend,
+                request=ForwardMessagesRequest(
+                    from_chat_id=src_id,
+                    to_chat_id=tgt_id,
+                    message_ids=message_ids,
+                    from_chat_name=src_name,
+                    to_chat_name=tgt_name,
+                ),
+                authorizer=authorizer,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"messages forward failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
+# --- notifications ----------------------------------------------------------
+
+notifications_app = typer.Typer(
+    help="Mute and unmute chat/contact notifications.", no_args_is_help=True
+)
+app.add_typer(notifications_app, name="notifications")
+
+
+def _build_notification_backends(config_path: Path | None):
+    """Open the Telethon-backed notification + folder backends.
+
+    ``_open`` returns ``(notification_backend, folder_backend)``. The folder
+    backend resolves ``--chat-name`` and feeds the authorizer's folder rules.
+    Tests monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.notifications import (
+            TelethonNotificationBackend,
+        )
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonNotificationBackend(client),
+            TelethonFolderBackend(client),
+        )
+
+    return config, manager, _open
+
+
+async def _resolve_notification_target(
+    *,
+    manager,
+    config,
+    folder_backend,
+    chat_id,
+    chat_name,
+    entity,
+    folder_name,
+    folder_id,
+):
+    """Resolve the mute/unmute target and build the authorizer.
+
+    Returns ``(telegram_chat_id, chat_name_for_log, authorizer)``. A resolver is
+    constructed only when ``--entity`` is used or a policy with ``chat`` rules is
+    configured, matching the lazy pattern used by ``messages send``.
+    """
+    from telegram_assistant.folders import resolve_chat_in_folder
+
+    resolver = None
+    if config.telegram.access is not None or entity is not None:
+        from telegram_assistant.entities import TelethonEntityResolver
+
+        resolver = TelethonEntityResolver(await manager.get_client())
+
+    if entity is not None:
+        assert resolver is not None
+        resolved_entity = await resolver.resolve(entity)
+        resolved_chat_id = resolved_entity.chat_id
+        chat_name_for_log = resolved_entity.title
+    elif chat_id is not None:
+        resolved_chat_id = chat_id
+        chat_name_for_log = None
+    else:
+        resolved = await resolve_chat_in_folder(
+            folder_backend,
+            folder_name=folder_name or "",
+            chat_name=chat_name or "",
+            folder_id=folder_id,
+        )
+        resolved_chat_id = resolved.chat_id
+        chat_name_for_log = resolved.title
+
+    authorizer = _cli_authorizer(
+        config, resolver=resolver, folder_backend=folder_backend
+    )
+    return resolved_chat_id, chat_name_for_log, authorizer
+
+
+@notifications_app.command("mute")
+def notifications_mute(
+    chat_id: int | None = typer.Option(
+        None, "--chat-id", help="Numeric Telegram chat id."
+    ),
+    chat_name: str | None = typer.Option(
+        None, "--chat-name", help="Chat title (resolved within --folder-name)."
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None, "--folder-id", help="Optional folder id cross-check."
+    ),
+    duration: int | None = typer.Option(
+        None,
+        "--duration",
+        help="Mute for this many hours; omit to mute indefinitely (forever).",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without muting.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Mute a chat or contact (forever, or for --duration hours)."""
+    from telegram_assistant.folders import FolderError
+    from telegram_assistant.notifications import MuteRequest, mute_chat
+
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if duration is not None and duration <= 0:
+        typer.echo("--duration must be a positive number of hours", err=True)
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_notification_backends(config_path)
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _resolve_only() -> tuple[int, str | None]:
+        try:
+            _backend, folder_backend = await open_backends()
+            tid, name, _auth = await _resolve_notification_target(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
+            return tid, name
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    if dry_run:
+        try:
+            tid, name = asyncio.run(_resolve_only())
+        except FolderError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"notifications mute failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        scope = f"for {duration}h" if duration is not None else "forever"
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "notifications.mute",
+            "would": f"mute chat {tid} {scope}",
+            "resolved": {
+                "telegram_chat_id": tid,
+                "chat_name": name,
+                "duration_hours": duration,
+                "forever": duration is None,
+            },
+            "planned_actions": [f"mute chat {tid} {scope}"],
+            "warnings": [],
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            backend, folder_backend = await open_backends()
+            tid, name, authorizer = await _resolve_notification_target(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
+            result = await mute_chat(
+                backend,
+                request=MuteRequest(
+                    telegram_chat_id=tid,
+                    duration_hours=duration,
+                    chat_name=name,
+                ),
+                authorizer=authorizer,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"notifications mute failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
+@notifications_app.command("unmute")
+def notifications_unmute(
+    chat_id: int | None = typer.Option(
+        None, "--chat-id", help="Numeric Telegram chat id."
+    ),
+    chat_name: str | None = typer.Option(
+        None, "--chat-name", help="Chat title (resolved within --folder-name)."
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None, "--folder-id", help="Optional folder id cross-check."
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without unmuting.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Restore normal notifications for a chat or contact."""
+    from telegram_assistant.folders import FolderError
+    from telegram_assistant.notifications import MuteRequest, unmute_chat
+
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_notification_backends(config_path)
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _resolve_only() -> tuple[int, str | None]:
+        try:
+            _backend, folder_backend = await open_backends()
+            tid, name, _auth = await _resolve_notification_target(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
+            return tid, name
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    if dry_run:
+        try:
+            tid, name = asyncio.run(_resolve_only())
+        except FolderError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"notifications unmute failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "notifications.unmute",
+            "would": f"unmute chat {tid}",
+            "resolved": {"telegram_chat_id": tid, "chat_name": name},
+            "planned_actions": [f"unmute chat {tid}"],
+            "warnings": [],
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            backend, folder_backend = await open_backends()
+            tid, name, authorizer = await _resolve_notification_target(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
+            result = await unmute_chat(
+                backend,
+                request=MuteRequest(telegram_chat_id=tid, chat_name=name),
+                authorizer=authorizer,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"notifications unmute failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
@@ -3369,6 +4332,215 @@ def folders_add_chat(
     except Exception as exc:
         _raise_for_access_or_entity_error(exc)
         typer.echo(f"folders add-chat failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True))
+
+
+@folders_app.command("remove-chat")
+def folders_remove_chat(
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder name (defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (must match exactly one chat already in the folder).",
+    ),
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id.",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without moving the chat.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Remove a chat from a folder (inverse of ``add-chat``)."""
+    from telegram_assistant.folders import (
+        FolderError,
+        remove_chat_from_folder,
+        resolve_chat_in_folder,
+        resolve_folder,
+    )
+
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    resolved_name, default_fid, cfg_path = _resolve_folder_name(
+        folder_name, config_path
+    )
+    effective_fid = folder_id if folder_id is not None else default_fid
+    _config, manager, open_backend = _build_folder_backend(cfg_path)
+
+    if dry_run:
+        async def _preview() -> dict[str, object]:
+            try:
+                backend = await open_backend()
+                snapshot = await resolve_folder(
+                    backend,
+                    folder_name=resolved_name,
+                    folder_id=effective_fid,
+                )
+                if entity is not None:
+                    from telegram_assistant.entities import (
+                        TelethonEntityResolver,
+                    )
+
+                    resolved_entity = await TelethonEntityResolver(
+                        await manager.get_client()
+                    ).resolve(entity)
+                    chat = await backend.resolve_chat(resolved_entity.chat_id)
+                elif chat_id is not None:
+                    chat = await backend.resolve_chat(chat_id)
+                else:
+                    chat = await resolve_chat_in_folder(
+                        backend,
+                        folder_name=resolved_name,
+                        chat_name=chat_name or "",
+                        folder_id=effective_fid,
+                    )
+                present = any(c.chat_id == chat.chat_id for c in snapshot.chats)
+                return {
+                    "folder_id": snapshot.folder_id,
+                    "folder_name": snapshot.folder_name,
+                    "chat_id": chat.chat_id,
+                    "chat_title": chat.title,
+                    "already_absent": not present,
+                }
+            finally:
+                try:
+                    await manager.disconnect()
+                except Exception:
+                    pass
+
+        try:
+            preview = asyncio.run(_preview())
+        except FolderError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"folders remove-chat failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        warnings: list[str] = []
+        if preview["already_absent"]:
+            warnings.append(
+                f"chat {preview['chat_id']} is not in folder "
+                f"{preview['folder_name']!r}; real run would be a no-op"
+            )
+            planned_actions: list[str] = [
+                f"no-op: chat {preview['chat_id']} not in folder "
+                f"{preview['folder_name']!r}"
+            ]
+        else:
+            planned_actions = [
+                f"remove chat {preview['chat_id']} ({preview['chat_title']!r}) from "
+                f"folder {preview['folder_name']!r} (folder_id={preview['folder_id']})"
+            ]
+        resolved_payload: dict[str, object] = {
+            "folder_id": preview["folder_id"],
+            "folder_name": preview["folder_name"],
+            "chat_id": preview["chat_id"],
+            "chat_title": preview["chat_title"],
+            "already_absent": preview["already_absent"],
+        }
+        if chat_name is not None:
+            resolved_payload["chat_name"] = chat_name
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "folders.remove_chat",
+            "would": (
+                f"remove chat {preview['chat_id']} from folder "
+                f"{preview['folder_name']!r}"
+            ),
+            "resolved": resolved_payload,
+            "planned_actions": planned_actions,
+            "warnings": warnings,
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            from telegram_assistant.access import Authorizer
+
+            backend = await open_backend()
+            access_cfg = (
+                getattr(_config.telegram, "access", None)
+                if _config is not None
+                else None
+            )
+            resolver = None
+            if access_cfg is not None or entity is not None:
+                from telegram_assistant.entities import TelethonEntityResolver
+
+                resolver = TelethonEntityResolver(await manager.get_client())
+            if entity is not None:
+                assert resolver is not None
+                chat_ref: str | int = (await resolver.resolve(entity)).chat_id
+            elif chat_id is not None:
+                chat_ref = chat_id
+            else:
+                resolved = await resolve_chat_in_folder(
+                    backend,
+                    folder_name=resolved_name,
+                    chat_name=chat_name or "",
+                    folder_id=effective_fid,
+                )
+                chat_ref = resolved.chat_id
+            authorizer = Authorizer(
+                access_cfg, resolver=resolver, folder_backend=backend
+            )
+            return await remove_chat_from_folder(
+                backend,
+                folder_name=resolved_name,
+                chat_ref=chat_ref,
+                folder_id=effective_fid,
+                authorizer=authorizer,
+            )
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"folders remove-chat failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
     typer.echo(json.dumps(payload, sort_keys=True))

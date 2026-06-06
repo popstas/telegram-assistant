@@ -1,5 +1,7 @@
 # Telegram message operations expansion
 
+Status: completed on 2026-06-06.
+
 ## Overview
 
 Implement the first six open `docs/TODO.md` items after the completed access/entity/read work:
@@ -73,10 +75,8 @@ ruff check src tests
   - `--caption` is not needed at first; keep `--text` as the caption/text field so existing command shape remains compact.
 - Media HTTP:
   - Add JSON fields to `POST /telegram/messages`: `files: list[str] | None`, `file_urls: list[str] | None`.
-  - Treat local paths as server-side paths. Do not add multipart upload in this plan; it needs storage and request-size policy not present in the project.
-  - Allow `files` and `file_urls` together as one attachment list.
-  - Validate local files exist, are regular files, and are not empty before calling Telethon.
-  - Validate URL attachments use `http` or `https`; do not prefetch remote URLs for size/type inspection.
+  - Review update: HTTP rejects server-local `files` paths to avoid host file disclosure. Use `file_urls` for HTTP media; CLI remains the local-file surface.
+  - Validate URL attachments use `http` or `https` with a host; do not prefetch remote URLs for size/type inspection.
 - Scheduled messages:
   - CLI accepts `--schedule-at` as ISO-8601 datetime and `--delay` as duration (`10m`, `2h`, `1d`).
   - HTTP accepts `schedule_at` ISO-8601 and `delay_seconds`.
@@ -106,136 +106,136 @@ ruff check src tests
 
 ### Task 1: Media send request model and domain behavior
 
-- [ ] Add attachment request/result dataclasses to `src/telegram_assistant/messages/service.py`.
-- [ ] Extend `SendMessageRequest` with `files: tuple[str, ...]`, `file_urls: tuple[str, ...]`, and `schedule_at: datetime | None`, while preserving existing text-only behavior.
-- [ ] Update `MessageBackend` protocol to accept optional `files`, `schedule_at`, and keep `topic_id`.
-- [ ] Validate:
+- [x] Add attachment request/result dataclasses to `src/telegram_assistant/messages/service.py`.
+- [x] Extend `SendMessageRequest` with `files: tuple[str, ...]`, `file_urls: tuple[str, ...]`, and `schedule_at: datetime | None`, while preserving existing text-only behavior.
+- [x] Update `MessageBackend` protocol to accept optional `files`, `schedule_at`, and keep `topic_id`.
+- [x] Validate:
   - text or at least one attachment is required;
   - attachment paths/URLs are non-empty;
   - media send is WRITE-gated before operation creation;
   - persisted request payload redacts service-command text as today and stores only attachment references, not file contents.
-- [ ] Add domain tests in `tests/test_messages.py` for text-only compatibility, media-only, media+caption, albums, empty request rejection, access denied before backend call, and replay behavior.
-- [ ] Run `.venv/bin/pytest -q tests/test_messages.py`.
+- [x] Add domain tests in `tests/test_messages.py` for text-only compatibility, media-only, media+caption, albums, empty request rejection, access denied before backend call, and replay behavior.
+- [x] Run `.venv/bin/pytest -q tests/test_messages.py`.
 
 ### Task 2: Telethon media and schedule adapter
 
-- [ ] Move the production message-send adapter out of `TelethonTopicBackend.send_message` fallback into `messages/telethon_backend.py` as `TelethonMessageBackend`.
-- [ ] Implement:
+- [x] Move the production message-send adapter out of `TelethonTopicBackend.send_message` fallback into `messages/telethon_backend.py` as `TelethonMessageBackend`.
+- [x] Implement:
   - `client.send_message(chat_id, text, reply_to=topic_id, schedule=schedule_at)` for text-only;
   - `client.send_file(chat_id, files, caption=text or None, reply_to=topic_id, schedule=schedule_at)` for attachments.
-- [ ] Normalize return message ids:
+- [x] Normalize return message ids:
   - single message returns one id;
   - album returns the first id plus `telegram_message_ids` in the result payload.
-- [ ] Translate Telethon `FloodWaitError` with `translate_flood_wait`.
-- [ ] Update HTTP app default `message_backend_factory` to use `TelethonMessageBackend` instead of falling back to topic backend.
-- [ ] Add adapter tests in `tests/test_messages.py` or a new `tests/test_messages_telethon_backend.py` using a fake client.
-- [ ] Run `.venv/bin/pytest -q tests/test_messages.py tests/test_app_skeleton.py`.
+- [x] Translate Telethon `FloodWaitError` with `translate_flood_wait`.
+- [x] Update HTTP app default `message_backend_factory` to use `TelethonMessageBackend` instead of falling back to topic backend.
+- [x] Add adapter tests in `tests/test_messages.py` or a new `tests/test_messages_telethon_backend.py` using a fake client.
+- [x] Run `.venv/bin/pytest -q tests/test_messages.py tests/test_app_skeleton.py`.
 
 ### Task 3: Wire media and schedule into CLI/HTTP
 
-- [ ] CLI `messages send`:
+- [x] CLI `messages send`:
   - add repeated `--file`;
   - add repeated `--file-url`;
   - add `--schedule-at`;
   - add `--delay`;
   - include attachments and scheduling in `--dry-run` JSON.
-- [ ] HTTP `POST /telegram/messages`:
+- [x] HTTP `POST /telegram/messages`:
   - add `files`, `file_urls`, `schedule_at`, `delay_seconds`;
   - validate schedule shape with the Pydantic model;
   - return media ids and scheduling fields in the response.
-- [ ] Add parsing helper for relative delays in CLI and HTTP; test `10m`, `2h`, `1d`, invalid units, and past absolute dates.
-- [ ] Decide past schedule behavior in code: reject past `schedule_at` with exit code 2 / HTTP 400.
-- [ ] Add CLI tests for dry-run and real fake-backed media/scheduled sends.
-- [ ] Add HTTP tests for media and scheduled sends.
-- [ ] Run `.venv/bin/pytest -q tests/test_messages.py tests/test_dry_run_members_messages.py`.
+- [x] Add parsing helper for relative delays in CLI and HTTP; test `10m`, `2h`, `1d`, invalid units, and past absolute dates.
+- [x] Decide past schedule behavior in code: reject past `schedule_at` with exit code 2 / HTTP 400.
+- [x] Add CLI tests for dry-run and real fake-backed media/scheduled sends.
+- [x] Add HTTP tests for media and scheduled sends.
+- [x] Run `.venv/bin/pytest -q tests/test_messages.py tests/test_dry_run_members_messages.py`.
 
 ### Task 4: Folder remove-chat domain, Telethon adapter, CLI, and HTTP
 
-- [ ] Extend `FolderBackend` with `remove_chat_from_folder(folder_id: int, chat_id: int) -> None`.
-- [ ] Add `remove_chat_from_folder(...)` to `folders/service.py`:
+- [x] Extend `FolderBackend` with `remove_chat_from_folder(folder_id: int, chat_id: int) -> None`.
+- [x] Add `remove_chat_from_folder(...)` to `folders/service.py`:
   - resolve folder;
   - resolve chat;
   - require WRITE on the resolved chat;
   - if absent, return `already_absent=True`;
   - if present, call backend and return serializable result.
-- [ ] Implement Telethon removal by editing the target dialog filter `include_peers` and `pinned_peers`, then calling `UpdateDialogFilterRequest`.
-- [ ] Add `folders remove-chat` CLI with `--dry-run`, mirroring `folders add-chat`.
-- [ ] Add `DELETE /telegram/folders/{folder_name}/chats` with the same body shape as add-chat.
-- [ ] Add tests in `tests/test_folders.py`, `tests/test_dry_run_folders_operations.py`, and HTTP coverage for absent/idempotent, present/remove, access denied, and backend failure.
-- [ ] Update README and skill catalog for `folders remove-chat`.
-- [ ] Run `.venv/bin/pytest -q tests/test_folders.py tests/test_dry_run_folders_operations.py tests/test_skill_inventory.py`.
+- [x] Implement Telethon removal by editing the target dialog filter `include_peers` and `pinned_peers`, then calling `UpdateDialogFilterRequest`.
+- [x] Add `folders remove-chat` CLI with `--dry-run`, mirroring `folders add-chat`.
+- [x] Add `DELETE /telegram/folders/{folder_name}/chats` with the same body shape as add-chat.
+- [x] Add tests in `tests/test_folders.py`, `tests/test_dry_run_folders_operations.py`, and HTTP coverage for absent/idempotent, present/remove, access denied, and backend failure.
+- [x] Update README and skill catalog for `folders remove-chat`.
+- [x] Run `.venv/bin/pytest -q tests/test_folders.py tests/test_dry_run_folders_operations.py tests/test_skill_inventory.py`.
 
 ### Task 5: Notifications mute/unmute
 
-- [ ] Create `src/telegram_assistant/notifications/service.py` with:
+- [x] Create `src/telegram_assistant/notifications/service.py` with:
   - `NotificationBackend` protocol;
   - `MuteRequest`, `MuteResult`;
   - `mute_chat(...)` and `unmute_chat(...)`.
-- [ ] WRITE-gate both operations after entity resolution.
-- [ ] Implement `src/telegram_assistant/notifications/telethon_backend.py` using `UpdateNotifySettings`:
+- [x] WRITE-gate both operations after entity resolution.
+- [x] Implement `src/telegram_assistant/notifications/telethon_backend.py` using `UpdateNotifySettings`:
   - mute until a date when duration is provided;
   - mute indefinitely when duration is omitted;
   - unmute restores normal notification settings.
-- [ ] Register HTTP backend factory in `http_api/app.py`.
-- [ ] Add `src/telegram_assistant/http_api/notifications.py`.
-- [ ] Add CLI group `notifications` with `mute` and `unmute`, including `--dry-run`.
-- [ ] Add tests for domain validation, access denial, CLI dry-run, HTTP success/403/503, and fake Telethon request construction.
-- [ ] Update README and skill catalog.
-- [ ] Run `.venv/bin/pytest -q tests/test_notifications.py tests/test_skill_inventory.py`.
+- [x] Register HTTP backend factory in `http_api/app.py`.
+- [x] Add `src/telegram_assistant/http_api/notifications.py`.
+- [x] Add CLI group `notifications` with `mute` and `unmute`, including `--dry-run`.
+- [x] Add tests for domain validation, access denial, CLI dry-run, HTTP success/403/503, and fake Telethon request construction.
+- [x] Update README and skill catalog.
+- [x] Run `.venv/bin/pytest -q tests/test_notifications.py tests/test_skill_inventory.py`.
 
 ### Task 6: Reactions
 
-- [ ] Add reaction request/result types and backend protocol in `messages/service.py` or a small `messages/reactions.py` if `service.py` becomes too large.
-- [ ] Implement `set_message_reaction(...)`:
+- [x] Add reaction request/result types and backend protocol in `messages/service.py` or a small `messages/reactions.py` if `service.py` becomes too large.
+- [x] Implement `set_message_reaction(...)`:
   - require `message_id > 0`;
   - require either `emoji` or `clear=True`, not both;
   - WRITE-gate the target chat;
   - call backend and return `{telegram_chat_id, telegram_message_id, emoji, cleared}`.
-- [ ] Implement Telethon reaction adapter using `SendReaction`.
-- [ ] Add CLI `messages react` with `--message-id`, `--emoji`, `--clear`, entity targeting, and `--dry-run`.
-- [ ] Add HTTP `POST /telegram/messages/reactions`.
-- [ ] Add tests for set, clear, invalid shape, access denied, CLI dry-run, HTTP success/400/403, and fake Telethon request construction.
-- [ ] Update README and skill catalog.
-- [ ] Run `.venv/bin/pytest -q tests/test_messages_reactions.py tests/test_skill_inventory.py`.
+- [x] Implement Telethon reaction adapter using `SendReaction`.
+- [x] Add CLI `messages react` with `--message-id`, `--emoji`, `--clear`, entity targeting, and `--dry-run`.
+- [x] Add HTTP `POST /telegram/messages/reactions`.
+- [x] Add tests for set, clear, invalid shape, access denied, CLI dry-run, HTTP success/400/403, and fake Telethon request construction.
+- [x] Update README and skill catalog.
+- [x] Run `.venv/bin/pytest -q tests/test_messages_reactions.py tests/test_skill_inventory.py`.
 
 ### Task 7: Forward messages
 
-- [ ] Add forward request/result types and backend protocol in `messages/service.py` or `messages/forwarding.py`.
-- [ ] Implement `forward_messages(...)`:
+- [x] Add forward request/result types and backend protocol in `messages/service.py` or `messages/forwarding.py`.
+- [x] Implement `forward_messages(...)`:
   - validate one or more positive `message_ids`;
   - resolve source and target before authorization in surfaces;
   - require READ on source and WRITE on target;
   - call backend and return forwarded ids.
-- [ ] Implement Telethon adapter with `client.forward_messages(target, message_ids, from_peer=source)`.
-- [ ] Add CLI `messages forward`:
+- [x] Implement Telethon adapter with `client.forward_messages(target, message_ids, from_peer=source)`.
+- [x] Add CLI `messages forward`:
   - source: `--from-chat-id` / `--from-entity`;
   - target: existing target flags or `--to-chat-id` / `--to-entity`;
   - repeated `--message-id`;
   - `--dry-run`.
-- [ ] Add HTTP `POST /telegram/messages/forward`.
-- [ ] Add tests for validation, source READ denial, target WRITE denial, CLI dry-run, HTTP success/403, and fake Telethon request construction.
-- [ ] Update README and skill catalog.
-- [ ] Run `.venv/bin/pytest -q tests/test_messages_forward.py tests/test_skill_inventory.py`.
+- [x] Add HTTP `POST /telegram/messages/forward`.
+- [x] Add tests for validation, source READ denial, target WRITE denial, CLI dry-run, HTTP success/403, and fake Telethon request construction.
+- [x] Update README and skill catalog.
+- [x] Run `.venv/bin/pytest -q tests/test_messages_forward.py tests/test_skill_inventory.py`.
 
 ### Task 8: Documentation, skill sync, e2e, and full verification
 
-- [ ] Update `README.md` Commands and usage notes for:
+- [x] Update `README.md` Commands and usage notes for:
   - media/scheduled `messages send`;
   - `messages react`;
   - `messages forward`;
   - `notifications mute/unmute`;
   - `folders remove-chat`.
-- [ ] Update `skills/telegram-assistant/SKILL.md` resource/action catalog, confirmation buckets, dry-run supported command list, and per-command extraction rules.
-- [ ] Sync the skill file to `~/.claude/skills/telegram-assistant/SKILL.md` in the same change.
-- [ ] Extend live e2e scripts with conservative cases:
+- [x] Update `skills/telegram-assistant/SKILL.md` resource/action catalog, confirmation buckets, dry-run supported command list, and per-command extraction rules.
+- [x] Sync the skill file to `~/.claude/skills/telegram-assistant/SKILL.md` in the same change. (global path is hardlinked to the repo file — same inode, always in sync)
+- [x] Extend live e2e scripts with conservative cases:
   - scheduled message with a near-future time only in the test chat;
   - folder remove/add round-trip for the test chat;
   - reaction set/clear on a message created during the script;
   - forward a test message into the test chat;
   - media send using a small generated temporary text/image file.
-- [ ] Run `.venv/bin/pytest -q`.
-- [ ] Run `ruff check src tests`.
-- [ ] Run live e2e scripts only when an authorized test session is available:
+- [x] Run `.venv/bin/pytest -q`. (734 passed)
+- [x] Run `ruff check src tests`. (All checks passed)
+- [x] Run live e2e scripts only when an authorized test session is available: (skipped — requires an authorized Telethon session + live Telegram account, not available in this environment)
 
 ```bash
 bash scripts/e2e_test.sh

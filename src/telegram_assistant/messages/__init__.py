@@ -1,5 +1,22 @@
 """Message-send domain shared by HTTP, CLI, and the worker."""
 
+from telegram_assistant.messages.attachments import (
+    AttachmentError,
+    validate_file_urls,
+    validate_local_files,
+)
+from telegram_assistant.messages.forwarding import (
+    ForwardBackend,
+    ForwardMessagesRequest,
+    ForwardMessagesResult,
+    forward_messages,
+)
+from telegram_assistant.messages.reactions import (
+    ReactionBackend,
+    SendReactionRequest,
+    SendReactionResult,
+    set_message_reaction,
+)
 from telegram_assistant.messages.service import (
     MassSendItemResult,
     MassSendRequest,
@@ -10,16 +27,24 @@ from telegram_assistant.messages.service import (
     MessageSendNeedsReview,
     MessageSendPending,
     RecentMessage,
+    ScheduleError,
     SendMessageRequest,
     SendMessageResult,
     get_recent_messages,
     is_service_command,
     mass_send_message,
+    parse_delay,
+    parse_schedule_at,
     redact_message_text,
+    resolve_schedule_at,
     send_message,
 )
 
 __all__ = [
+    "AttachmentError",
+    "ForwardBackend",
+    "ForwardMessagesRequest",
+    "ForwardMessagesResult",
     "MassSendItemResult",
     "MassSendRequest",
     "MassSendResult",
@@ -28,12 +53,23 @@ __all__ = [
     "MessageSendFailed",
     "MessageSendNeedsReview",
     "MessageSendPending",
+    "ReactionBackend",
     "RecentMessage",
+    "ScheduleError",
     "SendMessageRequest",
     "SendMessageResult",
+    "SendReactionRequest",
+    "SendReactionResult",
+    "forward_messages",
     "get_recent_messages",
     "is_service_command",
     "mass_send_message",
+    "parse_delay",
+    "parse_schedule_at",
     "redact_message_text",
+    "resolve_schedule_at",
     "send_message",
+    "set_message_reaction",
+    "validate_file_urls",
+    "validate_local_files",
 ]

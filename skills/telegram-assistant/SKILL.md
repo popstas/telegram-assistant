@@ -60,8 +60,10 @@ Commands fall into three buckets:
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `topics create`, `topics close`, `messages send` (single chat),
-   `folders add-chat`, `operations retry`. Always: prepare command → run
-   with `--dry-run` →
+   `messages react`, `messages forward`, `notifications mute`,
+   `notifications unmute`, `folders add-chat`, `folders remove-chat`,
+   `operations retry`. Always:
+   prepare command → run with `--dry-run` →
    show the plan and dry-run output → wait for explicit human confirmation
    → run the same command without `--dry-run`.
 3. **State-changing, bulk or destructive** — `topics bulk-create`,
@@ -136,7 +138,9 @@ not skip steps, even if the request looks obvious.
    `--dry-run` first. The supported set is: `groups create`,
    `groups set-layout`, `topics create`, `topics bulk-create`,
    `topics close`, `members bulk-add`, `members bulk-remove`,
-   `messages send`, `folders add-chat`, `operations retry`.
+   `messages send`, `messages react`, `messages forward`,
+   `notifications mute`, `notifications unmute`, `folders add-chat`,
+   `folders remove-chat`, `operations retry`.
 8. Present a short plan to the human: what was found (chat id, folder,
    matched users), the full command that would run, and the relevant parts
    of the dry-run output (`status = dry_run`, planned actions, validation
@@ -184,8 +188,13 @@ agent stops and asks for clarification — it does not invent a new path.
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
+| `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
+| `messages` | `forward` | Forward one or more messages (`--message-id`, repeatable) from a source to a target chat (READ-gated source, WRITE-gated target). | `telegram-assistant messages forward ...` |
+| `notifications` | `mute` | Mute a chat/contact's notifications, forever or for `--duration` hours. | `telegram-assistant notifications mute ...` |
+| `notifications` | `unmute` | Restore normal notifications for a chat/contact. | `telegram-assistant notifications unmute ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
 | `folders` | `add-chat` | Move an existing chat into a folder. | `telegram-assistant folders add-chat ...` |
+| `folders` | `remove-chat` | Remove a chat from a folder (idempotent no-op if absent). | `telegram-assistant folders remove-chat ...` |
 | `operations` | `status` | Read-only: show queue status for a previously created operation. | `telegram-assistant operations status ...` |
 | `operations` | `retry` | Reset a failed or `needs_review` operation so the worker can re-run it. | `telegram-assistant operations retry ...` |
 
@@ -200,9 +209,13 @@ when a real (non-dry-run) call is allowed; **Typical errors** = error
 messages the agent must surface verbatim instead of paraphrasing.
 
 Most chat-targeting commands (`messages send`, `messages recent`,
-`topics create`/`close`/`bulk-create`, `members bulk-add`/`bulk-remove`,
-`folders add-chat`) also accept `--entity` as a flexible alternative to
-`--chat-id` / `--chat-name`. `--entity` takes a numeric id (with or
+`messages react`, `topics create`/`close`/`bulk-create`,
+`members bulk-add`/`bulk-remove`, `notifications mute`/`unmute`,
+`folders add-chat`/`remove-chat`) also accept
+`--entity` as a flexible alternative to
+`--chat-id` / `--chat-name`. `messages forward` uses the same reference
+forms via `--from-entity` / `--to-entity` (alternatives to
+`--from-chat-id` / `--to-chat-id`). `--entity` takes a numeric id (with or
 without the `-100` prefix), an `@username`, a `t.me` / invite link, a
 phone, or an exact chat title; exactly one of `--chat-id` / `--chat-name`
 / `--entity` is allowed per call. When the resolver cannot resolve the
@@ -390,24 +403,40 @@ edits `data/config.yml` to widen access on its own.
 
 #### `messages` / `send`
 
-- Extract: `--text`, chat/topic references, optional `--operation-id`.
-- Required flags: `--text` plus exactly one targeting shape — targeted
+- Extract: `--text`, chat/topic references, optional `--operation-id`,
+  optional attachments (`--file` for a local file path, `--file-url`
+  for an http(s) URL — both repeatable), optional scheduling
+  (`--schedule-at` ISO-8601 datetime, or `--delay` relative duration
+  like `10m`, `2h`, `1d`).
+- Required flags: exactly one targeting shape — targeted
   (`--chat-id`/`--chat-name` + optional `--topic-id`/`--topic-name`)
   or mass (`--mass` or no chat ref, plus `--topic-name` and
-  `--folder-name`).
+  `--folder-name`). `--text` is required unless at least one
+  `--file`/`--file-url` is supplied (in which case `--text` is the
+  caption). Attachments and scheduling are targeted-only — never combine
+  them with `--mass`.
 - From config: `--folder-name` default for both targeted resolution and
   mass mode.
-- Temp file: no — message text goes via `--text`. If the human pastes a
-  long multi-line message, escape it for the shell; do not write it to
-  a file the CLI cannot read.
-- Automation: pass service commands (`/task 123456`) verbatim.
+- Temp file: no — message text goes via `--text`, attachments via
+  repeated `--file`/`--file-url`. `--file` points at a path that exists
+  on the server running the CLI; the agent does not upload bytes. If the
+  human pastes a long multi-line message, escape it for the shell; do not
+  write it to a file the CLI cannot read.
+- Automation: pass service commands (`/task 123456`) verbatim. Pass at
+  most one of `--schedule-at` / `--delay`. Map «отправь через 2 часа» →
+  `--delay 2h`, «запланируй на 2026-06-07T09:00» → `--schedule-at`. The
+  dry-run JSON echoes `files`, `file_urls`, `schedule_at`, and
+  `scheduled` so the plan can show attachments and the resolved send
+  time.
 - Confirmation: required after dry-run. Mass mode plans must list every
   resolved chat row and call out `would_skip` rows with their reason
   (`topic_not_found`, `topic_ambiguous`, `list_topics_failed: ...`).
-- Typical errors: `messages send requires non-empty --text`,
-  `--mass cannot be combined with --chat-id or --chat-name`,
-  `mass mode requires --topic-name (and --folder-name resolves the
-  folder)`, `MessageSendNeedsReview`.
+- Typical errors: `messages send requires non-empty --text`
+  (when no attachments), `--mass cannot be combined with --chat-id or
+  --chat-name`, `--file/--file-url/--schedule-at/--delay are only
+  supported for targeted sends`, `provide only one of --schedule-at or
+  --delay`, past-schedule rejection (exit code 2), missing/empty
+  attachment file, non-http(s) `--file-url`, `MessageSendNeedsReview`.
 
 #### `messages` / `recent`
 
@@ -426,6 +455,76 @@ edits `data/config.yml` to widen access on its own.
 - Typical errors: `exactly one of --chat-id, --chat-name, or --entity
   must be supplied`, `access denied ...` (exit code 3), entity
   not-found / ambiguous (exit code 2).
+
+#### `messages` / `react`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  `--message-id` (the message to react to), and either `--emoji` (set) or
+  `--clear` (remove).
+- Required flags: exactly one chat reference, `--message-id`, and exactly
+  one of `--emoji` / `--clear`.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first, show
+  the plan, wait for confirmation, then run without `--dry-run`. Map
+  «поставь 👍 на сообщение N» → `--emoji 👍 --message-id N`; «убери реакцию»
+  → `--clear`.
+- Confirmation: required (bucket 2).
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity must
+  be supplied`, `--message-id must be a positive integer`, `provide either
+  --emoji or --clear, not both`, `access denied ...` (exit code 3), entity
+  not-found / ambiguous (exit code 2).
+
+#### `messages` / `forward`
+
+- Extract: source reference (`--from-chat-id` / `--from-entity`), target
+  reference (`--to-chat-id` / `--to-entity`, or the normal target aliases
+  `--chat-id` / `--chat-name` / `--entity`), and one or more `--message-id`
+  (repeat the flag per message to forward).
+- Required flags: exactly one source reference, exactly one target reference,
+  and at least one `--message-id`.
+- From config: `--folder-name` default when resolving target `--chat-name`.
+- Temp file: no.
+- Automation: none — forwarding is READ-gated on the source and WRITE-gated
+  on the target. Run `--dry-run` first, show the plan, wait for confirmation,
+  then run without `--dry-run`. Map «перешли сообщение N из чата A в чат B» →
+  `--from-entity A --to-entity B --message-id N`.
+- Confirmation: required (bucket 2).
+- Typical errors: `at least one --message-id is required`, `every
+  --message-id must be a positive integer`, `exactly one of --from-chat-id or
+  --from-entity must be supplied`, `exactly one target must be supplied`,
+  `access denied ...` (exit code 3), entity
+  not-found / ambiguous (exit code 2).
+
+#### `notifications` / `mute`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  optional `--duration` (mute window in hours).
+- Required flags: exactly one chat reference.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first,
+  show the plan, wait for confirmation, then run without `--dry-run`.
+  Omit `--duration` to mute forever; pass it only when the human names a
+  number of hours («замьють на 3 часа» → `--duration 3`).
+- Confirmation: required (bucket 2).
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity
+  must be supplied`, `--duration must be a positive number of hours`,
+  `access denied ...` (exit code 3), entity not-found / ambiguous (exit
+  code 2).
+
+#### `notifications` / `unmute`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`).
+- Required flags: exactly one chat reference.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first,
+  show the plan, wait for confirmation, then run without `--dry-run`.
+- Confirmation: required (bucket 2).
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity
+  must be supplied`, `access denied ...` (exit code 3), entity not-found
+  / ambiguous (exit code 2).
 
 #### `folders` / `inspect`
 
@@ -451,6 +550,20 @@ edits `data/config.yml` to widen access on its own.
   real run unless they insist.
 - Typical errors: `exactly one of --chat-id or --chat-name must be
   supplied`, `FolderError`.
+
+#### `folders` / `remove-chat`
+
+- Extract: chat reference (`--chat-name` / `--chat-id` / `--entity`),
+  optional `--folder-name`.
+- Required flags: exactly one of `--chat-name` / `--chat-id` / `--entity`.
+- From config: `--folder-name` default.
+- Temp file: no.
+- Automation: none beyond defaulting the folder name.
+- Confirmation: required after dry-run; if the dry-run reports
+  `already_absent: true`, restate that to the human and skip the real run
+  unless they insist.
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity must
+  be supplied`, `FolderError`.
 
 #### `operations` / `status`
 
@@ -724,6 +837,32 @@ Request: «Напомни во всех чатах Planfix clients в топик
 4. Require an explicit confirmation that names the chat count before
    re-running without `--dry-run`.
 
+### `messages send` — media / scheduled
+
+Request: «Отправь файл /srv/exports/report.pdf в чат Клиент / проект
+через 2 часа.»
+
+1. Resource/action: `messages` / `send`. Targeted send with one
+   attachment and a relative delay.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant messages send \
+     --chat-name "Клиент / проект" \
+     --folder-name "Planfix clients" \
+     --file /srv/exports/report.pdf \
+     --text "Отчёт" \
+     --delay 2h \
+     --dry-run
+   ```
+
+3. Show resolved chat id, the `files` / `file_urls` lists, and the
+   resolved `schedule_at` / `scheduled` fields from the dry-run JSON.
+   For URL attachments use `--file-url https://...` (repeatable); for an
+   absolute send time use `--schedule-at 2026-06-07T09:00:00`. Pass at
+   most one of `--schedule-at` / `--delay`.
+4. Wait for confirmation, then re-run without `--dry-run`.
+
 ### `messages recent`
 
 Request: «Покажи последние сообщения в чате Клиент / проект.»
@@ -775,6 +914,25 @@ Request: «Перенеси чат Клиент / проект в папку Pla
 3. Show `folder_id`, resolved chat, and `already_in_folder`. If the
    chat is already there, restate that and skip the real run unless
    the human insists.
+4. Otherwise wait for confirmation, then run without `--dry-run`.
+
+### `folders remove-chat`
+
+Request: «Убери чат Клиент / проект из папки Planfix clients.»
+
+1. Resource/action: `folders` / `remove-chat`.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant folders remove-chat \
+     --folder-name "Planfix clients" \
+     --chat-name "Клиент / проект" \
+     --dry-run
+   ```
+
+3. Show `folder_id`, resolved chat, and `already_absent`. If the chat is
+   not in the folder, restate that and skip the real run unless the human
+   insists.
 4. Otherwise wait for confirmation, then run without `--dry-run`.
 
 ### `operations status`

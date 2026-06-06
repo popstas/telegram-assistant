@@ -103,6 +103,9 @@ class FolderBackend(Protocol):
     async def add_chat_to_folder(self, folder_id: int, chat_id: int) -> None:
         ...
 
+    async def remove_chat_from_folder(self, folder_id: int, chat_id: int) -> None:
+        ...
+
 
 async def resolve_folder(
     backend: FolderBackend,
@@ -232,4 +235,62 @@ async def add_chat_to_folder(
         "chat_id": chat.chat_id,
         "title": chat.title,
         "already_in_folder": False,
+    }
+
+
+async def remove_chat_from_folder(
+    backend: FolderBackend,
+    *,
+    folder_name: str,
+    chat_ref: str | int,
+    folder_id: int | None = None,
+    authorizer: Authorizer | None = None,
+) -> dict[str, Any]:
+    """Remove ``chat_ref`` from ``folder_name``.
+
+    The inverse of :func:`add_chat_to_folder`. Returns a serialisable result
+    describing the outcome. If the chat is not in the folder, returns
+    ``already_absent=True`` without calling the backend mutation — this keeps
+    the call idempotent. Backend errors during the mutation surface as
+    :class:`FolderPeerFailureError` so the worker layer marks the operation
+    ``needs_review`` instead of treating it as a silent success.
+    """
+    snapshot = await resolve_folder(
+        backend, folder_name=folder_name, folder_id=folder_id
+    )
+    chat = await backend.resolve_chat(chat_ref)
+    present = any(c.chat_id == chat.chat_id for c in snapshot.chats)
+    # Removing a present chat mutates that chat, so require chat WRITE. If the
+    # chat is already absent, the operation is an idempotent folder no-op; allow
+    # either direct chat WRITE or WRITE on the target folder so retries still
+    # work for folder-scoped policies after the first removal changes membership.
+    if authorizer is not None:
+        if present:
+            await authorizer.require(chat.chat_id, AccessLevel.WRITE)
+        else:
+            if not await authorizer.allows(chat.chat_id, AccessLevel.WRITE):
+                await authorizer.require_folder(snapshot.folder_name, AccessLevel.WRITE)
+    if not present:
+        return {
+            "folder_id": snapshot.folder_id,
+            "folder_name": snapshot.folder_name,
+            "chat_id": chat.chat_id,
+            "title": chat.title,
+            "already_absent": True,
+        }
+    try:
+        await backend.remove_chat_from_folder(snapshot.folder_id, chat.chat_id)
+    except FolderError:
+        raise
+    except Exception as exc:
+        raise FolderPeerFailureError(
+            f"failed to remove chat {chat.chat_id} from folder "
+            f"{folder_name!r}: {exc}"
+        ) from exc
+    return {
+        "folder_id": snapshot.folder_id,
+        "folder_name": snapshot.folder_name,
+        "chat_id": chat.chat_id,
+        "title": chat.title,
+        "already_absent": False,
     }

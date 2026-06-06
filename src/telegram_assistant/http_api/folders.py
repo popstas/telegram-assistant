@@ -17,6 +17,7 @@ from telegram_assistant.folders import (
     FolderPeerFailureError,
     add_chat_to_folder,
     inspect_folder,
+    remove_chat_from_folder,
     resolve_chat_in_folder,
 )
 from telegram_assistant.http_api.access import (
@@ -136,6 +137,45 @@ def build_router() -> APIRouter:
                 )
                 chat_ref = resolved.chat_id
             result = await add_chat_to_folder(
+                backend,
+                folder_name=folder_name,
+                chat_ref=chat_ref,
+                folder_id=body.folder_id,
+                authorizer=authorizer,
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise _translate_folder_error(exc) from exc
+        return result
+
+    @router.delete("/folders/{folder_name}/chats")
+    async def remove_chat(
+        folder_name: str,
+        body: AddChatRequest,
+        request: Request,
+    ) -> dict[str, Any]:
+        backend = _backend_or_503(request)
+        if body.entity is not None:
+            chat_ref: str | int = await resolve_entity_chat_id(request, body.entity)
+        elif body.chat_id is not None:
+            chat_ref = body.chat_id
+        else:
+            chat_ref = None  # type: ignore[assignment]
+        authorizer = build_authorizer(request, folder_backend=backend)
+        try:
+            if chat_ref is None:
+                # chat_name -> chat_id via folder membership lookup
+                resolved = await resolve_chat_in_folder(
+                    backend,
+                    folder_name=folder_name,
+                    chat_name=body.chat_name or "",
+                    folder_id=body.folder_id,
+                )
+                chat_ref = resolved.chat_id
+            result = await remove_chat_from_folder(
                 backend,
                 folder_name=folder_name,
                 chat_ref=chat_ref,
