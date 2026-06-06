@@ -1,13 +1,19 @@
-"""Telethon-backed :class:`MessageReadBackend` implementation.
+"""Telethon-backed message adapters.
 
 Kept separate from :mod:`service` so the domain layer stays free of Telethon
-imports. Translates the get-recent read op into ``iter_messages`` and maps each
-Telethon message onto a :class:`RecentMessage` (id, sender, date, reply_to,
-text/media summary). ``FloodWaitError`` is translated, never swallowed.
+imports. Two adapters live here:
+
+* :class:`TelethonMessageReadBackend` — the get-recent read op, translating
+  ``iter_messages`` into :class:`RecentMessage` rows.
+* :class:`TelethonMessageBackend` — the write side (text, media, scheduled
+  sends), implementing the :class:`MessageBackend` protocol.
+
+``FloodWaitError`` is translated in both, never swallowed.
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from telegram_assistant.messages.service import RecentMessage
@@ -64,4 +70,72 @@ class TelethonMessageReadBackend:
         return out
 
 
-__all__ = ["TelethonMessageReadBackend"]
+def _message_id(sent: Any) -> int:
+    """Return the integer id of a single Telethon ``Message`` result."""
+    return int(getattr(sent, "id", 0))
+
+
+def _message_ids(sent: Any) -> int | list[int]:
+    """Normalise a Telethon send result into one id or a list of ids.
+
+    ``send_message`` returns a single ``Message``. ``send_file`` returns a
+    single ``Message`` for one attachment and a ``list[Message]`` (an album)
+    for several. The service layer turns a list into the album result shape.
+    """
+    if isinstance(sent, (list, tuple)):
+        return [_message_id(m) for m in sent]
+    return _message_id(sent)
+
+
+class TelethonMessageBackend:
+    """Adapter from the Telethon ``TelegramClient`` to :class:`MessageBackend`.
+
+    Handles text-only sends via ``send_message`` and attachment sends (single
+    file or album) via ``send_file``. ``schedule_at`` defers delivery; ``text``
+    doubles as the caption when attachments are present and may be empty for a
+    media-only send. ``FloodWaitError`` is translated so the worker queue can
+    pause-and-retry instead of marking the operation as a generic failure.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        topic_id: int | None = None,
+        files: tuple[str, ...] = (),
+        schedule_at: datetime | None = None,
+    ) -> int | list[int]:
+        files = tuple(files)
+        try:
+            if files:
+                kwargs: dict[str, Any] = {
+                    # An empty caption must be ``None`` so Telethon doesn't send
+                    # a stray empty-text message alongside the media.
+                    "caption": text or None,
+                }
+                if topic_id is not None:
+                    kwargs["reply_to"] = topic_id
+                if schedule_at is not None:
+                    kwargs["schedule"] = schedule_at
+                sent = await self._client.send_file(
+                    chat_id,
+                    list(files),
+                    **kwargs,
+                )
+            else:
+                kwargs = {}
+                if topic_id is not None:
+                    kwargs["reply_to"] = topic_id
+                if schedule_at is not None:
+                    kwargs["schedule"] = schedule_at
+                sent = await self._client.send_message(chat_id, text, **kwargs)
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        return _message_ids(sent)
+
+
+__all__ = ["TelethonMessageReadBackend", "TelethonMessageBackend"]

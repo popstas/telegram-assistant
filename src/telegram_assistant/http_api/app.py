@@ -176,6 +176,32 @@ def _default_group_backend_factory(
     return _factory
 
 
+def _default_message_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> MessageBackendFactory:
+    """Build a Telethon-backed message-send backend factory.
+
+    Mirrors :func:`_default_folder_backend_factory`: returns ``None`` until a
+    Telethon client is available so the messages router can return 503. Uses
+    the dedicated :class:`TelethonMessageBackend` (text, media, scheduled
+    sends) rather than the topic backend's text-only fallback.
+    """
+
+    def _factory(_request: Request) -> MessageBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonMessageBackend,
+        )
+
+        return TelethonMessageBackend(client)
+
+    return _factory
+
+
 def _default_message_read_backend_factory(
     session_manager: TelethonSessionManager | None,
 ) -> MessageReadBackendFactory:
@@ -359,10 +385,11 @@ def create_app(
         if resolver_factory is not None
         else _default_resolver_factory(session_manager)
     )
-    # When no dedicated message backend is supplied, the messages router falls
-    # back to the topic backend factory at request time (the production
-    # Telethon adapter for topics already implements `send_message`).
-    app.state.message_backend_factory = message_backend_factory
+    app.state.message_backend_factory = (
+        message_backend_factory
+        if message_backend_factory is not None
+        else _default_message_backend_factory(session_manager)
+    )
     app.state.message_read_backend_factory = (
         message_read_backend_factory
         if message_read_backend_factory is not None

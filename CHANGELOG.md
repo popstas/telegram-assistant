@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- Media/scheduled send request model and domain behavior
+
 ### Documentation
 
 - Add plan
