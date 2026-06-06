@@ -61,6 +61,7 @@ Most chat-targeting commands accept `--entity` (a numeric id with/without `-100`
 
 - `folders inspect` — inspect a chat folder and list its chats.
 - `folders add-chat` — move an existing chat into a folder.
+- `folders remove-chat` — remove a chat from a folder (idempotent: a no-op if the chat is not in the folder).
 
 ### Access control
 

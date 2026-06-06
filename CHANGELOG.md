@@ -5,6 +5,7 @@
 
 ### Features
 
+- Wire media and scheduled sends into messages CLI/HTTP
 - TelethonMessageBackend for text/media/scheduled sends
 - Media/scheduled send request model and domain behavior
 

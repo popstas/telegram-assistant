@@ -126,3 +126,42 @@ class TelethonFolderBackend:
             )
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
+
+    async def remove_chat_from_folder(self, folder_id: int, chat_id: int) -> None:
+        from telethon.tl.functions.messages import (
+            UpdateDialogFilterRequest,
+        )
+
+        filters = await self._fetch_filters()
+        target = next(
+            (f for f in filters if getattr(f, "id", None) == folder_id),
+            None,
+        )
+        if target is None:
+            raise FolderNotFoundError(
+                f"folder id {folder_id} no longer exists in Telegram folder list"
+            )
+        try:
+            input_peer = await self._client.get_input_entity(chat_id)
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        # A chat can be referenced from both include_peers and pinned_peers; drop
+        # it from each so the chat fully leaves the folder.
+        include_peers = [
+            p
+            for p in (getattr(target, "include_peers", []) or [])
+            if p != input_peer
+        ]
+        pinned_peers = [
+            p
+            for p in (getattr(target, "pinned_peers", []) or [])
+            if p != input_peer
+        ]
+        target.include_peers = include_peers
+        target.pinned_peers = pinned_peers
+        try:
+            await self._client(
+                UpdateDialogFilterRequest(id=folder_id, filter=target)
+            )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc

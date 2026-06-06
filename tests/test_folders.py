@@ -29,6 +29,7 @@ from telegram_assistant.folders import (
     FolderSnapshot,
     add_chat_to_folder,
     inspect_folder,
+    remove_chat_from_folder,
     resolve_chat_in_folder,
     resolve_folder,
 )
@@ -45,12 +46,17 @@ class FakeFolderBackend:
         known_chats: dict[str | int, FolderChat] | None = None,
         add_should_fail: bool = False,
         add_should_raise: type[Exception] = RuntimeError,
+        remove_should_fail: bool = False,
+        remove_should_raise: type[Exception] = RuntimeError,
     ) -> None:
         self._folders = folders
         self._known_chats = known_chats or {}
         self._add_should_fail = add_should_fail
         self._add_should_raise = add_should_raise
+        self._remove_should_fail = remove_should_fail
+        self._remove_should_raise = remove_should_raise
         self.added: list[tuple[int, int]] = []
+        self.removed: list[tuple[int, int]] = []
 
     async def list_folders(self) -> list[FolderSnapshot]:
         return [
@@ -77,6 +83,15 @@ class FakeFolderBackend:
                 f.chats.append(FolderChat(chat_id=chat_id, title=f"Chat {chat_id}"))
                 break
         self.added.append((folder_id, chat_id))
+
+    async def remove_chat_from_folder(self, folder_id: int, chat_id: int) -> None:
+        if self._remove_should_fail:
+            raise self._remove_should_raise("telegram refused")
+        for f in self._folders:
+            if f.folder_id == folder_id:
+                f.chats = [c for c in f.chats if c.chat_id != chat_id]
+                break
+        self.removed.append((folder_id, chat_id))
 
 
 def _sample_folder() -> FolderSnapshot:
@@ -241,6 +256,40 @@ async def test_add_chat_per_peer_failure_raises_needs_review() -> None:
 
 
 # ---------------------------------------------------------------------------
+# remove_chat_from_folder
+# ---------------------------------------------------------------------------
+
+
+async def test_remove_chat_when_absent_is_idempotent() -> None:
+    backend = FakeFolderBackend([_sample_folder()])
+    result = await remove_chat_from_folder(
+        backend, folder_name="Planfix clients", chat_ref=999
+    )
+    assert result["already_absent"] is True
+    assert backend.removed == []
+
+
+async def test_remove_chat_present_removes_and_returns_result() -> None:
+    backend = FakeFolderBackend([_sample_folder()])
+    result = await remove_chat_from_folder(
+        backend, folder_name="Planfix clients", chat_ref=100
+    )
+    assert result["already_absent"] is False
+    assert result["chat_id"] == 100
+    assert backend.removed == [(2, 100)]
+
+
+async def test_remove_chat_per_peer_failure_raises_needs_review() -> None:
+    backend = FakeFolderBackend(
+        [_sample_folder()], remove_should_fail=True
+    )
+    with pytest.raises(FolderPeerFailureError):
+        await remove_chat_from_folder(
+            backend, folder_name="Planfix clients", chat_ref=100
+        )
+
+
+# ---------------------------------------------------------------------------
 # HTTP routes
 # ---------------------------------------------------------------------------
 
@@ -398,6 +447,71 @@ def test_http_add_chat_requires_chat_ref(
         headers={"Authorization": "Bearer secret_token"},
     )
     assert resp.status_code == 422
+
+
+def test_http_remove_chat_by_id(
+    minimal_config_yaml: str, fake_backend: FakeFolderBackend
+) -> None:
+    client = _make_app(minimal_config_yaml, fake_backend)
+    resp = client.request(
+        "DELETE",
+        "/telegram/folders/Planfix clients/chats",
+        json={"chat_id": 100},
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["chat_id"] == 100
+    assert body["already_absent"] is False
+    assert fake_backend.removed == [(2, 100)]
+
+
+def test_http_remove_chat_absent_is_idempotent(
+    minimal_config_yaml: str, fake_backend: FakeFolderBackend
+) -> None:
+    client = _make_app(minimal_config_yaml, fake_backend)
+    resp = client.request(
+        "DELETE",
+        "/telegram/folders/Planfix clients/chats",
+        json={"chat_id": 999},
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["chat_id"] == 999
+    assert body["already_absent"] is True
+    assert fake_backend.removed == []
+
+
+def test_http_remove_chat_peer_failure_returns_502(
+    minimal_config_yaml: str,
+) -> None:
+    backend = FakeFolderBackend(
+        [_sample_folder()], remove_should_fail=True
+    )
+    client = _make_app(minimal_config_yaml, backend)
+    resp = client.request(
+        "DELETE",
+        "/telegram/folders/Planfix clients/chats",
+        json={"chat_id": 100},
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 502
+    body = resp.json()
+    assert body["detail"]["error"] == "needs_review"
+
+
+def test_http_remove_chat_503_without_backend(minimal_config_yaml: str) -> None:
+    config = load_config_from_text(minimal_config_yaml)
+    app = create_app(config, session_manager=None)
+    client = TestClient(app)
+    resp = client.request(
+        "DELETE",
+        "/telegram/folders/Planfix clients/chats",
+        json={"chat_id": 100},
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 503
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +699,89 @@ def test_cli_folders_add_chat_ambiguous_name_fails(
             "Planfix clients",
             "--chat-name",
             "Dup",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 2
+
+
+def test_cli_folders_remove_chat_by_id(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeFolderBackend([_sample_folder()])
+    _patch_cli_backend(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "folders",
+            "remove-chat",
+            "--folder-name",
+            "Planfix clients",
+            "--chat-id",
+            "100",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["chat_id"] == 100
+    assert payload["already_absent"] is False
+    assert backend.removed == [(2, 100)]
+
+
+def test_cli_folders_remove_chat_absent_is_idempotent(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeFolderBackend([_sample_folder()])
+    _patch_cli_backend(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "folders",
+            "remove-chat",
+            "--folder-name",
+            "Planfix clients",
+            "--chat-id",
+            "999",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["already_absent"] is True
+    assert backend.removed == []
+
+
+def test_cli_folders_remove_chat_requires_chat_ref(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeFolderBackend([_sample_folder()])
+    _patch_cli_backend(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "folders",
+            "remove-chat",
+            "--folder-name",
+            "Planfix clients",
             "--config",
             str(config_file),
         ],

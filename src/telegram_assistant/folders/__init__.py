@@ -12,6 +12,7 @@ from telegram_assistant.folders.service import (
     FolderSnapshot,
     add_chat_to_folder,
     inspect_folder,
+    remove_chat_from_folder,
     resolve_chat_in_folder,
     resolve_folder,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "TelethonFolderBackend",
     "add_chat_to_folder",
     "inspect_folder",
+    "remove_chat_from_folder",
     "resolve_chat_in_folder",
     "resolve_folder",
 ]
