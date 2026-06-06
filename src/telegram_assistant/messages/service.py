@@ -100,7 +100,7 @@ class MessageBackend(Protocol):
         topic_id: int | None = None,
         files: tuple[str, ...] = (),
         schedule_at: datetime | None = None,
-    ) -> int | Sequence[int]:
+    ) -> int | Sequence[int] | SendMessageBackendResult:
         ...
 
 

@@ -2420,19 +2420,16 @@ app.add_typer(messages_app, name="messages")
 
 
 def _build_message_backends(config_path: Path | None):
-    """Open the Telethon-backed topic + folder backends + store for messaging.
-
-    The topic backend doubles as the message backend in production (the
-    Telethon adapter for topics already implements ``send_message``); we
-    reuse it here so HTTP and CLI never disagree on which client sends the
-    message.
-    """
+    """Open the Telethon-backed message, topic, and folder backends."""
     config = _load_config_or_exit(config_path)
     manager = TelethonSessionManager(config.telegram)
     store = OperationStore(default_database_path(config))
 
     async def _open():
         from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonMessageBackend,
+        )
         from telegram_assistant.topics.telethon_backend import (
             TelethonTopicBackend,
         )
@@ -2443,8 +2440,11 @@ def _build_message_backends(config_path: Path | None):
                 "Telethon session is not authorized; run "
                 "`telegram-assistant auth` first."
             )
-        topic_backend = TelethonTopicBackend(client)
-        return topic_backend, TelethonFolderBackend(client)
+        return (
+            TelethonMessageBackend(client),
+            TelethonTopicBackend(client),
+            TelethonFolderBackend(client),
+        )
 
     return config, manager, store, _open
 
@@ -2562,6 +2562,13 @@ def messages_send(
 
     config, manager, store, open_backends = _build_message_backends(config_path)
 
+    def _split_message_backends(opened):
+        if len(opened) == 3:
+            message_backend, topic_backend, folder_backend = opened
+            return message_backend, topic_backend, folder_backend
+        topic_backend, folder_backend = opened
+        return topic_backend, topic_backend, folder_backend
+
     # Mass mode and chat_name resolution both need the folder default.
     if is_mass or chat_name is not None:
         resolved_folder_name, default_fid, _ = _resolve_folder_name(
@@ -2588,7 +2595,9 @@ def messages_send(
 
         async def _resolve_send() -> dict[str, object]:
             try:
-                topic_backend, folder_backend = await open_backends()
+                _, topic_backend, folder_backend = _split_message_backends(
+                    await open_backends()
+                )
                 if is_mass:
                     snapshot = await resolve_folder(
                         folder_backend,
@@ -2798,8 +2807,9 @@ def messages_send(
 
     async def _run() -> dict[str, object]:
         try:
-            topic_backend, folder_backend = await open_backends()
-            message_backend = topic_backend
+            message_backend, topic_backend, folder_backend = _split_message_backends(
+                await open_backends()
+            )
 
             # Build a resolver only when the policy or --entity actually needs
             # one, so the common allow-all/no-entity path never touches the

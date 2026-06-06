@@ -119,17 +119,17 @@ ruff check src tests
 
 ### Task 2: Telethon media and schedule adapter
 
-- [ ] Move the production message-send adapter out of `TelethonTopicBackend.send_message` fallback into `messages/telethon_backend.py` as `TelethonMessageBackend`.
-- [ ] Implement:
+- [x] Move the production message-send adapter out of `TelethonTopicBackend.send_message` fallback into `messages/telethon_backend.py` as `TelethonMessageBackend`.
+- [x] Implement:
   - `client.send_message(chat_id, text, reply_to=topic_id, schedule=schedule_at)` for text-only;
   - `client.send_file(chat_id, files, caption=text or None, reply_to=topic_id, schedule=schedule_at)` for attachments.
-- [ ] Normalize return message ids:
+- [x] Normalize return message ids:
   - single message returns one id;
   - album returns the first id plus `telegram_message_ids` in the result payload.
-- [ ] Translate Telethon `FloodWaitError` with `translate_flood_wait`.
-- [ ] Update HTTP app default `message_backend_factory` to use `TelethonMessageBackend` instead of falling back to topic backend.
-- [ ] Add adapter tests in `tests/test_messages.py` or a new `tests/test_messages_telethon_backend.py` using a fake client.
-- [ ] Run `.venv/bin/pytest -q tests/test_messages.py tests/test_app_skeleton.py`.
+- [x] Translate Telethon `FloodWaitError` with `translate_flood_wait`.
+- [x] Update HTTP app default `message_backend_factory` to use `TelethonMessageBackend` instead of falling back to topic backend.
+- [x] Add adapter tests in `tests/test_messages.py` or a new `tests/test_messages_telethon_backend.py` using a fake client.
+- [x] Run `.venv/bin/pytest -q tests/test_messages.py tests/test_app_skeleton.py`.
 
 ### Task 3: Wire media and schedule into CLI/HTTP
 

@@ -101,10 +101,6 @@ class MessageSendBody(BaseModel):
 def _message_backend_or_503(request: Request) -> MessageBackend:
     factory = getattr(request.app.state, "message_backend_factory", None)
     if factory is None:
-        # Fall back to the topic backend factory — the Telethon adapter for
-        # topics already implements ``send_message`` with the same signature.
-        factory = getattr(request.app.state, "topic_backend_factory", None)
-    if factory is None:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram message backend is not configured (session may be unauthorized)",

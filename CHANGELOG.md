@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- Expand message send domain
+
 ### Documentation
 
 - Add plan

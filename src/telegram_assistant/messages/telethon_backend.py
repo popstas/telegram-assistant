@@ -1,16 +1,18 @@
-"""Telethon-backed :class:`MessageReadBackend` implementation.
+"""Telethon-backed message adapter implementations.
 
 Kept separate from :mod:`service` so the domain layer stays free of Telethon
-imports. Translates the get-recent read op into ``iter_messages`` and maps each
-Telethon message onto a :class:`RecentMessage` (id, sender, date, reply_to,
-text/media summary). ``FloodWaitError`` is translated, never swallowed.
+imports. ``FloodWaitError`` is translated, never swallowed.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
-from telegram_assistant.messages.service import RecentMessage
+from telegram_assistant.messages.service import (
+    RecentMessage,
+    SendMessageBackendResult,
+)
 from telegram_assistant.telegram_client.errors import translate_flood_wait
 
 
@@ -24,6 +26,53 @@ def _media_summary(media: Any) -> str:
     if name.startswith("MessageMedia"):
         name = name[len("MessageMedia") :]
     return f"[{name.lower() or 'media'}]"
+
+
+def _message_ids(sent: Any) -> tuple[int, ...]:
+    """Extract Telegram message ids from a single message or album result."""
+    if isinstance(sent, Sequence) and not isinstance(sent, (str, bytes, bytearray)):
+        return tuple(int(getattr(item, "id", 0)) for item in sent)
+    return (int(getattr(sent, "id", 0)),)
+
+
+class TelethonMessageBackend:
+    """Adapter from the Telethon ``TelegramClient`` to :class:`MessageBackend`."""
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        topic_id: int | None = None,
+        files: tuple[str, ...] = (),
+        schedule_at: Any | None = None,
+    ) -> SendMessageBackendResult:
+        kwargs: dict[str, Any] = {}
+        if topic_id is not None:
+            kwargs["reply_to"] = topic_id
+        if schedule_at is not None:
+            kwargs["schedule"] = schedule_at
+        try:
+            if files:
+                sent = await self._client.send_file(
+                    chat_id,
+                    files,
+                    caption=text or None,
+                    **kwargs,
+                )
+            else:
+                sent = await self._client.send_message(chat_id, text, **kwargs)
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+
+        ids = _message_ids(sent)
+        return SendMessageBackendResult(
+            telegram_message_id=ids[0] if ids else None,
+            telegram_message_ids=ids,
+        )
 
 
 class TelethonMessageReadBackend:
@@ -64,4 +113,4 @@ class TelethonMessageReadBackend:
         return out
 
 
-__all__ = ["TelethonMessageReadBackend"]
+__all__ = ["TelethonMessageBackend", "TelethonMessageReadBackend"]

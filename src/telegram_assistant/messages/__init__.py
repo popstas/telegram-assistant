@@ -21,6 +21,7 @@ from telegram_assistant.messages.service import (
     redact_message_text,
     send_message,
 )
+from telegram_assistant.messages.telethon_backend import TelethonMessageBackend
 
 __all__ = [
     "MassSendItemResult",
@@ -37,6 +38,7 @@ __all__ = [
     "SendMessageBackendResult",
     "SendMessageRequest",
     "SendMessageResult",
+    "TelethonMessageBackend",
     "get_recent_messages",
     "is_service_command",
     "mass_send_message",
