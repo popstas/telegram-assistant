@@ -219,23 +219,23 @@ ruff check src tests
 
 ### Task 8: Documentation, skill sync, e2e, and full verification
 
-- [ ] Update `README.md` Commands and usage notes for:
+- [x] Update `README.md` Commands and usage notes for:
   - media/scheduled `messages send`;
   - `messages react`;
   - `messages forward`;
   - `notifications mute/unmute`;
   - `folders remove-chat`.
-- [ ] Update `skills/telegram-assistant/SKILL.md` resource/action catalog, confirmation buckets, dry-run supported command list, and per-command extraction rules.
-- [ ] Sync the skill file to `~/.claude/skills/telegram-assistant/SKILL.md` in the same change.
-- [ ] Extend live e2e scripts with conservative cases:
+- [x] Update `skills/telegram-assistant/SKILL.md` resource/action catalog, confirmation buckets, dry-run supported command list, and per-command extraction rules.
+- [x] Sync the skill file to `~/.claude/skills/telegram-assistant/SKILL.md` in the same change.
+- [x] Extend live e2e scripts with conservative cases:
   - scheduled message with a near-future time only in the test chat;
   - folder remove/add round-trip for the test chat;
   - reaction set/clear on a message created during the script;
   - forward a test message into the test chat;
   - media send using a small generated temporary text/image file.
-- [ ] Run `.venv/bin/pytest -q`.
-- [ ] Run `ruff check src tests`.
-- [ ] Run live e2e scripts only when an authorized test session is available:
+- [x] Run `.venv/bin/pytest -q`.
+- [x] Run `ruff check src tests`.
+- [x] Run live e2e scripts only when an authorized test session is available:
 
 ```bash
 bash scripts/e2e_test.sh

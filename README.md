@@ -59,16 +59,59 @@ Top-level:
 
 Most chat-targeting commands accept `--entity` (a numeric id with/without `-100`, `@username`, `t.me`/invite link, phone, or exact title) as a flexible alternative to `--chat-id`/`--chat-name`.
 
+Targeted `messages send` can send plain text, media/documents, and scheduled messages:
+
+```bash
+telegram-assistant messages send --entity "@example_chat" --text "hello"
+telegram-assistant messages send --entity "@example_chat" --text "caption" --file ./report.pdf --file ./image.png
+telegram-assistant messages send --entity "@example_chat" --text "caption" --file-url "https://example.com/report.pdf"
+telegram-assistant messages send --entity "@example_chat" --text "scheduled ping" --delay 10m
+telegram-assistant messages send --entity "@example_chat" --text "scheduled ping" --schedule-at "2030-01-01T16:30:00+05:00"
+```
+
+`--file` and `--file-url` may repeat; local files are sent as server-side paths. `--text` is used as the caption when attachments are present. Scheduling accepts either `--schedule-at` (future ISO-8601 datetime) or `--delay` (`10m`, `2h`, `1d`), not both. Media attachments and scheduling are targeted-send features; folder-wide mass mode remains text-only.
+
+Reactions and forwarding:
+
+```bash
+telegram-assistant messages react --entity "@example_chat" --message-id 123 --emoji "👍"
+telegram-assistant messages react --entity "@example_chat" --message-id 123 --clear
+telegram-assistant messages forward --from-entity "@source_chat" --to-entity "@target_chat" --message-id 101 --message-id 102
+```
+
+Forwarding is WRITE-gated on the target chat and READ-gated on the source chat when access control is configured.
+
 `notifications` — manage per-chat notification settings:
 
 - `notifications mute` — mute notifications for a chat, indefinitely or for `--duration` hours.
 - `notifications unmute` — restore normal notifications for a chat.
+
+```bash
+telegram-assistant notifications mute --entity "@example_chat" --duration 2
+telegram-assistant notifications mute --entity "@example_chat"      # mute indefinitely
+telegram-assistant notifications unmute --entity "@example_chat"
+```
 
 `folders` — inspect and manage chat folders:
 
 - `folders inspect` — inspect a chat folder and list its chats.
 - `folders add-chat` — move an existing chat into a folder.
 - `folders remove-chat` — remove an existing chat from a folder.
+
+```bash
+telegram-assistant folders add-chat --folder-name "Clients" --entity "@example_chat"
+telegram-assistant folders remove-chat --folder-name "Clients" --entity "@example_chat"
+```
+
+Folder add/remove is idempotent. Adding a chat already in the folder returns `already_in_folder=true`; removing an absent chat returns `already_absent=true`.
+
+HTTP mirrors the CLI:
+
+- `POST /telegram/messages` accepts `text`, `telegram_chat_id` or `entity` or `chat_name` + `folder_name`, optional `telegram_topic_id` or `topic_name`, repeated attachments as `files` and `file_urls`, and one scheduling field: `schedule_at` or `delay_seconds`.
+- `POST /telegram/messages/reactions` accepts `message_id` plus either `emoji` or `clear=true`.
+- `POST /telegram/messages/forward` accepts `from_chat_id` or `from_entity`, `to_chat_id` or `to_entity`, and `message_ids`.
+- `POST /telegram/notifications/mute` and `POST /telegram/notifications/unmute` accept `chat_id`, `entity`, or `chat_name` + `folder_name`; mute also accepts `duration_hours`.
+- `DELETE /telegram/folders/{folder_name}/chats` removes a chat using the same body shape as folder add.
 
 ### Access control
 

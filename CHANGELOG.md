@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add message forwarding
 - Add message reactions
 - Add notifications mute unmute
 - Add folder remove-chat

@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Tertiary end-to-end script: exercises the HTTP endpoints not covered by
 # scripts/e2e_test.sh — single topic create, topic close, members bulk-remove
-# (dry_run), and folders add-chat. Designed to run *after* scripts/e2e_test.sh
-# so "Client chat test 2" already exists in the "Clients" folder.
+# round-trip, media/scheduled message send, reactions, forwarding,
+# notifications mute/unmute, and folders add/remove. Designed to run *after*
+# scripts/e2e_test.sh so "Client chat test 2" already exists in the
+# "Clients" folder.
 #
 # Prerequisites:
 #   1. uvicorn is running on the port from data/config.yml (default 8085).
 #   2. scripts/e2e_test.sh ran successfully at least once.
 #
-# Non-destructive: bulk-remove uses dry_run=true; the new HTTP-side topic is
-# closed but not deleted.
+# Conservative side effects: the new HTTP-side topic is closed but not
+# deleted, notification mutes are immediately undone, and folder removal is
+# immediately followed by re-add.
 
 set -euo pipefail
 
@@ -37,10 +40,18 @@ step() {
     echo ">>> $*"
 }
 
+cleanup_files=()
+cleanup() {
+    if [[ ${#cleanup_files[@]} -gt 0 ]]; then
+        rm -f "${cleanup_files[@]}"
+    fi
+}
+trap cleanup EXIT
+
 # Resolve the chat id for "Client chat test 2" via the folder endpoint.
 step "resolve chat id for '${CHAT_TITLE}' via /telegram/folders/${FOLDER}"
 chat_id=$(curl -sS "${auth_header[@]}" "${BASE_URL}/telegram/folders/${FOLDER}" \
-    | jq -r --arg t "${CHAT_TITLE}" '.chats[] | select(.title==$t) | .chat_id')
+    | jq -r --arg t "${CHAT_TITLE}" '[.chats[] | select(.title==$t) | .chat_id] | last // empty')
 if [[ -z "${chat_id}" ]]; then
     echo "could not find '${CHAT_TITLE}' in folder '${FOLDER}' — run scripts/e2e_test.sh first" >&2
     exit 1
@@ -103,6 +114,77 @@ addchat_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
     -d "${addchat_payload}" \
     "${BASE_URL}/telegram/folders/${FOLDER}/chats" || true)
 echo "${addchat_resp}" | jq . 2>/dev/null || echo "${addchat_resp}"
+
+step "POST /telegram/messages (targeted send for reaction/forward checks)"
+send_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "e2e http targeted ping"}')
+send_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${send_payload}" \
+    "${BASE_URL}/telegram/messages")
+echo "${send_resp}" | jq .
+message_id=$(echo "${send_resp}" \
+    | jq -r '.telegram_message_id // (.telegram_message_ids[0] // empty)')
+if [[ -z "${message_id}" || "${message_id}" == "null" ]]; then
+    echo "could not extract telegram_message_id from targeted send response" >&2
+    exit 1
+fi
+
+step "POST /telegram/messages (media send using small temporary file)"
+media_tmp=$(mktemp --suffix=.txt)
+cleanup_files+=("${media_tmp}")
+printf 'telegram-assistant HTTP e2e attachment\n' > "${media_tmp}"
+media_payload=$(jq -nc --arg cid "${chat_id}" --arg file "${media_tmp}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "e2e http media ping", files: [$file]}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${media_payload}" \
+    "${BASE_URL}/telegram/messages" | jq '{telegram_message_id, telegram_message_ids, attachments}'
+
+step "POST /telegram/messages (scheduled send with delay_seconds=600)"
+scheduled_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "e2e http scheduled ping", delay_seconds: 600}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${scheduled_payload}" \
+    "${BASE_URL}/telegram/messages" | jq '{telegram_message_id, scheduled, schedule_at}'
+
+step "POST /telegram/messages/reactions (set + clear)"
+react_payload=$(jq -nc --arg cid "${chat_id}" --arg mid "${message_id}" \
+    '{telegram_chat_id: ($cid|tonumber), message_id: ($mid|tonumber), emoji: "👍"}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${react_payload}" \
+    "${BASE_URL}/telegram/messages/reactions" | jq .
+clear_payload=$(jq -nc --arg cid "${chat_id}" --arg mid "${message_id}" \
+    '{telegram_chat_id: ($cid|tonumber), message_id: ($mid|tonumber), clear: true}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${clear_payload}" \
+    "${BASE_URL}/telegram/messages/reactions" | jq .
+
+step "POST /telegram/messages/forward (within test chat)"
+forward_payload=$(jq -nc --arg cid "${chat_id}" --arg mid "${message_id}" \
+    '{from_chat_id: ($cid|tonumber), to_chat_id: ($cid|tonumber), message_ids: [($mid|tonumber)]}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${forward_payload}" \
+    "${BASE_URL}/telegram/messages/forward" \
+    | jq '{source_chat_id, target_chat_id, message_ids, forwarded_message_ids}'
+
+step "POST /telegram/notifications/mute + /unmute"
+mute_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{chat_id: ($cid|tonumber), duration_hours: 1}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${mute_payload}" \
+    "${BASE_URL}/telegram/notifications/mute" | jq .
+unmute_payload=$(jq -nc --arg cid "${chat_id}" '{chat_id: ($cid|tonumber)}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${unmute_payload}" \
+    "${BASE_URL}/telegram/notifications/unmute" | jq .
+
+step "DELETE /telegram/folders/${FOLDER}/chats then POST re-add (round-trip)"
+removechat_payload=$(jq -nc --arg cid "${chat_id}" '{chat_id: ($cid|tonumber)}')
+curl -sS -X DELETE "${auth_header[@]}" "${json_header[@]}" \
+    -d "${removechat_payload}" \
+    "${BASE_URL}/telegram/folders/${FOLDER}/chats" | jq .
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${addchat_payload}" \
+    "${BASE_URL}/telegram/folders/${FOLDER}/chats" | jq .
 
 echo
 echo "http extras e2e flow completed — review the responses above and the chats on Telegram"

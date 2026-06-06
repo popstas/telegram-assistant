@@ -3,7 +3,9 @@
 # resources that scripts/e2e_test.sh creates over HTTP. Keeps coverage
 # for the CLI subcommands defined in the plan:
 #   * health, folders inspect, topics create + close, messages send,
-#     members bulk-remove (--dry-run), operations status.
+#     media/scheduled messages send, messages react, messages forward,
+#     notifications mute/unmute, members bulk-remove (--dry-run),
+#     operations status.
 #
 # Run order:
 #   1. scripts/e2e_test.sh (creates "Client chat test 2" + Topic 1/2/3
@@ -42,19 +44,33 @@ step() {
     echo ">>> $*"
 }
 
+cleanup_files=()
+cleanup() {
+    if [[ ${#cleanup_files[@]} -gt 0 ]]; then
+        rm -f "${cleanup_files[@]}"
+    fi
+}
+trap cleanup EXIT
+
 step "CLI: health"
 telegram-assistant health
 
 step "CLI: folders inspect --folder-name '${FOLDER}'"
-telegram-assistant folders inspect --folder-name "${FOLDER}" | jq .
+folder_json=$(telegram-assistant folders inspect --folder-name "${FOLDER}")
+echo "${folder_json}" | jq .
+chat_id=$(echo "${folder_json}" \
+    | jq -r --arg t "${CHAT_TITLE}" '[.chats[] | select(.title==$t) | .chat_id] | last // empty')
+if [[ -z "${chat_id}" || "${chat_id}" == "null" ]]; then
+    echo "could not find '${CHAT_TITLE}' in folder '${FOLDER}' — run scripts/e2e_test.sh first" >&2
+    exit 1
+fi
+echo "resolved chat_id=${chat_id}"
 
-step "CLI: topics create --chat-name '${CHAT_TITLE}' --topic-name '${SINGLE_TOPIC_NAME}'"
+step "CLI: topics create --chat-id '${chat_id}' --topic-name '${SINGLE_TOPIC_NAME}'"
 cli_topic_json=$(telegram-assistant topics create \
-    --chat-name "${CHAT_TITLE}" \
-    --folder-name "${FOLDER}" \
+    --chat-id "${chat_id}" \
     --topic-name "${SINGLE_TOPIC_NAME}")
 echo "${cli_topic_json}" | jq .
-chat_id=$(echo "${cli_topic_json}" | jq -r '.telegram_chat_id')
 topic_id=$(echo "${cli_topic_json}" | jq -r '.telegram_topic_id')
 op_id=$(echo "${cli_topic_json}" | jq -r '.operation_id')
 if [[ -z "${chat_id}" || -z "${topic_id}" ]]; then
@@ -64,16 +80,60 @@ fi
 
 step "CLI: topics create (idempotent re-call)"
 telegram-assistant topics create \
-    --chat-name "${CHAT_TITLE}" \
-    --folder-name "${FOLDER}" \
+    --chat-id "${chat_id}" \
     --topic-name "${SINGLE_TOPIC_NAME}" | jq '{telegram_topic_id, replayed}'
 
 step "CLI: messages send (targeted) into '${SINGLE_TOPIC_NAME}'"
-telegram-assistant messages send \
-    --chat-name "${CHAT_TITLE}" \
-    --folder-name "${FOLDER}" \
+targeted_send_json=$(telegram-assistant messages send \
+    --chat-id "${chat_id}" \
     --topic-name "${SINGLE_TOPIC_NAME}" \
-    --text "cli targeted ping"
+    --text "cli targeted ping")
+echo "${targeted_send_json}" | jq .
+targeted_message_id=$(echo "${targeted_send_json}" \
+    | jq -r '.telegram_message_id // (.telegram_message_ids[0] // empty)')
+if [[ -z "${targeted_message_id}" || "${targeted_message_id}" == "null" ]]; then
+    echo "could not extract telegram_message_id from targeted send output" >&2
+    exit 1
+fi
+
+step "CLI: messages send --file (small temporary attachment)"
+media_tmp=$(mktemp --suffix=.txt)
+cleanup_files+=("${media_tmp}")
+printf 'telegram-assistant CLI e2e attachment\n' > "${media_tmp}"
+telegram-assistant messages send \
+    --chat-id "${chat_id}" \
+    --text "cli media ping" \
+    --file "${media_tmp}" | jq '{telegram_message_id, telegram_message_ids, attachments}'
+
+step "CLI: messages send --delay 10m (scheduled in test chat)"
+telegram-assistant messages send \
+    --chat-id "${chat_id}" \
+    --text "cli scheduled ping" \
+    --delay 10m | jq '{telegram_message_id, scheduled, schedule_at}'
+
+step "CLI: messages react set + clear on targeted message ${targeted_message_id}"
+telegram-assistant messages react \
+    --chat-id "${chat_id}" \
+    --message-id "${targeted_message_id}" \
+    --emoji "👍" | jq .
+telegram-assistant messages react \
+    --chat-id "${chat_id}" \
+    --message-id "${targeted_message_id}" \
+    --clear | jq .
+
+step "CLI: messages forward within test chat"
+telegram-assistant messages forward \
+    --from-chat-id "${chat_id}" \
+    --to-chat-id "${chat_id}" \
+    --message-id "${targeted_message_id}" \
+    | jq '{source_chat_id, target_chat_id, message_ids, forwarded_message_ids}'
+
+step "CLI: notifications mute/unmute round-trip"
+telegram-assistant notifications mute \
+    --chat-id "${chat_id}" \
+    --duration 1 | jq .
+telegram-assistant notifications unmute \
+    --chat-id "${chat_id}" | jq .
 
 step "CLI: messages send (mass mode) to folder '${FOLDER}', topic 'Topic 1'"
 telegram-assistant messages send \
@@ -84,19 +144,17 @@ telegram-assistant messages send \
 
 step "CLI: topics close --topic-name '${SINGLE_TOPIC_NAME}'"
 telegram-assistant topics close \
-    --chat-name "${CHAT_TITLE}" \
-    --folder-name "${FOLDER}" \
+    --chat-id "${chat_id}" \
     --topic-name "${SINGLE_TOPIC_NAME}" --reason "e2e CLI close"
 
 step "CLI: topics close (idempotent re-close)"
 telegram-assistant topics close \
-    --chat-name "${CHAT_TITLE}" \
-    --folder-name "${FOLDER}" \
+    --chat-id "${chat_id}" \
     --topic-name "${SINGLE_TOPIC_NAME}" --reason "e2e CLI re-close"
 
 step "CLI: members bulk-remove --dry-run (no destructive side-effect)"
 remove_tmp=$(mktemp --suffix=.csv)
-trap 'rm -f "${remove_tmp}"' EXIT
+cleanup_files+=("${remove_tmp}")
 printf 'user\n%s\n' "${USER_TO_REMOVE}" > "${remove_tmp}"
 telegram-assistant members bulk-remove \
     --chat-id "${chat_id}" \
@@ -107,10 +165,9 @@ telegram-assistant operations status --operation-id "${op_id}" | jq .
 
 # --- get-recent read op + entity resolver ----------------------------------
 
-step "CLI: messages recent --chat-name '${CHAT_TITLE}' (default limit 5)"
+step "CLI: messages recent --chat-id '${chat_id}' (default limit 5)"
 recent_json=$(telegram-assistant messages recent \
-    --chat-name "${CHAT_TITLE}" \
-    --folder-name "${FOLDER}")
+    --chat-id "${chat_id}")
 echo "${recent_json}" | jq '{telegram_chat_id, limit, count}'
 recent_count=$(echo "${recent_json}" | jq -r '.count')
 if [[ "${recent_count}" -gt 5 ]]; then
@@ -118,9 +175,9 @@ if [[ "${recent_count}" -gt 5 ]]; then
     exit 1
 fi
 
-step "CLI: messages recent --entity '${CHAT_TITLE}' (exact-title resolver, --limit 3)"
+step "CLI: messages recent --entity '${chat_id}' (numeric resolver, --limit 3)"
 telegram-assistant messages recent \
-    --entity "${CHAT_TITLE}" \
+    --entity "${chat_id}" \
     --limit 3 | jq '{telegram_chat_id, limit, count}'
 
 step "CLI: messages recent --entity '${chat_id}' (numeric resolver)"
@@ -134,7 +191,7 @@ telegram-assistant messages recent --entity "${chat_id}" --limit 1 \
 
 step "CLI: access allowlist — derive a folder-scoped policy"
 acl_config=$(mktemp --suffix=.yml)
-trap 'rm -f "${remove_tmp}" "${acl_config}"' EXIT
+cleanup_files+=("${acl_config}")
 : "${SOURCE_CONFIG:=data/config.yml}"
 python3 - "${FOLDER}" "${acl_config}" "${SOURCE_CONFIG}" <<'PY'
 import sys
@@ -153,8 +210,7 @@ PY
 
 step "CLI: access allowlist — permitted read (chat in '${FOLDER}') succeeds"
 telegram-assistant messages recent \
-    --chat-name "${CHAT_TITLE}" \
-    --folder-name "${FOLDER}" \
+    --chat-id "${chat_id}" \
     --config "${acl_config}" | jq '{telegram_chat_id, count}'
 
 step "CLI: access allowlist — unlisted chat (@me) must be denied (non-zero exit)"

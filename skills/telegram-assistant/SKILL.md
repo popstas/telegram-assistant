@@ -1,6 +1,6 @@
 ---
 name: telegram-assistant
-description: Translate human Telegram requests into safe `telegram-assistant` CLI calls. Use when the user asks to create or close Telegram groups/topics, add or remove members, send messages, mute/unmute chats, inspect or move chats between Telegram folders, or check/retry queued operations through the `telegram-assistant` project. Triggers on phrases like «добавь @username в чат», «создай топик», «закрой топик», «отправь сообщение в чат», «заглуши чат», «верни уведомления», «перенеси чат в folder», «проверь операцию», «health».
+description: Translate human Telegram requests into safe `telegram-assistant` CLI calls. Use when the user asks to create or close Telegram groups/topics, add or remove members, send media or scheduled messages, react to or forward messages, mute/unmute chats, inspect or move chats between Telegram folders, or check/retry queued operations through the `telegram-assistant` project. Triggers on phrases like «добавь @username в чат», «создай топик», «закрой топик», «отправь сообщение в чат», «поставь реакцию», «перешли сообщение», «заглуши чат», «верни уведомления», «перенеси чат в folder», «проверь операцию», «health».
 ---
 
 # telegram-assistant skill
@@ -60,9 +60,9 @@ Commands fall into three buckets:
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `topics create`, `topics close`, `messages send` (single chat),
-   `messages react`, `messages forward`, `notifications mute`, `notifications unmute`,
-   `folders add-chat`, `folders remove-chat`, `operations retry`. Always: prepare command → run
-   with `--dry-run` →
+   `messages react`, `messages forward`, `notifications mute`,
+   `notifications unmute`, `folders add-chat`, `folders remove-chat`,
+   `operations retry`. Always: prepare command → run with `--dry-run` →
    show the plan and dry-run output → wait for explicit human confirmation
    → run the same command without `--dry-run`.
 3. **State-changing, bulk or destructive** — `topics bulk-create`,
@@ -185,7 +185,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `topics` | `close` | Close (but not delete) an existing topic. | `telegram-assistant topics close ...` |
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
-| `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
+| `messages` | `send` | Send text, media/documents, scheduled messages, or service commands to one chat/topic; text-only fan-out across a folder. | `telegram-assistant messages send ...` |
 | `messages` | `react` | Set or clear an emoji reaction on a message in one chat. | `telegram-assistant messages react ...` |
 | `messages` | `forward` | Forward one or more messages from one chat to another. | `telegram-assistant messages forward ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
@@ -400,22 +400,33 @@ edits `data/config.yml` to widen access on its own.
 
 #### `messages` / `send`
 
-- Extract: `--text`, chat/topic references, optional `--operation-id`.
-- Required flags: `--text` plus exactly one targeting shape — targeted
-  (`--chat-id`/`--chat-name` + optional `--topic-id`/`--topic-name`)
-  or mass (`--mass` or no chat ref, plus `--topic-name` and
-  `--folder-name`).
+- Extract: `--text`, chat/topic references, optional attachment references
+  (`--file`, `--file-url`), optional scheduling (`--schedule-at` or
+  `--delay`), optional `--operation-id`.
+- Required flags: targeted sends need exactly one chat reference
+  (`--chat-id` / `--chat-name` / `--entity`) and either non-empty
+  `--text` or at least one attachment. Targeted topic sends may add
+  `--topic-id` or `--topic-name`. Mass mode needs `--mass` or no chat
+  reference, plus `--topic-name`, `--folder-name`, and non-empty `--text`.
 - From config: `--folder-name` default for both targeted resolution and
   mass mode.
-- Temp file: no — message text goes via `--text`. If the human pastes a
-  long multi-line message, escape it for the shell; do not write it to
-  a file the CLI cannot read.
-- Automation: pass service commands (`/task 123456`) verbatim.
+- Temp file: no for normal text. If the human asks to send a generated
+  scratch attachment, create it under `/tmp` and pass it with `--file`;
+  otherwise use the exact local path or HTTP(S) URL the human provided.
+- Automation: pass service commands (`/task 123456`) verbatim. `--file`
+  and `--file-url` may repeat. Use `--text` as the caption when media is
+  attached. Use exactly one scheduling mode: `--schedule-at` with a future
+  ISO-8601 datetime, or `--delay` as `10m`, `2h`, or `1d`.
 - Confirmation: required after dry-run. Mass mode plans must list every
   resolved chat row and call out `would_skip` rows with their reason
   (`topic_not_found`, `topic_ambiguous`, `list_topics_failed: ...`).
-- Typical errors: `messages send requires non-empty --text`,
+- Typical errors: `messages send requires non-empty --text or at least
+  one attachment`, `file references must be non-empty`, `file_url must
+  use http or https`, `file does not exist or is not a regular file: ...`,
+  `file must not be empty: ...`, `provide exactly one of schedule_at,
+  delay, or delay_seconds`, `schedule_at must be in the future`,
   `--mass cannot be combined with --chat-id or --chat-name`,
+  `media attachments and scheduling are only supported for targeted sends`,
   `mass mode requires --topic-name (and --folder-name resolves the
   folder)`, `MessageSendNeedsReview`.
 
@@ -452,6 +463,33 @@ edits `data/config.yml` to widen access on its own.
 - Typical errors: `exactly one of --chat-id, --chat-name, or --entity
   must be supplied`, `access denied ...` (exit code 3), entity
   not-found / ambiguous (exit code 2).
+
+#### `notifications` / `mute`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`) and
+  optional `--duration` in hours.
+- Required flags: exactly one chat reference.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: always run `--dry-run` first. Omit `--duration` only when
+  the human wants an indefinite mute; otherwise pass the named hour count.
+- Confirmation: required after dry-run. Show resolved chat id,
+  `duration_hours`, and whether the mute is indefinite.
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity
+  must be supplied`, `--duration must be a positive number of hours`,
+  `access denied ...`.
+
+#### `notifications` / `unmute`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`).
+- Required flags: exactly one chat reference.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: always run `--dry-run` first.
+- Confirmation: required after dry-run. Show resolved chat id and planned
+  notification restore.
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity
+  must be supplied`, `access denied ...`.
 
 #### `folders` / `inspect`
 
@@ -740,6 +778,29 @@ Request: «Отправь /task 123456 в топик "Документы" чат
 3. Show resolved chat id, topic id, planned action.
 4. Wait for confirmation, then re-run without `--dry-run`.
 
+### `messages send` — media or scheduled
+
+Request: «Отправь файл /tmp/report.pdf в чат Клиент / проект с подписью
+"Отчет", через 10 минут.»
+
+1. Resource/action: `messages` / `send`.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant messages send \
+     --chat-name "Клиент / проект" \
+     --text "Отчет" \
+     --file /tmp/report.pdf \
+     --delay 10m \
+     --dry-run
+   ```
+
+3. Show resolved chat id, attachment references, and `schedule_at` from
+   the dry-run. If the request names a URL, use `--file-url` and require
+   an `http` or `https` URL. If the request names an absolute time, use
+   `--schedule-at` instead of `--delay`.
+4. Wait for confirmation, then re-run without `--dry-run`.
+
 ### `messages send` — mass mode
 
 Request: «Напомни во всех чатах Planfix clients в топике "Оплата"
@@ -786,6 +847,25 @@ Request: «Перешли сообщения 101 и 102 из чата Клиен
    when access control is configured.
 4. Wait for confirmation, then re-run without `--dry-run`.
 
+### `messages react`
+
+Request: «Поставь 👍 на сообщение 123 в чате Клиент / проект.»
+
+1. Resource/action: `messages` / `react`.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant messages react \
+     --chat-name "Клиент / проект" \
+     --message-id 123 \
+     --emoji "👍" \
+     --dry-run
+   ```
+
+3. Show resolved chat id, message id, and the emoji. If the human asks
+   to remove the reaction, replace `--emoji ...` with `--clear`.
+4. Wait for confirmation, then re-run without `--dry-run`.
+
 ### `messages recent`
 
 Request: «Покажи последние сообщения в чате Клиент / проект.»
@@ -805,6 +885,40 @@ Request: «Покажи последние сообщения в чате Кли
 3. Return the recent messages verbatim. If the CLI exits with `access
    denied` (code 3) or an entity error (code 2), surface the message
    and stop.
+
+### `notifications mute`
+
+Request: «Заглуши уведомления в чате Клиент / проект на 2 часа.»
+
+1. Resource/action: `notifications` / `mute`.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant notifications mute \
+     --chat-name "Клиент / проект" \
+     --duration 2 \
+     --dry-run
+   ```
+
+3. Show resolved chat id and duration. If the human asks for an
+   indefinite mute, omit `--duration` and say that explicitly.
+4. Wait for confirmation, then re-run without `--dry-run`.
+
+### `notifications unmute`
+
+Request: «Верни уведомления в чате Клиент / проект.»
+
+1. Resource/action: `notifications` / `unmute`.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant notifications unmute \
+     --chat-name "Клиент / проект" \
+     --dry-run
+   ```
+
+3. Show resolved chat id and planned notification restore.
+4. Wait for confirmation, then re-run without `--dry-run`.
 
 ### `folders inspect`
 
