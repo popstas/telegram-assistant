@@ -55,6 +55,11 @@ Top-level:
 - `messages send` — send a message or service command (targeted or folder-wide mass mode).
 - `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5).
 
+`notifications` — mute and unmute chat/contact notifications:
+
+- `notifications mute` — mute a chat or contact, indefinitely or for `--duration` hours.
+- `notifications unmute` — restore normal notifications for a chat or contact.
+
 Most chat-targeting commands accept `--entity` (a numeric id with/without `-100`, `@username`, `t.me`/invite link, phone, or exact title) as a flexible alternative to `--chat-id`/`--chat-name`.
 
 `folders` — inspect and manage chat folders:

@@ -60,7 +60,8 @@ Commands fall into three buckets:
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `topics create`, `topics close`, `messages send` (single chat),
-   `folders add-chat`, `folders remove-chat`, `operations retry`. Always:
+   `notifications mute`, `notifications unmute`, `folders add-chat`,
+   `folders remove-chat`, `operations retry`. Always:
    prepare command → run with `--dry-run` →
    show the plan and dry-run output → wait for explicit human confirmation
    → run the same command without `--dry-run`.
@@ -136,8 +137,8 @@ not skip steps, even if the request looks obvious.
    `--dry-run` first. The supported set is: `groups create`,
    `groups set-layout`, `topics create`, `topics bulk-create`,
    `topics close`, `members bulk-add`, `members bulk-remove`,
-   `messages send`, `folders add-chat`, `folders remove-chat`,
-   `operations retry`.
+   `messages send`, `notifications mute`, `notifications unmute`,
+   `folders add-chat`, `folders remove-chat`, `operations retry`.
 8. Present a short plan to the human: what was found (chat id, folder,
    matched users), the full command that would run, and the relevant parts
    of the dry-run output (`status = dry_run`, planned actions, validation
@@ -185,6 +186,8 @@ agent stops and asks for clarification — it does not invent a new path.
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
+| `notifications` | `mute` | Mute a chat/contact's notifications, forever or for `--duration` hours. | `telegram-assistant notifications mute ...` |
+| `notifications` | `unmute` | Restore normal notifications for a chat/contact. | `telegram-assistant notifications unmute ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
 | `folders` | `add-chat` | Move an existing chat into a folder. | `telegram-assistant folders add-chat ...` |
 | `folders` | `remove-chat` | Remove a chat from a folder (idempotent no-op if absent). | `telegram-assistant folders remove-chat ...` |
@@ -203,7 +206,8 @@ messages the agent must surface verbatim instead of paraphrasing.
 
 Most chat-targeting commands (`messages send`, `messages recent`,
 `topics create`/`close`/`bulk-create`, `members bulk-add`/`bulk-remove`,
-`folders add-chat`/`remove-chat`) also accept `--entity` as a flexible alternative to
+`notifications mute`/`unmute`, `folders add-chat`/`remove-chat`) also accept
+`--entity` as a flexible alternative to
 `--chat-id` / `--chat-name`. `--entity` takes a numeric id (with or
 without the `-100` prefix), an `@username`, a `t.me` / invite link, a
 phone, or an exact chat title; exactly one of `--chat-id` / `--chat-name`
@@ -428,6 +432,36 @@ edits `data/config.yml` to widen access on its own.
 - Typical errors: `exactly one of --chat-id, --chat-name, or --entity
   must be supplied`, `access denied ...` (exit code 3), entity
   not-found / ambiguous (exit code 2).
+
+#### `notifications` / `mute`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  optional `--duration` (mute window in hours).
+- Required flags: exactly one chat reference.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first,
+  show the plan, wait for confirmation, then run without `--dry-run`.
+  Omit `--duration` to mute forever; pass it only when the human names a
+  number of hours («замьють на 3 часа» → `--duration 3`).
+- Confirmation: required (bucket 2).
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity
+  must be supplied`, `--duration must be a positive number of hours`,
+  `access denied ...` (exit code 3), entity not-found / ambiguous (exit
+  code 2).
+
+#### `notifications` / `unmute`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`).
+- Required flags: exactly one chat reference.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first,
+  show the plan, wait for confirmation, then run without `--dry-run`.
+- Confirmation: required (bucket 2).
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity
+  must be supplied`, `access denied ...` (exit code 3), entity not-found
+  / ambiguous (exit code 2).
 
 #### `folders` / `inspect`
 

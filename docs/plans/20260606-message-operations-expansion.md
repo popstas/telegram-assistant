@@ -167,21 +167,21 @@ ruff check src tests
 
 ### Task 5: Notifications mute/unmute
 
-- [ ] Create `src/telegram_assistant/notifications/service.py` with:
+- [x] Create `src/telegram_assistant/notifications/service.py` with:
   - `NotificationBackend` protocol;
   - `MuteRequest`, `MuteResult`;
   - `mute_chat(...)` and `unmute_chat(...)`.
-- [ ] WRITE-gate both operations after entity resolution.
-- [ ] Implement `src/telegram_assistant/notifications/telethon_backend.py` using `UpdateNotifySettings`:
+- [x] WRITE-gate both operations after entity resolution.
+- [x] Implement `src/telegram_assistant/notifications/telethon_backend.py` using `UpdateNotifySettings`:
   - mute until a date when duration is provided;
   - mute indefinitely when duration is omitted;
   - unmute restores normal notification settings.
-- [ ] Register HTTP backend factory in `http_api/app.py`.
-- [ ] Add `src/telegram_assistant/http_api/notifications.py`.
-- [ ] Add CLI group `notifications` with `mute` and `unmute`, including `--dry-run`.
-- [ ] Add tests for domain validation, access denial, CLI dry-run, HTTP success/403/503, and fake Telethon request construction.
-- [ ] Update README and skill catalog.
-- [ ] Run `.venv/bin/pytest -q tests/test_notifications.py tests/test_skill_inventory.py`.
+- [x] Register HTTP backend factory in `http_api/app.py`.
+- [x] Add `src/telegram_assistant/http_api/notifications.py`.
+- [x] Add CLI group `notifications` with `mute` and `unmute`, including `--dry-run`.
+- [x] Add tests for domain validation, access denial, CLI dry-run, HTTP success/403/503, and fake Telethon request construction.
+- [x] Update README and skill catalog.
+- [x] Run `.venv/bin/pytest -q tests/test_notifications.py tests/test_skill_inventory.py`.
 
 ### Task 6: Reactions
 
