@@ -9,6 +9,7 @@
 
 ### Task
 
+- Expand MCP server task with FastMCP SDK + full OAuth AS decisions
 - Clear completed items from TODO (shipped in v0.4.0)
 
 ## v0.4.0 - 2026-06-06
