@@ -5,6 +5,7 @@
 
 ### Features
 
+- Expose MCP Telegram tools
 - Mount fastmcp streamable http server
 - Build local oauth authorization server
 - Add mcp config validation

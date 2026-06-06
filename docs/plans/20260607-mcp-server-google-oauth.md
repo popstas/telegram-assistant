@@ -139,14 +139,14 @@ authenticate with Google and drive Telegram operations through the same safety r
 
 ### Task 5: Integration tests for the MCP protocol + OAuth surface
 
-- [ ] Add tests covering MCP `initialize`, `tools/list`, and a representative `tools/call` end-to-end
+- [x] Add tests covering MCP `initialize`, `tools/list`, and a representative `tools/call` end-to-end
       through the fake-Google OAuth flow and fake backends
-- [ ] Assert token audience/scope checks reject mis-scoped or wrong-audience tokens at `tools/call`
-- [ ] Assert unchanged `/telegram/*` bearer auth and open `/health` behavior with MCP enabled
-- [ ] Document the MCP Inspector manual-e2e procedure and mark live Google/Telegram e2e as
+- [x] Assert token audience/scope checks reject mis-scoped or wrong-audience tokens at `tools/call`
+- [x] Assert unchanged `/telegram/*` bearer auth and open `/health` behavior with MCP enabled
+- [x] Document the MCP Inspector manual-e2e procedure and mark live Google/Telegram e2e as
       optional/skipped when creds/session are unavailable
-- [ ] write tests covering the above protocol/auth integration paths
-- [ ] run project tests - must pass before next task
+- [x] write tests covering the above protocol/auth integration paths
+- [x] run project tests - must pass before next task
 
 ### Task 6: Update docs and sync the skill
 
