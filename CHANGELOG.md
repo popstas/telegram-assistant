@@ -5,6 +5,7 @@
 
 ### Features
 
+- Notifications mute/unmute across domain, Telethon, CLI, and HTTP
 - Folders remove-chat across domain, Telethon, CLI, and HTTP
 - Wire media and scheduled sends into messages CLI/HTTP
 - TelethonMessageBackend for text/media/scheduled sends

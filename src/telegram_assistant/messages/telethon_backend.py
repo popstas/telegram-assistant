@@ -138,4 +138,42 @@ class TelethonMessageBackend:
         return _message_ids(sent)
 
 
-__all__ = ["TelethonMessageReadBackend", "TelethonMessageBackend"]
+class TelethonReactionBackend:
+    """Adapter from the Telethon ``TelegramClient`` to :class:`ReactionBackend`.
+
+    Translates a set/clear into a ``messages.SendReaction`` RPC. Setting passes
+    a single :class:`ReactionEmoji`; clearing passes ``reaction=None`` so
+    Telegram removes any existing reaction. ``FloodWaitError`` is translated so
+    the worker queue can pause-and-retry rather than mark a generic failure.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def set_reaction(
+        self, *, chat_id: int, message_id: int, emoji: str | None
+    ) -> None:
+        from telethon.tl.functions.messages import SendReactionRequest
+        from telethon.tl.types import ReactionEmoji
+
+        reaction = (
+            [ReactionEmoji(emoticon=emoji)] if emoji is not None else None
+        )
+        try:
+            peer = await self._client.get_input_entity(chat_id)
+            await self._client(
+                SendReactionRequest(
+                    peer=peer,
+                    msg_id=message_id,
+                    reaction=reaction,
+                )
+            )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+
+
+__all__ = [
+    "TelethonMessageReadBackend",
+    "TelethonMessageBackend",
+    "TelethonReactionBackend",
+]

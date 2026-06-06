@@ -60,8 +60,8 @@ Commands fall into three buckets:
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `topics create`, `topics close`, `messages send` (single chat),
-   `notifications mute`, `notifications unmute`, `folders add-chat`,
-   `folders remove-chat`, `operations retry`. Always:
+   `messages react`, `notifications mute`, `notifications unmute`,
+   `folders add-chat`, `folders remove-chat`, `operations retry`. Always:
    prepare command → run with `--dry-run` →
    show the plan and dry-run output → wait for explicit human confirmation
    → run the same command without `--dry-run`.
@@ -137,8 +137,9 @@ not skip steps, even if the request looks obvious.
    `--dry-run` first. The supported set is: `groups create`,
    `groups set-layout`, `topics create`, `topics bulk-create`,
    `topics close`, `members bulk-add`, `members bulk-remove`,
-   `messages send`, `notifications mute`, `notifications unmute`,
-   `folders add-chat`, `folders remove-chat`, `operations retry`.
+   `messages send`, `messages react`, `notifications mute`,
+   `notifications unmute`, `folders add-chat`, `folders remove-chat`,
+   `operations retry`.
 8. Present a short plan to the human: what was found (chat id, folder,
    matched users), the full command that would run, and the relevant parts
    of the dry-run output (`status = dry_run`, planned actions, validation
@@ -186,6 +187,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
+| `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
 | `notifications` | `mute` | Mute a chat/contact's notifications, forever or for `--duration` hours. | `telegram-assistant notifications mute ...` |
 | `notifications` | `unmute` | Restore normal notifications for a chat/contact. | `telegram-assistant notifications unmute ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
@@ -205,8 +207,9 @@ when a real (non-dry-run) call is allowed; **Typical errors** = error
 messages the agent must surface verbatim instead of paraphrasing.
 
 Most chat-targeting commands (`messages send`, `messages recent`,
-`topics create`/`close`/`bulk-create`, `members bulk-add`/`bulk-remove`,
-`notifications mute`/`unmute`, `folders add-chat`/`remove-chat`) also accept
+`messages react`, `topics create`/`close`/`bulk-create`,
+`members bulk-add`/`bulk-remove`, `notifications mute`/`unmute`,
+`folders add-chat`/`remove-chat`) also accept
 `--entity` as a flexible alternative to
 `--chat-id` / `--chat-name`. `--entity` takes a numeric id (with or
 without the `-100` prefix), an `@username`, a `t.me` / invite link, a
@@ -431,6 +434,25 @@ edits `data/config.yml` to widen access on its own.
   non-zero with `access denied`; surface that and stop.
 - Typical errors: `exactly one of --chat-id, --chat-name, or --entity
   must be supplied`, `access denied ...` (exit code 3), entity
+  not-found / ambiguous (exit code 2).
+
+#### `messages` / `react`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  `--message-id` (the message to react to), and either `--emoji` (set) or
+  `--clear` (remove).
+- Required flags: exactly one chat reference, `--message-id`, and exactly
+  one of `--emoji` / `--clear`.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first, show
+  the plan, wait for confirmation, then run without `--dry-run`. Map
+  «поставь 👍 на сообщение N» → `--emoji 👍 --message-id N`; «убери реакцию»
+  → `--clear`.
+- Confirmation: required (bucket 2).
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity must
+  be supplied`, `--message-id must be a positive integer`, `provide either
+  --emoji or --clear, not both`, `access denied ...` (exit code 3), entity
   not-found / ambiguous (exit code 2).
 
 #### `notifications` / `mute`

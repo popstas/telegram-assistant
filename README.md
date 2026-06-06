@@ -54,6 +54,7 @@ Top-level:
 
 - `messages send` — send a message or service command (targeted or folder-wide mass mode).
 - `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5).
+- `messages react` — set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated).
 
 `notifications` — mute and unmute chat/contact notifications:
 

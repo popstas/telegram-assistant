@@ -25,7 +25,11 @@ from telegram_assistant.http_api.notifications import (
 )
 from telegram_assistant.http_api.topics import build_router as build_topics_router
 from telegram_assistant.members import MemberAddBackend, MemberRemoveBackend
-from telegram_assistant.messages import MessageBackend, MessageReadBackend
+from telegram_assistant.messages import (
+    MessageBackend,
+    MessageReadBackend,
+    ReactionBackend,
+)
 from telegram_assistant.notifications import NotificationBackend
 from telegram_assistant.observability.logging import configure_logging
 from telegram_assistant.persistence.store import OperationStore
@@ -42,6 +46,7 @@ MemberBackendFactory = Callable[[Request], MemberAddBackend | None]
 MemberRemoveBackendFactory = Callable[[Request], MemberRemoveBackend | None]
 MessageBackendFactory = Callable[[Request], MessageBackend | None]
 MessageReadBackendFactory = Callable[[Request], MessageReadBackend | None]
+ReactionBackendFactory = Callable[[Request], ReactionBackend | None]
 NotificationBackendFactory = Callable[[Request], NotificationBackend | None]
 ResolverFactory = Callable[[Request], EntityResolver | None]
 
@@ -231,6 +236,30 @@ def _default_message_read_backend_factory(
     return _factory
 
 
+def _default_reaction_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> ReactionBackendFactory:
+    """Build a Telethon-backed message-reaction backend factory.
+
+    Mirrors :func:`_default_folder_backend_factory`: returns ``None`` until a
+    Telethon client is available so the reactions endpoint can return 503.
+    """
+
+    def _factory(_request: Request) -> ReactionBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonReactionBackend,
+        )
+
+        return TelethonReactionBackend(client)
+
+    return _factory
+
+
 def _default_notification_backend_factory(
     session_manager: TelethonSessionManager | None,
 ) -> NotificationBackendFactory:
@@ -290,6 +319,7 @@ def create_app(
     member_remove_backend_factory: MemberRemoveBackendFactory | None = None,
     message_backend_factory: MessageBackendFactory | None = None,
     message_read_backend_factory: MessageReadBackendFactory | None = None,
+    reaction_backend_factory: ReactionBackendFactory | None = None,
     notification_backend_factory: NotificationBackendFactory | None = None,
     resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
@@ -424,6 +454,11 @@ def create_app(
         message_read_backend_factory
         if message_read_backend_factory is not None
         else _default_message_read_backend_factory(session_manager)
+    )
+    app.state.reaction_backend_factory = (
+        reaction_backend_factory
+        if reaction_backend_factory is not None
+        else _default_reaction_backend_factory(session_manager)
     )
     app.state.notification_backend_factory = (
         notification_backend_factory

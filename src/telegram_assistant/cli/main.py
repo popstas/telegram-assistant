@@ -3147,6 +3147,231 @@ def messages_recent(
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
 
 
+def _build_reaction_backends(config_path: Path | None):
+    """Open the Telethon-backed reaction + folder backends.
+
+    ``_open`` returns ``(reaction_backend, folder_backend)``. The folder backend
+    resolves ``--chat-name`` and feeds the authorizer's folder rules. Tests
+    monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonReactionBackend,
+        )
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonReactionBackend(client),
+            TelethonFolderBackend(client),
+        )
+
+    return config, manager, _open
+
+
+@messages_app.command("react")
+def messages_react(
+    message_id: int = typer.Option(
+        ..., "--message-id", help="Numeric id of the message to react to."
+    ),
+    emoji: str | None = typer.Option(
+        None, "--emoji", help="Reaction emoji to set (mutually exclusive with --clear)."
+    ),
+    clear: bool = typer.Option(
+        False,
+        "--clear",
+        help="Remove the existing reaction instead of setting one.",
+    ),
+    chat_id: int | None = typer.Option(
+        None, "--chat-id", help="Numeric Telegram chat id."
+    ),
+    chat_name: str | None = typer.Option(
+        None, "--chat-name", help="Chat title (resolved within --folder-name)."
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None, "--folder-id", help="Optional folder id cross-check."
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without changing the reaction.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Set or clear an emoji reaction on a message (WRITE-gated)."""
+    from telegram_assistant.folders import FolderError
+    from telegram_assistant.messages import (
+        SendReactionRequest,
+        set_message_reaction,
+    )
+
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if message_id <= 0:
+        typer.echo("--message-id must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+    has_emoji = bool(emoji and emoji.strip())
+    if has_emoji and clear:
+        typer.echo("provide either --emoji or --clear, not both", err=True)
+        raise typer.Exit(code=2)
+    if not has_emoji and not clear:
+        typer.echo("provide either --emoji to set or --clear to remove", err=True)
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_reaction_backends(config_path)
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _resolve_target(folder_backend):
+        from telegram_assistant.folders import resolve_chat_in_folder
+
+        resolver = None
+        if config.telegram.access is not None or entity is not None:
+            from telegram_assistant.entities import TelethonEntityResolver
+
+            resolver = TelethonEntityResolver(await manager.get_client())
+
+        if entity is not None:
+            assert resolver is not None
+            resolved_entity = await resolver.resolve(entity)
+            resolved_chat_id = resolved_entity.chat_id
+            chat_name_for_log = resolved_entity.title
+        elif chat_id is not None:
+            resolved_chat_id = chat_id
+            chat_name_for_log = None
+        else:
+            resolved = await resolve_chat_in_folder(
+                folder_backend,
+                folder_name=resolved_folder_name or "",
+                chat_name=chat_name or "",
+                folder_id=effective_folder_id,
+            )
+            resolved_chat_id = resolved.chat_id
+            chat_name_for_log = resolved.title
+
+        authorizer = _cli_authorizer(
+            config, resolver=resolver, folder_backend=folder_backend
+        )
+        return resolved_chat_id, chat_name_for_log, authorizer
+
+    if dry_run:
+
+        async def _resolve_only() -> tuple[int, str | None]:
+            try:
+                _backend, folder_backend = await open_backends()
+                tid, name, _auth = await _resolve_target(folder_backend)
+                return tid, name
+            finally:
+                try:
+                    await manager.disconnect()
+                except Exception:
+                    pass
+
+        try:
+            tid, name = asyncio.run(_resolve_only())
+        except FolderError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"messages react failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        action = "clear reaction" if clear else f"set reaction {emoji!r}"
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "messages.react",
+            "would": f"{action} on message {message_id} in chat {tid}",
+            "resolved": {
+                "telegram_chat_id": tid,
+                "chat_name": name,
+                "telegram_message_id": message_id,
+                "emoji": None if clear else emoji,
+                "cleared": clear,
+            },
+            "planned_actions": [
+                f"{action} on message {message_id} in chat {tid}"
+            ],
+            "warnings": [],
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            backend, folder_backend = await open_backends()
+            tid, name, authorizer = await _resolve_target(folder_backend)
+            result = await set_message_reaction(
+                backend,
+                request=SendReactionRequest(
+                    telegram_chat_id=tid,
+                    message_id=message_id,
+                    emoji=emoji,
+                    clear=clear,
+                    chat_name=name,
+                ),
+                authorizer=authorizer,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"messages react failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
 # --- notifications ----------------------------------------------------------
 
 notifications_app = typer.Typer(

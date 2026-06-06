@@ -32,12 +32,15 @@ from telegram_assistant.messages import (
     MessageSendFailed,
     MessageSendNeedsReview,
     MessageSendPending,
+    ReactionBackend,
     ScheduleError,
     SendMessageRequest,
+    SendReactionRequest,
     get_recent_messages,
     mass_send_message,
     resolve_schedule_at,
     send_message,
+    set_message_reaction,
     validate_file_urls,
     validate_local_files,
 )
@@ -131,6 +134,48 @@ class MessageSendBody(BaseModel):
         return self
 
 
+class ReactionBody(BaseModel):
+    """Set or clear an emoji reaction on one message in a target chat.
+
+    The target is one of ``telegram_chat_id`` / ``entity`` / ``chat_name`` +
+    ``folder_name`` (same shape as a targeted send). Provide exactly one of a
+    non-empty ``emoji`` or ``clear=true``.
+    """
+
+    message_id: int
+    emoji: str | None = None
+    clear: bool = False
+    telegram_chat_id: int | None = None
+    entity: str | int | None = None
+    chat_name: str | None = None
+    folder_name: str | None = None
+    folder_id: int | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> ReactionBody:
+        if self.message_id <= 0:
+            raise ValueError("message_id must be a positive integer")
+        has_emoji = bool(self.emoji and self.emoji.strip())
+        if has_emoji and self.clear:
+            raise ValueError("provide either emoji or clear, not both")
+        if not has_emoji and not self.clear:
+            raise ValueError("provide either an emoji to set or clear=true")
+        refs = sum(
+            [
+                self.telegram_chat_id is not None,
+                self.entity is not None,
+                self.chat_name is not None,
+            ]
+        )
+        if refs != 1:
+            raise ValueError(
+                "provide exactly one of telegram_chat_id, entity, or chat_name"
+            )
+        if self.chat_name is not None and self.folder_name is None:
+            raise ValueError("chat_name requires folder_name")
+        return self
+
+
 def _message_backend_or_503(request: Request) -> MessageBackend:
     factory = getattr(request.app.state, "message_backend_factory", None)
     if factory is None:
@@ -147,6 +192,22 @@ def _message_backend_or_503(request: Request) -> MessageBackend:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram message backend is not available",
+        )
+    return backend
+
+
+def _reaction_backend_or_503(request: Request) -> ReactionBackend:
+    factory = getattr(request.app.state, "reaction_backend_factory", None)
+    if factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram reaction backend is not configured (session may be unauthorized)",
+        )
+    backend = factory(request)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram reaction backend is not available",
         )
     return backend
 
@@ -402,6 +463,55 @@ def build_router() -> APIRouter:
         payload["operation_status"] = op.status.value
         payload["mode"] = "targeted"
         return payload
+
+    @router.post("/messages/reactions")
+    async def react(body: ReactionBody, request: Request) -> dict[str, Any]:
+        """Set or clear an emoji reaction on a message (WRITE-gated)."""
+        backend = _reaction_backend_or_503(request)
+
+        if body.entity is not None:
+            telegram_chat_id = await resolve_entity_chat_id(request, body.entity)
+            chat_name_for_log: str | None = None
+        elif body.telegram_chat_id is not None:
+            telegram_chat_id = body.telegram_chat_id
+            chat_name_for_log = None
+        else:
+            folder_backend = _folder_backend_or_503(request)
+            try:
+                chat = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=body.folder_name or "",
+                    chat_name=body.chat_name or "",
+                    folder_id=body.folder_id,
+                )
+            except FolderError as exc:
+                raise _translate_folder_error(exc) from exc
+            telegram_chat_id = chat.chat_id
+            chat_name_for_log = chat.title
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        try:
+            result = await set_message_reaction(
+                backend,
+                request=SendReactionRequest(
+                    telegram_chat_id=telegram_chat_id,
+                    message_id=body.message_id,
+                    emoji=body.emoji,
+                    clear=body.clear,
+                    chat_name=chat_name_for_log,
+                ),
+                authorizer=authorizer,
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        return result.to_dict()
 
     @router.get("/messages/recent")
     async def recent(

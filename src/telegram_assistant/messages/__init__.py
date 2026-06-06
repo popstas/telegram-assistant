@@ -5,6 +5,12 @@ from telegram_assistant.messages.attachments import (
     validate_file_urls,
     validate_local_files,
 )
+from telegram_assistant.messages.reactions import (
+    ReactionBackend,
+    SendReactionRequest,
+    SendReactionResult,
+    set_message_reaction,
+)
 from telegram_assistant.messages.service import (
     MassSendItemResult,
     MassSendRequest,
@@ -38,10 +44,13 @@ __all__ = [
     "MessageSendFailed",
     "MessageSendNeedsReview",
     "MessageSendPending",
+    "ReactionBackend",
     "RecentMessage",
     "ScheduleError",
     "SendMessageRequest",
     "SendMessageResult",
+    "SendReactionRequest",
+    "SendReactionResult",
     "get_recent_messages",
     "is_service_command",
     "mass_send_message",
@@ -50,6 +59,7 @@ __all__ = [
     "redact_message_text",
     "resolve_schedule_at",
     "send_message",
+    "set_message_reaction",
     "validate_file_urls",
     "validate_local_files",
 ]
