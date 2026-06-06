@@ -53,6 +53,7 @@ Top-level:
 `messages` — send messages and service commands:
 
 - `messages send` — send a message or service command (targeted or folder-wide mass mode).
+- `messages react` — set or clear an emoji reaction on a message.
 - `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5).
 
 Most chat-targeting commands accept `--entity` (a numeric id with/without `-100`, `@username`, `t.me`/invite link, phone, or exact title) as a flexible alternative to `--chat-id`/`--chat-name`.

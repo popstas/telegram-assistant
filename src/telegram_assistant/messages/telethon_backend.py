@@ -74,6 +74,29 @@ class TelethonMessageBackend:
             telegram_message_ids=ids,
         )
 
+    async def set_message_reaction(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        emoji: str | None,
+    ) -> None:
+        from telethon.tl.functions.messages import SendReactionRequest
+        from telethon.tl.types import ReactionEmoji
+
+        try:
+            input_peer = await self._client.get_input_entity(chat_id)
+            reaction = [] if emoji is None else [ReactionEmoji(emoticon=emoji)]
+            await self._client(
+                SendReactionRequest(
+                    peer=input_peer,
+                    msg_id=message_id,
+                    reaction=reaction,
+                )
+            )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+
 
 class TelethonMessageReadBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`MessageReadBackend`."""

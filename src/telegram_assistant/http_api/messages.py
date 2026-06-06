@@ -27,6 +27,7 @@ from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.messages import (
     MassSendRequest,
     MessageBackend,
+    MessageReactionRequest,
     MessageReadBackend,
     MessageSendFailed,
     MessageSendNeedsReview,
@@ -37,6 +38,7 @@ from telegram_assistant.messages import (
     normalize_attachment_inputs,
     resolve_schedule_at,
     send_message,
+    set_message_reaction,
 )
 from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.topics import (
@@ -115,6 +117,34 @@ class MessageSendBody(BaseModel):
             raise ValueError("chat_name requires folder_name")
         if not (self.text and self.text.strip()) and not has_attachments:
             raise ValueError("must provide text or at least one attachment")
+        return self
+
+
+class MessageReactionBody(BaseModel):
+    telegram_chat_id: int | None = None
+    chat_name: str | None = None
+    entity: str | int | None = None
+    folder_name: str | None = None
+    folder_id: int | None = None
+    message_id: int
+    emoji: str | None = None
+    clear: bool = False
+
+    @model_validator(mode="after")
+    def _shape(self) -> MessageReactionBody:
+        refs = sum(
+            [
+                self.telegram_chat_id is not None,
+                self.chat_name is not None,
+                self.entity is not None,
+            ]
+        )
+        if refs != 1:
+            raise ValueError(
+                "provide exactly one of telegram_chat_id, entity, or chat_name"
+            )
+        if self.chat_name is not None and not self.folder_name:
+            raise ValueError("chat_name requires folder_name")
         return self
 
 
@@ -380,6 +410,51 @@ def build_router() -> APIRouter:
         payload["operation_status"] = op.status.value
         payload["mode"] = "targeted"
         return payload
+
+    @router.post("/messages/reactions")
+    async def react(
+        body: MessageReactionBody, request: Request
+    ) -> dict[str, Any]:
+        backend = _message_backend_or_503(request)
+
+        if body.entity is not None:
+            telegram_chat_id = await resolve_entity_chat_id(request, body.entity)
+        elif body.telegram_chat_id is not None:
+            telegram_chat_id = body.telegram_chat_id
+        else:
+            folder_backend = _folder_backend_or_503(request)
+            try:
+                chat = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=body.folder_name or "",
+                    chat_name=body.chat_name or "",
+                    folder_id=body.folder_id,
+                )
+            except FolderError as exc:
+                raise _translate_folder_error(exc) from exc
+            telegram_chat_id = chat.chat_id
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        try:
+            result = await set_message_reaction(
+                backend=backend,
+                request=MessageReactionRequest(
+                    telegram_chat_id=telegram_chat_id,
+                    telegram_message_id=body.message_id,
+                    emoji=body.emoji,
+                    clear=body.clear,
+                ),
+                authorizer=authorizer,
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+        return result.to_dict()
 
     @router.get("/messages/recent")
     async def recent(

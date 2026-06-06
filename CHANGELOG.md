@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add notifications mute unmute
 - Add folder remove-chat
 - Wire media and scheduled message sends
 - Add Telethon media message backend

@@ -60,8 +60,8 @@ Commands fall into three buckets:
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `topics create`, `topics close`, `messages send` (single chat),
-   `notifications mute`, `notifications unmute`, `folders add-chat`,
-   `folders remove-chat`, `operations retry`. Always: prepare command → run
+   `messages react`, `notifications mute`, `notifications unmute`,
+   `folders add-chat`, `folders remove-chat`, `operations retry`. Always: prepare command → run
    with `--dry-run` →
    show the plan and dry-run output → wait for explicit human confirmation
    → run the same command without `--dry-run`.
@@ -137,7 +137,7 @@ not skip steps, even if the request looks obvious.
    `--dry-run` first. The supported set is: `groups create`,
    `groups set-layout`, `topics create`, `topics bulk-create`,
    `topics close`, `members bulk-add`, `members bulk-remove`,
-   `messages send`, `notifications mute`, `notifications unmute`,
+   `messages send`, `messages react`, `notifications mute`, `notifications unmute`,
    `folders add-chat`, `folders remove-chat`, `operations retry`.
 8. Present a short plan to the human: what was found (chat id, folder,
    matched users), the full command that would run, and the relevant parts
@@ -185,6 +185,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
+| `messages` | `react` | Set or clear an emoji reaction on a message in one chat. | `telegram-assistant messages react ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `notifications` | `mute` | Mute notifications for one chat, indefinitely or for a duration in hours. | `telegram-assistant notifications mute ...` |
 | `notifications` | `unmute` | Restore normal notifications for one chat. | `telegram-assistant notifications unmute ...` |
@@ -204,7 +205,7 @@ from `data/config.yml`; **Temp file** = whether `/tmp/...` is needed;
 when a real (non-dry-run) call is allowed; **Typical errors** = error
 messages the agent must surface verbatim instead of paraphrasing.
 
-Most chat-targeting commands (`messages send`, `messages recent`,
+Most chat-targeting commands (`messages send`, `messages react`, `messages recent`,
 `notifications mute`/`unmute`,
 `topics create`/`close`/`bulk-create`, `members bulk-add`/`bulk-remove`,
 `folders add-chat` / `folders remove-chat`) also accept `--entity` as a flexible alternative to
@@ -414,6 +415,22 @@ edits `data/config.yml` to widen access on its own.
   `--mass cannot be combined with --chat-id or --chat-name`,
   `mass mode requires --topic-name (and --folder-name resolves the
   folder)`, `MessageSendNeedsReview`.
+
+#### `messages` / `react`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  `--message-id`, and either `--emoji` or `--clear`.
+- Required flags: exactly one chat reference, positive `--message-id`,
+  and exactly one of `--emoji` / `--clear`.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: always run `--dry-run` first. Use `--clear` only when the
+  human explicitly asks to remove the reaction.
+- Confirmation: required after dry-run. Show the resolved chat id,
+  message id, and whether the operation sets an emoji or clears the
+  reaction.
+- Typical errors: `provide --emoji or --clear`, `provide either --emoji
+  or --clear, not both`, `--message-id must be a positive integer`.
 
 #### `messages` / `recent`
 

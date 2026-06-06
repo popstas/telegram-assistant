@@ -2449,6 +2449,14 @@ def _build_message_backends(config_path: Path | None):
     return config, manager, store, _open
 
 
+def _split_message_backends(opened):
+    if len(opened) == 3:
+        message_backend, topic_backend, folder_backend = opened
+        return message_backend, topic_backend, folder_backend
+    topic_backend, folder_backend = opened
+    return topic_backend, topic_backend, folder_backend
+
+
 @messages_app.command("send")
 def messages_send(
     text: str | None = typer.Option(
@@ -2619,13 +2627,6 @@ def messages_send(
         raise typer.Exit(code=2)
 
     config, manager, store, open_backends = _build_message_backends(config_path)
-
-    def _split_message_backends(opened):
-        if len(opened) == 3:
-            message_backend, topic_backend, folder_backend = opened
-            return message_backend, topic_backend, folder_backend
-        topic_backend, folder_backend = opened
-        return topic_backend, topic_backend, folder_backend
 
     # Mass mode and chat_name resolution both need the folder default.
     if is_mass or chat_name is not None:
@@ -2989,6 +2990,189 @@ def messages_send(
     except Exception as exc:
         _raise_for_access_or_entity_error(exc)
         typer.echo(f"messages send failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
+@messages_app.command("react")
+def messages_react(
+    message_id: int = typer.Option(
+        ...,
+        "--message-id",
+        help="Telegram message id to react to.",
+    ),
+    emoji: str | None = typer.Option(
+        None,
+        "--emoji",
+        help="Emoji reaction to set.",
+    ),
+    clear: bool = typer.Option(
+        False,
+        "--clear",
+        help="Clear the current reaction instead of setting an emoji.",
+    ),
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id.",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, t.me/invite link, "
+        "phone, or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without changing reactions.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Set or clear an emoji reaction on a message (WRITE-gated)."""
+    from telegram_assistant.folders import FolderError
+    from telegram_assistant.messages import (
+        MessageReactionRequest,
+        set_message_reaction,
+    )
+
+    refs = sum([chat_id is not None, chat_name is not None, entity is not None])
+    if refs != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if message_id <= 0:
+        typer.echo("--message-id must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+    if clear and emoji is not None:
+        typer.echo("provide either --emoji or --clear, not both", err=True)
+        raise typer.Exit(code=2)
+    if not clear and not (emoji and emoji.strip()):
+        typer.echo("provide --emoji or --clear", err=True)
+        raise typer.Exit(code=2)
+
+    config, manager, _store, open_backends = _build_message_backends(config_path)
+
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _resolve() -> tuple[int, object, object]:
+        try:
+            _message_backend, _topic_backend, folder_backend = _split_message_backends(
+                await open_backends()
+            )
+            resolved_chat_id, authorizer = await _cli_resolve_chat_and_authorizer(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
+            return resolved_chat_id, authorizer, _message_backend
+        except Exception:
+            raise
+
+    if dry_run:
+        try:
+            resolved_chat_id, _authorizer, _message_backend = asyncio.run(_resolve())
+        except FolderError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"messages react failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        finally:
+            try:
+                asyncio.run(manager.disconnect())
+            except Exception:
+                pass
+
+        action = "clear reaction" if clear else f"set reaction {emoji!r}"
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "messages.react",
+            "would": f"{action} on message {message_id} in chat {resolved_chat_id}",
+            "resolved": {
+                "telegram_chat_id": resolved_chat_id,
+                "telegram_message_id": message_id,
+                "emoji": None if clear else (emoji or "").strip(),
+                "clear": clear,
+            },
+            "planned_actions": [
+                f"would {action} on message {message_id} in chat {resolved_chat_id}"
+            ],
+            "warnings": [],
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            resolved_chat_id, authorizer, message_backend = await _resolve()
+            result = await set_message_reaction(
+                backend=message_backend,
+                request=MessageReactionRequest(
+                    telegram_chat_id=resolved_chat_id,
+                    telegram_message_id=message_id,
+                    emoji=emoji,
+                    clear=clear,
+                ),
+                authorizer=authorizer,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"messages react failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
     typer.echo(json.dumps(payload, sort_keys=True, default=str))

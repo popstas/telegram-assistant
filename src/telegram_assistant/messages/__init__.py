@@ -13,6 +13,9 @@ from telegram_assistant.messages.service import (
     MessageAttachmentRequest,
     MessageAttachmentResult,
     MessageBackend,
+    MessageReactionBackend,
+    MessageReactionRequest,
+    MessageReactionResult,
     MessageReadBackend,
     MessageSendFailed,
     MessageSendNeedsReview,
@@ -26,6 +29,7 @@ from telegram_assistant.messages.service import (
     mass_send_message,
     redact_message_text,
     send_message,
+    set_message_reaction,
 )
 from telegram_assistant.messages.telethon_backend import TelethonMessageBackend
 
@@ -37,6 +41,9 @@ __all__ = [
     "MessageAttachmentResult",
     "MessageBackend",
     "MessageReadBackend",
+    "MessageReactionBackend",
+    "MessageReactionRequest",
+    "MessageReactionResult",
     "MessageSendFailed",
     "MessageSendNeedsReview",
     "MessageSendPending",
@@ -54,4 +61,5 @@ __all__ = [
     "redact_message_text",
     "resolve_schedule_at",
     "send_message",
+    "set_message_reaction",
 ]

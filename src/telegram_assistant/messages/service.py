@@ -144,6 +144,19 @@ class MessageReadBackend(Protocol):
         ...
 
 
+class MessageReactionBackend(Protocol):
+    """Telethon-facing surface needed to set or clear message reactions."""
+
+    async def set_message_reaction(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        emoji: str | None,
+    ) -> None:
+        ...
+
+
 @dataclass(frozen=True)
 class MessageAttachmentRequest:
     """Attachment reference supplied by a caller.
@@ -307,6 +320,34 @@ class SendMessageResult:
         )
 
 
+@dataclass(frozen=True)
+class MessageReactionRequest:
+    """Input to :func:`set_message_reaction`."""
+
+    telegram_chat_id: int
+    telegram_message_id: int
+    emoji: str | None = None
+    clear: bool = False
+
+
+@dataclass(frozen=True)
+class MessageReactionResult:
+    """Result returned by :func:`set_message_reaction`."""
+
+    telegram_chat_id: int
+    telegram_message_id: int
+    emoji: str | None
+    cleared: bool
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "telegram_chat_id": self.telegram_chat_id,
+            "telegram_message_id": self.telegram_message_id,
+            "emoji": self.emoji,
+            "cleared": self.cleared,
+        }
+
+
 def _validate_send_request(request: SendMessageRequest) -> None:
     has_text = bool(request.text and request.text.strip())
     attachments = request.attachments()
@@ -467,6 +508,51 @@ async def get_recent_messages(
         await authorizer.require(chat_id, AccessLevel.READ)
 
     return await backend.get_recent_messages(chat_id=chat_id, limit=limit)
+
+
+# ---------------------------------------------------------------------------
+# Message reactions (write op)
+# ---------------------------------------------------------------------------
+
+
+def _validate_reaction_request(request: MessageReactionRequest) -> None:
+    if request.telegram_message_id <= 0:
+        raise ValueError("message_id must be a positive integer")
+    has_emoji = request.emoji is not None and bool(request.emoji.strip())
+    if request.clear and request.emoji is not None:
+        raise ValueError("provide either emoji or clear=True, not both")
+    if not request.clear and not has_emoji:
+        raise ValueError("provide emoji or clear=True")
+
+
+async def set_message_reaction(
+    *,
+    backend: MessageReactionBackend,
+    request: MessageReactionRequest,
+    authorizer: Authorizer | None = None,
+) -> MessageReactionResult:
+    """Set or clear a reaction on one message.
+
+    Reactions are WRITE operations on the target chat. Access is checked before
+    the backend is called so a denied request never mutates Telegram state.
+    """
+    _validate_reaction_request(request)
+
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
+
+    emoji = None if request.clear else (request.emoji or "").strip()
+    await backend.set_message_reaction(
+        chat_id=request.telegram_chat_id,
+        message_id=request.telegram_message_id,
+        emoji=emoji,
+    )
+    return MessageReactionResult(
+        telegram_chat_id=request.telegram_chat_id,
+        telegram_message_id=request.telegram_message_id,
+        emoji=emoji,
+        cleared=request.clear,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -764,6 +850,9 @@ __all__ = [
     "MessageAttachmentResult",
     "MessageBackend",
     "MessageReadBackend",
+    "MessageReactionBackend",
+    "MessageReactionRequest",
+    "MessageReactionResult",
     "MessageSendFailed",
     "MessageSendNeedsReview",
     "MessageSendPending",
@@ -776,4 +865,5 @@ __all__ = [
     "mass_send_message",
     "redact_message_text",
     "send_message",
+    "set_message_reaction",
 ]

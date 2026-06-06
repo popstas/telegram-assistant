@@ -185,18 +185,18 @@ ruff check src tests
 
 ### Task 6: Reactions
 
-- [ ] Add reaction request/result types and backend protocol in `messages/service.py` or a small `messages/reactions.py` if `service.py` becomes too large.
-- [ ] Implement `set_message_reaction(...)`:
+- [x] Add reaction request/result types and backend protocol in `messages/service.py` or a small `messages/reactions.py` if `service.py` becomes too large.
+- [x] Implement `set_message_reaction(...)`:
   - require `message_id > 0`;
   - require either `emoji` or `clear=True`, not both;
   - WRITE-gate the target chat;
   - call backend and return `{telegram_chat_id, telegram_message_id, emoji, cleared}`.
-- [ ] Implement Telethon reaction adapter using `SendReaction`.
-- [ ] Add CLI `messages react` with `--message-id`, `--emoji`, `--clear`, entity targeting, and `--dry-run`.
-- [ ] Add HTTP `POST /telegram/messages/reactions`.
-- [ ] Add tests for set, clear, invalid shape, access denied, CLI dry-run, HTTP success/400/403, and fake Telethon request construction.
-- [ ] Update README and skill catalog.
-- [ ] Run `.venv/bin/pytest -q tests/test_messages_reactions.py tests/test_skill_inventory.py`.
+- [x] Implement Telethon reaction adapter using `SendReaction`.
+- [x] Add CLI `messages react` with `--message-id`, `--emoji`, `--clear`, entity targeting, and `--dry-run`.
+- [x] Add HTTP `POST /telegram/messages/reactions`.
+- [x] Add tests for set, clear, invalid shape, access denied, CLI dry-run, HTTP success/400/403, and fake Telethon request construction.
+- [x] Update README and skill catalog.
+- [x] Run `.venv/bin/pytest -q tests/test_messages_reactions.py tests/test_skill_inventory.py`.
 
 ### Task 7: Forward messages
 
