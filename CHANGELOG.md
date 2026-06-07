@@ -15,6 +15,7 @@
 
 ### Bug Fixes
 
+- mcp: Allow public reverse proxy host
 - mcp: Allow browser OAuth preflights
 - review: Secure mcp oauth tools
 
