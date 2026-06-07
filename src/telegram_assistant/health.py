@@ -27,7 +27,8 @@ DATABASE_OK = "ok"
 DATABASE_ERROR = "error"
 FOLDER_OK = "ok"
 FOLDER_MISSING = "missing"
-DEFAULT_TELEGRAM_PROBE_TIMEOUT_SECONDS = 10.0
+FOLDER_NOT_CHECKED = "not_checked"
+DEFAULT_TELEGRAM_PROBE_TIMEOUT_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -130,22 +131,16 @@ async def _resolve_folder_status(
     return FOLDER_OK
 
 
-async def _probe_session_and_folder(
+async def _probe_session_only(
     manager: TelethonSessionManager | None,
-    folder_name: str,
     *,
-    folder_id: int | None = None,
     timeout_seconds: float = DEFAULT_TELEGRAM_PROBE_TIMEOUT_SECONDS,
 ) -> tuple[str, str]:
-    """Return ``(session_status, folder_status)`` from a single ``state()`` call.
-
-    Used by :func:`collect_health` on the production path so one ``/health``
-    poll makes one Telegram round-trip instead of three.
-    """
+    """Return Telegram account health without probing folders."""
     if manager is None:
         logger.info("telegram health probe skipped reason=no_session_manager")
-        return SESSION_UNAUTHORIZED, FOLDER_MISSING
-    logger.info("telegram health probe start folder_name=%s folder_id=%s", folder_name, folder_id)
+        return SESSION_UNAUTHORIZED, FOLDER_NOT_CHECKED
+    logger.info("telegram health probe start")
     try:
         state = await asyncio.wait_for(manager.state(), timeout=timeout_seconds)
     except TimeoutError:
@@ -153,36 +148,20 @@ async def _probe_session_and_folder(
             "telegram health session state timeout timeout_seconds=%s",
             timeout_seconds,
         )
-        return SESSION_UNAUTHORIZED, FOLDER_MISSING
+        return SESSION_UNAUTHORIZED, FOLDER_NOT_CHECKED
     except Exception as exc:
         logger.warning(
             "telegram health session state failed error_type=%s error=%s",
             type(exc).__name__,
             exc,
         )
-        return SESSION_UNAUTHORIZED, FOLDER_MISSING
+        return SESSION_UNAUTHORIZED, FOLDER_NOT_CHECKED
     logger.info(
         "telegram health session state result authorized=%s",
         bool(state.authorized),
     )
-    if not state.authorized:
-        return SESSION_UNAUTHORIZED, FOLDER_MISSING
-    logger.info("telegram health folder probe start folder_name=%s folder_id=%s", folder_name, folder_id)
-    try:
-        folder_status = await asyncio.wait_for(
-            _resolve_folder_status(manager, folder_name, folder_id=folder_id),
-            timeout=timeout_seconds,
-        )
-    except TimeoutError:
-        logger.warning(
-            "telegram health folder probe timeout timeout_seconds=%s folder_name=%s folder_id=%s",
-            timeout_seconds,
-            folder_name,
-            folder_id,
-        )
-        folder_status = FOLDER_MISSING
-    logger.info("telegram health folder probe result status=%s", folder_status)
-    return SESSION_AUTHORIZED, folder_status
+    session_status = SESSION_AUTHORIZED if state.authorized else SESSION_UNAUTHORIZED
+    return session_status, FOLDER_NOT_CHECKED
 
 
 async def collect_health(
@@ -201,23 +180,17 @@ async def collect_health(
     even when Telegram is unauthorized — individual fields carry the detail.
     """
     db_path = database_path if database_path is not None else default_database_path(config)
-    folder_name = config.telegram.default_chat_folder.folder_name
-    folder_id = config.telegram.default_chat_folder.folder_id
-
     database_status = await (
         database_probe() if database_probe is not None else probe_database(db_path)
     )
 
-    # Production path (no injected probes): fetch the session state exactly once
-    # and reuse it for both the session and folder checks. This avoids the
-    # redundant `state()`/`get_me()` round-trips a `/health` poll otherwise
-    # makes every interval.
+    # Production path (no injected probes): fetch the session state exactly once.
+    # Folder existence is intentionally not checked from aggregate health;
+    # callers that need it can still inject or call a folder probe explicitly.
     if session_probe is None and folder_probe is None:
         try:
-            session_status, folder_status = await _probe_session_and_folder(
+            session_status, folder_status = await _probe_session_only(
                 session_manager,
-                folder_name,
-                folder_id=folder_id,
                 timeout_seconds=telegram_probe_timeout_seconds,
             )
         except Exception as exc:
@@ -226,8 +199,10 @@ async def collect_health(
                 type(exc).__name__,
                 exc,
             )
-            session_status, folder_status = SESSION_UNAUTHORIZED, FOLDER_MISSING
+            session_status, folder_status = SESSION_UNAUTHORIZED, FOLDER_NOT_CHECKED
     else:
+        folder_name = config.telegram.default_chat_folder.folder_name
+        folder_id = config.telegram.default_chat_folder.folder_id
         try:
             session_status = await asyncio.wait_for(
                 session_probe()

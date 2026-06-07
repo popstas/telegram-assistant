@@ -37,8 +37,6 @@ class _FakeClient:
         self.connect_calls = 0
         self.disconnect_calls = 0
         self.authorized = True
-        # One filter matching the minimal_config_yaml folder so the health
-        # probe's resolve_folder call succeeds.
         self.folders = [_FakeFolder(2, "Planfix clients")]
 
     async def connect(self) -> None:
@@ -81,7 +79,7 @@ def test_create_app_auto_constructs_session_manager_and_connects_on_startup(
         assert response.status_code == 200
         body = response.json()
         assert body["telegram_session"] == "authorized"
-        assert body["default_folder"] == "ok"
+        assert body["default_folder"] == "not_checked"
 
     # After the context exits the shutdown hook disconnected the client.
     assert fake.disconnect_calls >= 1
