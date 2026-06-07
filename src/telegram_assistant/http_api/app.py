@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from telegram_assistant import __version__
 from telegram_assistant.config import AppConfig, load_config
@@ -18,6 +19,12 @@ from telegram_assistant.health import collect_health, default_database_path
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.http_api.folders import build_router as build_folders_router
 from telegram_assistant.http_api.groups import build_router as build_groups_router
+from telegram_assistant.http_api.mcp import (
+    GoogleOidcProvider,
+    OAuthAuthorizationServer,
+    build_fastmcp_server,
+    build_oauth_router,
+)
 from telegram_assistant.http_api.members import build_router as build_members_router
 from telegram_assistant.http_api.messages import build_router as build_messages_router
 from telegram_assistant.http_api.notifications import (
@@ -350,6 +357,7 @@ def create_app(
     notification_backend_factory: NotificationBackendFactory | None = None,
     resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
+    mcp_google_provider: GoogleOidcProvider | None = None,
 ) -> FastAPI:
     """Build a FastAPI instance.
 
@@ -389,6 +397,29 @@ def create_app(
         except Exception:
             session_manager = None
 
+    mcp_app_ref: dict[str, FastAPI] = {}
+
+    def _mcp_app_state() -> object:
+        app_ref = mcp_app_ref.get("app")
+        if app_ref is None:
+            raise RuntimeError("FastAPI app state is not available yet")
+        return app_ref.state
+
+    mcp_oauth_server: OAuthAuthorizationServer | None = None
+    mcp_fastmcp_server = None
+    mcp_asgi_app = None
+    if config.mcp is not None and config.mcp.enabled:
+        mcp_oauth_server = OAuthAuthorizationServer(
+            config.mcp,
+            google_provider=mcp_google_provider,
+        )
+        mcp_fastmcp_server = build_fastmcp_server(
+            config,
+            oauth_server=mcp_oauth_server,
+            app_state_provider=_mcp_app_state,
+        )
+        mcp_asgi_app = mcp_fastmcp_server.streamable_http_app()
+
     lifespan: Callable[[FastAPI], AsyncIterator[None]] | None = None
     if auto_constructed_manager and session_manager is not None:
         manager_ref = session_manager
@@ -401,26 +432,23 @@ def create_app(
             backoff = 1.0
             while True:
                 try:
-                    await asyncio.sleep(backoff)
                     await manager_ref.get_client()
                     return
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60.0)
 
         @asynccontextmanager
         async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-            retry_task: asyncio.Task[None] | None = None
-            try:
-                await manager_ref.get_client()
-            except Exception:
-                # Service must still respond to /health when Telegram is
-                # unreachable or the session is unauthorized — the health
-                # probes will surface the real state. Spawn a background
-                # retry so the service recovers automatically once Telegram
-                # is reachable again.
-                retry_task = asyncio.create_task(_retry_connect_until_ready())
+            # Service startup must not wait on Telegram connectivity. The
+            # background task connects immediately when possible and retries
+            # with backoff when Telegram or the container network is down.
+            retry_task: asyncio.Task[None] | None = asyncio.create_task(
+                _retry_connect_until_ready()
+            )
+            await asyncio.sleep(0)
             try:
                 yield
             finally:
@@ -437,11 +465,35 @@ def create_app(
 
         lifespan = _lifespan
 
+    if mcp_fastmcp_server is not None:
+        telegram_lifespan = lifespan
+
+        @asynccontextmanager
+        async def _combined_lifespan(app: FastAPI) -> AsyncIterator[None]:
+            async with AsyncExitStack() as stack:
+                if telegram_lifespan is not None:
+                    await stack.enter_async_context(telegram_lifespan(app))
+                await stack.enter_async_context(
+                    mcp_fastmcp_server.session_manager.run()
+                )
+                yield
+
+        lifespan = _combined_lifespan
+
     app = FastAPI(
         title="telegram-assistant",
         version=__version__,
         lifespan=lifespan,
     )
+    if mcp_oauth_server is not None:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+            expose_headers=["WWW-Authenticate", "Mcp-Session-Id"],
+        )
+    mcp_app_ref["app"] = app
     app.state.config = config
     app.state.plugin_registry = build_registry(config)
     app.state.session_manager = session_manager
@@ -513,6 +565,12 @@ def create_app(
             # 503 on demand rather than failing at app startup.
             app.state.operation_store = None
 
+    app.state.mcp_oauth_server = mcp_oauth_server
+    app.state.mcp_fastmcp_server = mcp_fastmcp_server
+    app.state.mcp_asgi_app = mcp_asgi_app
+    if mcp_oauth_server is not None:
+        app.include_router(build_oauth_router(mcp_oauth_server))
+
     app.include_router(_build_health_router())
     app.include_router(_build_protected_router(), prefix="/telegram")
     app.include_router(build_folders_router(), prefix="/telegram")
@@ -521,5 +579,7 @@ def create_app(
     app.include_router(build_members_router(), prefix="/telegram")
     app.include_router(build_messages_router(), prefix="/telegram")
     app.include_router(build_notifications_router(), prefix="/telegram")
+    if mcp_asgi_app is not None:
+        app.mount("/", mcp_asgi_app)
 
     return app

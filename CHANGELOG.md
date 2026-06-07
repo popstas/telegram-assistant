@@ -3,8 +3,35 @@
 
 ## Unreleased
 
+### Features
+
+- Verify mcp acceptance criteria
+- Document optional mcp server
+- Add mcp oauth integration tests
+- Expose MCP Telegram tools
+- Mount fastmcp streamable http server
+- Build local oauth authorization server
+- Add mcp config validation
+
+### Bug Fixes
+
+- health: Skip default folder probe
+- health: Preserve Telegram auth status
+- health: Allow slower Telegram probes
+- http: Keep health responsive during outages
+- mcp: Allow public reverse proxy host
+- mcp: Allow browser OAuth preflights
+- review: Secure mcp oauth tools
+
+### Documentation
+
+- todo: Fix completed MCP plan link
+- Move plans
+
 ### Task
 
+- Refresh docker TODO queue
+- Expand MCP server task with FastMCP SDK + full OAuth AS decisions
 - Clear completed items from TODO (shipped in v0.4.0)
 
 ## v0.4.0 - 2026-06-06

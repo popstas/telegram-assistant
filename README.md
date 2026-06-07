@@ -2,9 +2,10 @@
 
 Telegram automation service for the Planfix ↔ Telegram integration.
 
-Three interfaces share one domain layer:
+Runtime surfaces share one domain layer:
 
 - HTTP API (FastAPI) on port `8085` with bearer-token auth — primary entry point for Planfix and automations.
+- MCP server (Streamable HTTP) mounted at `/mcp` when explicitly enabled — for MCP clients such as Claude or MCP Inspector, authenticated through the local OAuth Authorization Server.
 - CLI (`telegram-assistant`) — mirrors every HTTP endpoint plus admin commands (`auth`, `operations status`, `operations retry`).
 - Worker/queue — performs Telegram operations with throttling and `FLOOD_WAIT` handling.
 
@@ -93,6 +94,105 @@ All `/telegram/*` endpoints require `Authorization: Bearer <token>` and use the 
 - `POST /telegram/notifications/mute` and `/telegram/notifications/unmute` mute or unmute a target chat/contact; mute accepts positive `duration_hours`.
 - `DELETE /telegram/folders/{folder_name}/chats` removes `chat_id`, `chat_name`, or `entity` from a folder and returns `already_absent` when no change was needed.
 
+## MCP server (optional)
+
+The MCP interface is disabled by default. If the `mcp:` block is absent, or
+present with `enabled: false`, no `/mcp` route or OAuth endpoints are mounted
+and the app behaves like the HTTP/CLI-only service.
+
+When enabled, `create_app()` mounts the official FastMCP Streamable-HTTP app at
+`/mcp` and exposes `telegram_` tools for the same operations as the HTTP API
+and CLI: health, messages, groups, topics, members, folders, notifications, and
+operation status/retry. The tools reuse the same backend factories, entity
+resolver, `OperationStore`, plugin registry, and `telegram.access` policy; MCP
+does not create or repair the Telethon session.
+
+MCP clients discover and authenticate through the local OAuth Authorization
+Server in the same FastAPI process:
+
+- `/.well-known/oauth-authorization-server`
+- `/.well-known/oauth-protected-resource/mcp`
+- `/register`
+- `/authorize`
+- `/token`
+
+Google OAuth/OIDC is used only as a login gate. After Google verifies the user,
+the local server enforces `allowed_emails` / `allowed_domains`, then mints
+signed, audience-bound MCP access and refresh tokens. The Google allowlist
+decides who may connect; `telegram.access` still decides which chats/folders
+the tools may read or write. Operation-store tools also require the optional
+OAuth scope `telegram:admin`, which is granted only to identities matching
+`admin_emails` / `admin_domains`.
+
+MCP tool catalog:
+
+| Tool | Key arguments |
+| --- | --- |
+| `telegram_health` | none |
+| `telegram_messages_recent` | `chat_id`, `limit` |
+| `telegram_messages_send` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `text`, `telegram_topic_id`/`topic_name`, `file_urls`, `schedule_at`, `delay_seconds`, `operation_id`; server-local `files` are rejected |
+| `telegram_messages_forward` | `from_chat_id`/`from_entity`, `to_chat_id`/`to_entity`, `message_ids`, `operation_id` |
+| `telegram_messages_react` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `emoji` or `clear` |
+| `telegram_groups_create` | `title`, `about`, `admins`, `members`, `folder_name`/`folder_id`, `external_ref`, `topics_layout`, reserve/skip flags |
+| `telegram_topics_layout` | `chat_id`, optional `layout` (`list`/`tabs`) |
+| `telegram_topics_create` | `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `external_ref`, `message` |
+| `telegram_topics_bulk_create` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `items`, `mode`, `continue_on_error`, `operation_id` |
+| `telegram_topics_close` | `topic_id` or `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, optional `delete_messages`, `operation_id` |
+| `telegram_members_add` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `items`, `mode`, `continue_on_error`, `operation_id` |
+| `telegram_members_remove` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `items`, `mode`, `continue_on_error`, `operation_id` |
+| `telegram_folders_inspect` | `folder_name`, optional `folder_id` |
+| `telegram_folders_add_chat` | `folder_name`, `chat_id`/`chat_name`/`entity`, optional `folder_id` |
+| `telegram_folders_remove_chat` | `folder_name`, `chat_id`/`chat_name`/`entity`, optional `folder_id` |
+| `telegram_notifications_mute` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `duration_hours` |
+| `telegram_notifications_unmute` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name` |
+| `telegram_operations_status` | `operation_id`; requires `telegram:admin` |
+| `telegram_operations_retry` | `operation_id`, `dry_run`; requires `telegram:admin` |
+
+OAuth client behavior: `/register` is public Dynamic Client Registration with
+`token_endpoint_auth_method=none`; `/authorize` requires PKCE S256 and a
+`resource` matching `server_url`; `/token` supports `authorization_code` and
+`refresh_token`. Redirect URIs registered by clients must use a trusted
+loopback host (`localhost`, `127.0.0.1`, `::1`) or a host/URI configured in
+`allowed_redirect_hosts` / `allowed_redirect_uris`. Registered clients, pending
+Google states, and authorization codes are process-local memory, so clients
+must re-register after process restart. `required_scopes` are required by the
+MCP mount; `telegram:admin` is advertised only when `admin_emails` or
+`admin_domains` is configured for operation status/retry clients.
+
+Minimal enabled config:
+
+```yaml
+mcp:
+  enabled: true
+  server_url: "https://assistant.example.com/mcp"
+  issuer_url: "https://assistant.example.com"
+  google_client_id: "GOOGLE_CLIENT_ID"
+  google_client_secret: "GOOGLE_CLIENT_SECRET"
+  allowed_emails:
+    - "owner@example.com"
+  allowed_domains: []
+  admin_emails: []
+  admin_domains: []
+  allowed_redirect_hosts: []
+  allowed_redirect_uris: []
+  required_scopes:
+    - "mcp"
+  access_token_ttl_seconds: 3600
+  refresh_token_ttl_seconds: 2592000
+  signing_secret: "<output-of-openssl-rand-base64-32>"
+```
+
+For Google OAuth, create a Web application client and register
+`<issuer_url>/authorize` as an authorized redirect URI. If the service is behind
+a reverse proxy, `server_url` and `issuer_url` must be the public URLs seen by
+the MCP client. `server_url` is the protected resource and token audience; it
+normally includes `/mcp`. Keep the Google secret and `signing_secret` out of
+version control. `signing_secret` must be at least 32 characters and must not
+be a docs placeholder. Rotating `signing_secret` invalidates existing MCP
+tokens.
+
+Manual smoke testing is documented in `docs/mcp-inspector-e2e.md`.
+
 ## Configuration
 
 Config is read from `data/config.yml` by default. The `data/` directory is excluded from version control and holds the Telethon session, SQLite database, and secrets.
@@ -124,6 +224,27 @@ telegram:
 `topics_layout` controls how the forum opens after `groups create`: `"list"` shows topics as a vertical list (Telegram's default), `"tabs"` shows them as horizontal tabs. The CLI `groups create --topics-layout` and `groups set-layout --layout` flags, and the `POST /telegram/groups` / `POST /telegram/groups/layout` bodies (`topics_layout`), override the default per call.
 
 `default_member_permissions` sets the new group's default banned rights so ordinary members can `create_topics` and `pin_messages`. Other default rights are left untouched.
+
+### MCP config (optional)
+
+`mcp` is optional and disabled by default:
+
+- `enabled` defaults to `false`.
+- When `enabled: false`, all other fields may be omitted.
+- When `enabled: true`, `server_url`, `issuer_url`, `google_client_id`,
+  `google_client_secret`, `signing_secret`, and at least one of
+  `allowed_emails` or `allowed_domains` are required.
+- OAuth redirect URIs must use a trusted loopback host (`localhost`,
+  `127.0.0.1`, `::1`) or match `allowed_redirect_hosts` /
+  `allowed_redirect_uris`.
+- `required_scopes` defaults to `["mcp"]`; every MCP access token must contain
+  these scopes. `telegram:admin` is advertised and granted only when
+  `admin_emails` or `admin_domains` is configured, and is required by operation
+  status/retry tools.
+- `access_token_ttl_seconds` defaults to `3600`; `refresh_token_ttl_seconds`
+  defaults to `2592000`.
+- `signing_secret` must be at least 32 characters; generate it with a command
+  such as `openssl rand -base64 32`.
 
 ### Idempotency anchor
 

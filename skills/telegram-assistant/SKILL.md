@@ -23,6 +23,9 @@ This section is the contract that applies to every action.
   defaults but never edits it. Notable keys:
   - `telegram.default_chat_folder.folder_name` — used as `--folder-name` when
     the human request does not name a folder explicitly.
+  - `mcp` — optional Streamable-HTTP MCP/OAuth config. This skill still uses
+    the CLI for Telegram actions; only inspect MCP settings when the human
+    explicitly asks about MCP server setup or smoke testing.
 - Telethon session, SQLite database and bearer token also live under `data/`.
   The agent does not touch them; it only invokes the CLI.
 - The skill itself is loaded from `./skills/telegram-assistant/SKILL.md`
@@ -32,7 +35,8 @@ This section is the contract that applies to every action.
 
 - The agent's only way to change Telegram state is the CLI shipped with the
   project. Do not import Telethon, do not call the HTTP API directly, and do
-  not write custom Python that bypasses the CLI.
+  not call the optional MCP server directly unless the human explicitly asks to
+  test or debug MCP itself. Do not write custom Python that bypasses the CLI.
 - If a request cannot be expressed as one of the listed CLI commands, the
   agent stops and asks the human instead of inventing a new code path.
 

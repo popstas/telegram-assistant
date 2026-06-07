@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -17,6 +18,7 @@ from telegram_assistant.health import (
     DATABASE_ERROR,
     DATABASE_OK,
     FOLDER_MISSING,
+    FOLDER_NOT_CHECKED,
     FOLDER_OK,
     SESSION_AUTHORIZED,
     SESSION_UNAUTHORIZED,
@@ -177,7 +179,7 @@ async def test_collect_health_all_ok(minimal_config_yaml: str, tmp_path: Path) -
         status="ok",
         telegram_session=SESSION_AUTHORIZED,
         database=DATABASE_OK,
-        default_folder=FOLDER_OK,
+        default_folder=FOLDER_NOT_CHECKED,
     )
 
 
@@ -196,7 +198,49 @@ async def test_collect_health_fetches_session_state_once(
 
     assert manager.state_calls == 1
     assert report.telegram_session == SESSION_AUTHORIZED
-    assert report.default_folder == FOLDER_OK
+    assert report.default_folder == FOLDER_NOT_CHECKED
+
+
+async def test_collect_health_times_out_slow_session_probe(
+    minimal_config_yaml: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    class _SlowManager(_FakeManager):
+        async def state(self) -> Any:
+            await asyncio.sleep(10)
+            return await super().state()
+
+    config = load_config_from_text(minimal_config_yaml)
+    with caplog.at_level("WARNING", logger="telegram_assistant.health"):
+        report = await collect_health(
+            config,
+            session_manager=_SlowManager(authorized=True),
+            database_path=tmp_path / "state.db",
+            telegram_probe_timeout_seconds=0.01,
+        )
+
+    assert "telegram health session state timeout" in caplog.text
+    assert report.status == "ok"
+    assert report.telegram_session == SESSION_UNAUTHORIZED
+    assert report.default_folder == FOLDER_NOT_CHECKED
+
+
+async def test_collect_health_does_not_probe_default_folder(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    class _FailingFolderManager(_FakeManager):
+        async def get_client(self) -> Any:
+            raise AssertionError("default folder should not be probed")
+
+    config = load_config_from_text(minimal_config_yaml)
+    report = await collect_health(
+        config,
+        session_manager=_FailingFolderManager(authorized=True),
+        database_path=tmp_path / "state.db",
+        telegram_probe_timeout_seconds=0.01,
+    )
+
+    assert report.telegram_session == SESSION_AUTHORIZED
+    assert report.default_folder == FOLDER_NOT_CHECKED
 
 
 async def test_collect_health_unauthorized_session(
@@ -211,7 +255,7 @@ async def test_collect_health_unauthorized_session(
     assert report.status == "ok"
     assert report.telegram_session == SESSION_UNAUTHORIZED
     assert report.database == DATABASE_OK
-    assert report.default_folder == FOLDER_MISSING
+    assert report.default_folder == FOLDER_NOT_CHECKED
 
 
 async def test_collect_health_database_error(
@@ -227,7 +271,7 @@ async def test_collect_health_database_error(
     )
     assert report.database == DATABASE_ERROR
     assert report.telegram_session == SESSION_AUTHORIZED
-    assert report.default_folder == FOLDER_OK
+    assert report.default_folder == FOLDER_NOT_CHECKED
 
 
 async def test_collect_health_uses_default_database_path(
@@ -296,7 +340,7 @@ def test_health_endpoint_reports_all_fields_unauthorized_without_manager(
     assert body["status"] == "ok"
     assert body["telegram_session"] == SESSION_UNAUTHORIZED
     assert body["database"] == DATABASE_OK
-    assert body["default_folder"] == FOLDER_MISSING
+    assert body["default_folder"] == FOLDER_NOT_CHECKED
     assert body["version"]
 
 
@@ -310,7 +354,7 @@ def test_health_endpoint_reports_authorized(
     )
     body = client.get("/health").json()
     assert body["telegram_session"] == SESSION_AUTHORIZED
-    assert body["default_folder"] == FOLDER_OK
+    assert body["default_folder"] == FOLDER_NOT_CHECKED
 
 
 def test_health_endpoint_reports_database_error(
@@ -339,7 +383,7 @@ def test_health_endpoint_responds_even_when_session_probe_raises(
     assert response.status_code == 200
     body = response.json()
     assert body["telegram_session"] == SESSION_UNAUTHORIZED
-    assert body["default_folder"] == FOLDER_MISSING
+    assert body["default_folder"] == FOLDER_NOT_CHECKED
 
 
 # ---------------------------------------------------------------------------
@@ -356,8 +400,8 @@ def _write_config(tmp_path: Path, body: str) -> Path:
 @pytest.mark.parametrize(
     "authorized,expected_session,expected_folder",
     [
-        (True, SESSION_AUTHORIZED, FOLDER_OK),
-        (False, SESSION_UNAUTHORIZED, FOLDER_MISSING),
+        (True, SESSION_AUTHORIZED, FOLDER_NOT_CHECKED),
+        (False, SESSION_UNAUTHORIZED, FOLDER_NOT_CHECKED),
     ],
 )
 def test_cli_health_emits_json_payload(
