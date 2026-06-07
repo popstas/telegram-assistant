@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sqlite3
 from collections.abc import Awaitable, Callable
 from contextlib import closing
@@ -13,6 +14,8 @@ from telegram_assistant.config.models import AppConfig
 from telegram_assistant.telegram_client.session import (
     TelethonSessionManager,
 )
+
+logger = logging.getLogger(__name__)
 
 SessionProbe = Callable[[], Awaitable[str]]
 DatabaseProbe = Callable[[], Awaitable[str]]
@@ -132,6 +135,7 @@ async def _probe_session_and_folder(
     folder_name: str,
     *,
     folder_id: int | None = None,
+    timeout_seconds: float = DEFAULT_TELEGRAM_PROBE_TIMEOUT_SECONDS,
 ) -> tuple[str, str]:
     """Return ``(session_status, folder_status)`` from a single ``state()`` call.
 
@@ -139,16 +143,45 @@ async def _probe_session_and_folder(
     poll makes one Telegram round-trip instead of three.
     """
     if manager is None:
+        logger.info("telegram health probe skipped reason=no_session_manager")
         return SESSION_UNAUTHORIZED, FOLDER_MISSING
+    logger.info("telegram health probe start folder_name=%s folder_id=%s", folder_name, folder_id)
     try:
-        state = await manager.state()
-    except Exception:
+        state = await asyncio.wait_for(manager.state(), timeout=timeout_seconds)
+    except TimeoutError:
+        logger.warning(
+            "telegram health session state timeout timeout_seconds=%s",
+            timeout_seconds,
+        )
         return SESSION_UNAUTHORIZED, FOLDER_MISSING
+    except Exception as exc:
+        logger.warning(
+            "telegram health session state failed error_type=%s error=%s",
+            type(exc).__name__,
+            exc,
+        )
+        return SESSION_UNAUTHORIZED, FOLDER_MISSING
+    logger.info(
+        "telegram health session state result authorized=%s",
+        bool(state.authorized),
+    )
     if not state.authorized:
         return SESSION_UNAUTHORIZED, FOLDER_MISSING
-    folder_status = await _resolve_folder_status(
-        manager, folder_name, folder_id=folder_id
-    )
+    logger.info("telegram health folder probe start folder_name=%s folder_id=%s", folder_name, folder_id)
+    try:
+        folder_status = await asyncio.wait_for(
+            _resolve_folder_status(manager, folder_name, folder_id=folder_id),
+            timeout=timeout_seconds,
+        )
+    except TimeoutError:
+        logger.warning(
+            "telegram health folder probe timeout timeout_seconds=%s folder_name=%s folder_id=%s",
+            timeout_seconds,
+            folder_name,
+            folder_id,
+        )
+        folder_status = FOLDER_MISSING
+    logger.info("telegram health folder probe result status=%s", folder_status)
     return SESSION_AUTHORIZED, folder_status
 
 
@@ -181,13 +214,18 @@ async def collect_health(
     # makes every interval.
     if session_probe is None and folder_probe is None:
         try:
-            session_status, folder_status = await asyncio.wait_for(
-                _probe_session_and_folder(
-                    session_manager, folder_name, folder_id=folder_id
-                ),
-                timeout=telegram_probe_timeout_seconds,
+            session_status, folder_status = await _probe_session_and_folder(
+                session_manager,
+                folder_name,
+                folder_id=folder_id,
+                timeout_seconds=telegram_probe_timeout_seconds,
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "telegram health probe failed error_type=%s error=%s",
+                type(exc).__name__,
+                exc,
+            )
             session_status, folder_status = SESSION_UNAUTHORIZED, FOLDER_MISSING
     else:
         try:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import getpass
+import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +13,8 @@ from typing import Any, Protocol
 
 from telegram_assistant.config.models import AppConfig, TelegramConfig
 from telegram_assistant.telegram_client.proxy import parse_proxy_url
+
+logger = logging.getLogger(__name__)
 
 
 class _TelethonLike(Protocol):
@@ -99,10 +103,11 @@ class TelethonSessionManager:
         ``_client is None`` correctly observe the disconnected state instead
         of handing out a client that never finished connecting).
         """
+        session_path = str(Path(self._config.session_path).expanduser())
+        client_created = False
         if self._client is None:
             proxy = parse_proxy_url(self._config.proxy_url)
             factory_kwargs: dict = {"proxy": proxy} if proxy is not None else {}
-            session_path = str(Path(self._config.session_path).expanduser())
             try:
                 Path(session_path).parent.mkdir(parents=True, exist_ok=True)
             except OSError:
@@ -113,14 +118,45 @@ class TelethonSessionManager:
                 self._config.api_hash,
                 **factory_kwargs,
             )
+            client_created = True
+        started = time.perf_counter()
+        logger.info(
+            "telethon connect start account_label=%s session_path=%s client_created=%s",
+            self.account_label,
+            session_path,
+            client_created,
+        )
         try:
             await self._client.connect()
         except asyncio.CancelledError:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning(
+                "telethon connect cancelled account_label=%s session_path=%s duration_ms=%s",
+                self.account_label,
+                session_path,
+                duration_ms,
+            )
             self._client = None
             raise
-        except Exception:
+        except Exception as exc:
+            duration_ms = int((time.perf_counter() - started) * 1000)
+            logger.warning(
+                "telethon connect failed account_label=%s session_path=%s duration_ms=%s error_type=%s error=%s",
+                self.account_label,
+                session_path,
+                duration_ms,
+                type(exc).__name__,
+                exc,
+            )
             self._client = None
             raise
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        logger.info(
+            "telethon connect success account_label=%s session_path=%s duration_ms=%s",
+            self.account_label,
+            session_path,
+            duration_ms,
+        )
         return self._client
 
     async def disconnect(self) -> None:
@@ -137,9 +173,22 @@ class TelethonSessionManager:
 
     async def state(self) -> SessionState:
         """Probe the client and return a snapshot of its authorization state."""
+        logger.info("telethon state start account_label=%s", self.account_label)
         client = await self.get_client()
         authorized = await client.is_user_authorized()
+        logger.info(
+            "telethon state authorization account_label=%s authorized=%s",
+            self.account_label,
+            bool(authorized),
+        )
         me = await client.get_me() if authorized else None
+        if me is not None:
+            logger.info(
+                "telethon get_me success account_label=%s user_id=%s username=%s",
+                self.account_label,
+                getattr(me, "id", None),
+                getattr(me, "username", None),
+            )
         return SessionState(
             authorized=bool(authorized),
             account_label=self.account_label,

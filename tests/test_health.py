@@ -201,7 +201,7 @@ async def test_collect_health_fetches_session_state_once(
 
 
 async def test_collect_health_times_out_slow_session_probe(
-    minimal_config_yaml: str, tmp_path: Path
+    minimal_config_yaml: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     class _SlowManager(_FakeManager):
         async def state(self) -> Any:
@@ -209,15 +209,41 @@ async def test_collect_health_times_out_slow_session_probe(
             return await super().state()
 
     config = load_config_from_text(minimal_config_yaml)
+    with caplog.at_level("WARNING", logger="telegram_assistant.health"):
+        report = await collect_health(
+            config,
+            session_manager=_SlowManager(authorized=True),
+            database_path=tmp_path / "state.db",
+            telegram_probe_timeout_seconds=0.01,
+        )
+
+    assert "telegram health session state timeout" in caplog.text
+    assert report.status == "ok"
+    assert report.telegram_session == SESSION_UNAUTHORIZED
+    assert report.default_folder == FOLDER_MISSING
+
+
+async def test_collect_health_preserves_authorized_session_when_folder_probe_times_out(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    class _SlowFolderClient(_FakeFolderClient):
+        async def __call__(self, _request: Any) -> Any:
+            await asyncio.sleep(10)
+            return await super().__call__(_request)
+
+    class _SlowFolderManager(_FakeManager):
+        async def get_client(self) -> Any:
+            return _SlowFolderClient(self._folders)
+
+    config = load_config_from_text(minimal_config_yaml)
     report = await collect_health(
         config,
-        session_manager=_SlowManager(authorized=True),
+        session_manager=_SlowFolderManager(authorized=True),
         database_path=tmp_path / "state.db",
         telegram_probe_timeout_seconds=0.01,
     )
 
-    assert report.status == "ok"
-    assert report.telegram_session == SESSION_UNAUTHORIZED
+    assert report.telegram_session == SESSION_AUTHORIZED
     assert report.default_folder == FOLDER_MISSING
 
 

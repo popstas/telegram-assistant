@@ -158,6 +158,19 @@ async def test_get_client_reuses_same_instance(minimal_config_yaml: str) -> None
     assert len(clients) == 1
 
 
+async def test_get_client_logs_connect_events(
+    minimal_config_yaml: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    manager, _clients = _make_manager(minimal_config_yaml)
+
+    with caplog.at_level("INFO", logger="telegram_assistant.telegram_client.session"):
+        await manager.get_client()
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("telethon connect start" in message for message in messages)
+    assert any("telethon connect success" in message for message in messages)
+
+
 async def test_get_client_drops_cached_client_when_connect_is_cancelled(
     minimal_config_yaml: str,
 ) -> None:

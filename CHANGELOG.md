@@ -15,6 +15,7 @@
 
 ### Bug Fixes
 
+- health: Allow slower Telegram probes
 - http: Keep health responsive during outages
 - mcp: Allow public reverse proxy host
 - mcp: Allow browser OAuth preflights
