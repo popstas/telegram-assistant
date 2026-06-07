@@ -199,6 +199,32 @@ EXPECTED_TOOL_NAMES = {
 }
 
 
+def test_mcp_enabled_allows_browser_cors_preflight(minimal_config_yaml: str) -> None:
+    with _client(minimal_config_yaml) as client:
+        response = client.options(
+            "/.well-known/oauth-authorization-server",
+            headers={
+                "Origin": "http://localhost:6274",
+                "Access-Control-Request-Method": "GET",
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "*"
+        assert "GET" in response.headers["access-control-allow-methods"]
+
+        token_preflight = client.options(
+            "/token",
+            headers={
+                "Origin": "http://localhost:6274",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert token_preflight.status_code == 200
+        assert token_preflight.headers["access-control-allow-origin"] == "*"
+
+
 def test_mcp_mount_is_absent_when_disabled(minimal_config_yaml: str) -> None:
     config = load_config_from_text(minimal_config_yaml)
     client = TestClient(create_app(config, session_manager=FakeSessionManager()))  # type: ignore[arg-type]

@@ -19,6 +19,7 @@
 
 ### Documentation
 
+- todo: Fix completed MCP plan link
 - Move plans
 
 ### Task

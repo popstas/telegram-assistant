@@ -8,6 +8,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import APIRouter, FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 
 from telegram_assistant import __version__
 from telegram_assistant.config import AppConfig, load_config
@@ -487,6 +488,14 @@ def create_app(
         version=__version__,
         lifespan=lifespan,
     )
+    if mcp_oauth_server is not None:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+            expose_headers=["WWW-Authenticate", "Mcp-Session-Id"],
+        )
     mcp_app_ref["app"] = app
     app.state.config = config
     app.state.plugin_registry = build_registry(config)
