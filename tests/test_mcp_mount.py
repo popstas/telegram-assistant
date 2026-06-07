@@ -42,6 +42,8 @@ class FakeSessionManager:
 def _enabled_mcp_yaml(
     minimal_config_yaml: str,
     *,
+    server_url: str = "http://testserver/mcp",
+    issuer_url: str = "http://testserver",
     required_scopes: tuple[str, ...] = ("mcp", "telegram:read"),
     access_token_ttl_seconds: int = 600,
     admin: str = "",
@@ -53,8 +55,8 @@ def _enabled_mcp_yaml(
 
 mcp:
   enabled: true
-  server_url: "http://testserver/mcp"
-  issuer_url: "http://testserver"
+  server_url: "{server_url}"
+  issuer_url: "{issuer_url}"
   google_client_id: "google-client-id"
   google_client_secret: "google-client-secret"
   allowed_emails:
@@ -75,6 +77,15 @@ def _client(minimal_config_yaml: str) -> TestClient:
     config = load_config_from_text(_enabled_mcp_yaml(minimal_config_yaml))
     app = create_app(
         config,
+        session_manager=FakeSessionManager(),  # type: ignore[arg-type]
+        mcp_google_provider=FakeGoogleOidcProvider(),
+    )
+    return TestClient(app)
+
+
+def _client_for_config(config_yaml: str) -> TestClient:
+    app = create_app(
+        load_config_from_text(config_yaml),
         session_manager=FakeSessionManager(),  # type: ignore[arg-type]
         mcp_google_provider=FakeGoogleOidcProvider(),
     )
@@ -223,6 +234,24 @@ def test_mcp_enabled_allows_browser_cors_preflight(minimal_config_yaml: str) -> 
         )
         assert token_preflight.status_code == 200
         assert token_preflight.headers["access-control-allow-origin"] == "*"
+
+
+def test_mcp_allows_public_host_when_bound_to_localhost(
+    minimal_config_yaml: str,
+) -> None:
+    config_yaml = _enabled_mcp_yaml(
+        minimal_config_yaml.replace('host: "0.0.0.0"', 'host: "127.0.0.1"'),
+        server_url="https://telegram-assistant.pc-virt.popstas.pro/mcp",
+        issuer_url="https://telegram-assistant.pc-virt.popstas.pro",
+    )
+
+    with _client_for_config(config_yaml) as client:
+        transport_security = (
+            client.app.state.mcp_fastmcp_server.settings.transport_security
+        )
+
+    assert transport_security is not None
+    assert "telegram-assistant.pc-virt.popstas.pro" in transport_security.allowed_hosts
 
 
 def test_mcp_mount_is_absent_when_disabled(minimal_config_yaml: str) -> None:

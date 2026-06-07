@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from telegram_assistant.config import AppConfig
 from telegram_assistant.http_api.mcp.oauth import (
@@ -18,6 +20,35 @@ from telegram_assistant.http_api.mcp.tools import (
     register_telegram_tools,
 )
 
+_LOCAL_BIND_HOSTS = {"127.0.0.1", "localhost", "::1"}
+_LOCAL_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
+_LOCAL_ALLOWED_ORIGINS = [
+    "http://127.0.0.1:*",
+    "http://localhost:*",
+    "http://[::1]:*",
+]
+
+
+def _mcp_transport_security(config: AppConfig) -> TransportSecuritySettings | None:
+    if config.http.host not in _LOCAL_BIND_HOSTS:
+        return None
+
+    allowed_hosts = [*_LOCAL_ALLOWED_HOSTS]
+    if config.mcp is not None and config.mcp.server_url is not None:
+        parsed = urlsplit(config.mcp.server_url)
+        if parsed.netloc and parsed.netloc not in allowed_hosts:
+            allowed_hosts.append(parsed.netloc)
+        if parsed.hostname is not None:
+            host = parsed.hostname
+            wildcard_host = f"[{host}]:*" if ":" in host else f"{host}:*"
+            if wildcard_host not in allowed_hosts:
+                allowed_hosts.append(wildcard_host)
+
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=allowed_hosts,
+        allowed_origins=[*_LOCAL_ALLOWED_ORIGINS],
+    )
 
 class OAuthTokenVerifier:
     """Adapt the local OAuth AS token validator to the MCP SDK interface."""
@@ -78,6 +109,7 @@ def build_fastmcp_server(
             resource_server_url=config.mcp.server_url,
         ),
         token_verifier=OAuthTokenVerifier(oauth_server),
+        transport_security=_mcp_transport_security(config),
     )
     if app_state_provider is not None:
         register_telegram_tools(server, app_state_provider)
