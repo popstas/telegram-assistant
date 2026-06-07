@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from collections.abc import Awaitable, Callable
 from contextlib import closing
@@ -23,6 +24,7 @@ DATABASE_OK = "ok"
 DATABASE_ERROR = "error"
 FOLDER_OK = "ok"
 FOLDER_MISSING = "missing"
+DEFAULT_TELEGRAM_PROBE_TIMEOUT_SECONDS = 2.0
 
 
 @dataclass(frozen=True)
@@ -158,6 +160,7 @@ async def collect_health(
     session_probe: SessionProbe | None = None,
     database_probe: DatabaseProbe | None = None,
     folder_probe: FolderProbe | None = None,
+    telegram_probe_timeout_seconds: float = DEFAULT_TELEGRAM_PROBE_TIMEOUT_SECONDS,
 ) -> HealthReport:
     """Run the three probes concurrently-safe and bundle their results.
 
@@ -177,22 +180,36 @@ async def collect_health(
     # redundant `state()`/`get_me()` round-trips a `/health` poll otherwise
     # makes every interval.
     if session_probe is None and folder_probe is None:
-        session_status, folder_status = await _probe_session_and_folder(
-            session_manager, folder_name, folder_id=folder_id
-        )
-    else:
-        session_status = await (
-            session_probe()
-            if session_probe is not None
-            else probe_telegram_session(session_manager)
-        )
-        folder_status = await (
-            folder_probe()
-            if folder_probe is not None
-            else probe_default_folder(
-                session_manager, folder_name, folder_id=folder_id
+        try:
+            session_status, folder_status = await asyncio.wait_for(
+                _probe_session_and_folder(
+                    session_manager, folder_name, folder_id=folder_id
+                ),
+                timeout=telegram_probe_timeout_seconds,
             )
-        )
+        except Exception:
+            session_status, folder_status = SESSION_UNAUTHORIZED, FOLDER_MISSING
+    else:
+        try:
+            session_status = await asyncio.wait_for(
+                session_probe()
+                if session_probe is not None
+                else probe_telegram_session(session_manager),
+                timeout=telegram_probe_timeout_seconds,
+            )
+        except Exception:
+            session_status = SESSION_UNAUTHORIZED
+        try:
+            folder_status = await asyncio.wait_for(
+                folder_probe()
+                if folder_probe is not None
+                else probe_default_folder(
+                    session_manager, folder_name, folder_id=folder_id
+                ),
+                timeout=telegram_probe_timeout_seconds,
+            )
+        except Exception:
+            folder_status = FOLDER_MISSING
 
     return HealthReport(
         status="ok",

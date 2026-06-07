@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -155,6 +156,33 @@ async def test_get_client_reuses_same_instance(minimal_config_yaml: str) -> None
     b = await manager.get_client()
     assert a is b
     assert len(clients) == 1
+
+
+async def test_get_client_drops_cached_client_when_connect_is_cancelled(
+    minimal_config_yaml: str,
+) -> None:
+    config = load_config_from_text(minimal_config_yaml)
+
+    class _CancelledConnectClient(FakeTelethonClient):
+        async def connect(self) -> None:
+            raise asyncio.CancelledError
+
+    created: list[_CancelledConnectClient] = []
+
+    def factory(
+        session_path: str, api_id: int, api_hash: str
+    ) -> _CancelledConnectClient:
+        client = _CancelledConnectClient(session_path, api_id, api_hash)
+        created.append(client)
+        return client
+
+    manager = TelethonSessionManager(config.telegram, client_factory=factory)
+
+    with pytest.raises(asyncio.CancelledError):
+        await manager.get_client()
+
+    assert len(created) == 1
+    assert manager._client is None
 
 
 async def test_interactive_login_skips_prompts_when_authorized(minimal_config_yaml: str) -> None:

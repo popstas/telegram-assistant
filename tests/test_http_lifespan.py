@@ -9,6 +9,7 @@ permanently unauthorized, which is the bug Task 18 surfaced.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi.testclient import TestClient
@@ -84,6 +85,28 @@ def test_create_app_auto_constructs_session_manager_and_connects_on_startup(
 
     # After the context exits the shutdown hook disconnected the client.
     assert fake.disconnect_calls >= 1
+
+
+async def test_create_app_lifespan_does_not_wait_for_slow_telegram_connect(
+    monkeypatch: Any, minimal_config_yaml: str
+) -> None:
+    class _SlowClient(_FakeClient):
+        async def connect(self) -> None:
+            await asyncio.sleep(10)
+
+    slow = _SlowClient()
+    monkeypatch.setattr(
+        session_module,
+        "_default_factory",
+        lambda session_path, api_id, api_hash: slow,
+    )
+
+    config = load_config_from_text(minimal_config_yaml)
+    app = create_app(config)
+    lifespan = app.router.lifespan_context(app)
+
+    await asyncio.wait_for(lifespan.__aenter__(), timeout=0.1)
+    await lifespan.__aexit__(None, None, None)
 
 
 def test_create_app_schedules_retry_when_initial_connect_fails(

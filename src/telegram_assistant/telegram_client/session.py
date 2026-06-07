@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import getpass
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -114,6 +115,9 @@ class TelethonSessionManager:
             )
         try:
             await self._client.connect()
+        except asyncio.CancelledError:
+            self._client = None
+            raise
         except Exception:
             self._client = None
             raise

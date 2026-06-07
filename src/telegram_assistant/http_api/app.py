@@ -432,26 +432,23 @@ def create_app(
             backoff = 1.0
             while True:
                 try:
-                    await asyncio.sleep(backoff)
                     await manager_ref.get_client()
                     return
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    await asyncio.sleep(backoff)
                     backoff = min(backoff * 2, 60.0)
 
         @asynccontextmanager
         async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
-            retry_task: asyncio.Task[None] | None = None
-            try:
-                await manager_ref.get_client()
-            except Exception:
-                # Service must still respond to /health when Telegram is
-                # unreachable or the session is unauthorized — the health
-                # probes will surface the real state. Spawn a background
-                # retry so the service recovers automatically once Telegram
-                # is reachable again.
-                retry_task = asyncio.create_task(_retry_connect_until_ready())
+            # Service startup must not wait on Telegram connectivity. The
+            # background task connects immediately when possible and retries
+            # with backoff when Telegram or the container network is down.
+            retry_task: asyncio.Task[None] | None = asyncio.create_task(
+                _retry_connect_until_ready()
+            )
+            await asyncio.sleep(0)
             try:
                 yield
             finally:

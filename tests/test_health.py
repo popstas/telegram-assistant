@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -197,6 +198,27 @@ async def test_collect_health_fetches_session_state_once(
     assert manager.state_calls == 1
     assert report.telegram_session == SESSION_AUTHORIZED
     assert report.default_folder == FOLDER_OK
+
+
+async def test_collect_health_times_out_slow_session_probe(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    class _SlowManager(_FakeManager):
+        async def state(self) -> Any:
+            await asyncio.sleep(10)
+            return await super().state()
+
+    config = load_config_from_text(minimal_config_yaml)
+    report = await collect_health(
+        config,
+        session_manager=_SlowManager(authorized=True),
+        database_path=tmp_path / "state.db",
+        telegram_probe_timeout_seconds=0.01,
+    )
+
+    assert report.status == "ok"
+    assert report.telegram_session == SESSION_UNAUTHORIZED
+    assert report.default_folder == FOLDER_MISSING
 
 
 async def test_collect_health_unauthorized_session(
