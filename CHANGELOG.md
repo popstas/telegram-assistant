@@ -5,6 +5,7 @@
 
 ### Features
 
+- Conditional health check + prompt for message in skill flow
 - Tests for quieter /health Telethon logging
 - Slim MCP send args + mcp.disabled_tools filtering
 - Base64 inline file attachments for message send

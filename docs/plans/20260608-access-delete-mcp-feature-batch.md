@@ -277,12 +277,12 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 15: Extend live e2e scripts
-- [ ] add idempotent steps to `scripts/e2e_*.sh` for: delete (revoke + `delete_only_session_messages`
+- [x] add idempotent steps to `scripts/e2e_*.sh` for: delete (revoke + `delete_only_session_messages`
       on/off), `reply_to` send, `messages recent --minutes`, base64 send, and `file_urls` download-send
-- [ ] keep steps re-runnable and self-cleaning; document any new required fixtures in the script
+- [x] keep steps re-runnable and self-cleaning; document any new required fixtures in the script
       header comments
-- [ ] (no unit test) — verify scripts parse with `bash -n scripts/e2e_*.sh`
-- [ ] run `bash -n` on all e2e scripts — must pass before next task
+- [x] (no unit test) — verify scripts parse with `bash -n scripts/e2e_*.sh`
+- [x] run `bash -n` on all e2e scripts — must pass before next task
 
 ### Task 16: Docs + inventory sync
 - [ ] update `skills/telegram-assistant/SKILL.md` (new/changed CLI commands, HTTP endpoints, MCP
