@@ -25,6 +25,7 @@
 
 ### Documentation
 
+- todo: Add MCP follow-up tasks
 - todo: Fix completed MCP plan link
 - Move plans
 

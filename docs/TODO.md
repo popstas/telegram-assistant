@@ -1,8 +1,5 @@
 # TODO
 
-- [x] ~/projects/docker/telegram-assistant - docker instance running, change something in code, restart docker-compose, check that code is applied without recreate
-- [x] docker errors in log: Attempt 6 at connecting failed: OSError: [Errno 101] Network is unreachable. It using code from workdir
-- [x] /health answers too long on startup, find the reason
 - [ ] apply config.yml changes without restart, for example, telegram.access rules
 - [ ] add access rules commands to cli
 - [ ] add reply_to option to messages send: cli, http, mcp, skill
@@ -16,3 +13,4 @@
 - [ ] change skill: don't check health when no issues. AskUser for message to send.
 - [ ] allow to send files with MCP `telegram_messages_send`: MCP supports binary resources/base64 blobs, but `tools/call` has no universal file-upload primitive; current implementation explicitly rejects server-local `files` paths and only accepts `file_urls`. Add a safe upload/attachment path, for example base64 attachment input with filename/mime/size limits, or client-provided MCP resource URI ingestion when supported by clients.
 - [ ] make MCP/HTTP `file_urls` reliable for Telegram upload: when Telethon passes a remote URL directly, Telegram may fail with `Failure while fetching the webpage with cURL` even if the URL is reachable from this server. Download http(s) URLs to temporary files server-side with size/time limits, send those local temp files via Telethon, and clean them up after send.
+- [ ] reduce logs from `/health`: remove Telethon logs, keep only HTTP server logs.
