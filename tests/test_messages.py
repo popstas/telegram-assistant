@@ -62,6 +62,7 @@ class FakeMessageBackend:
         topic_id: int | None = None,
         files: tuple[str, ...] = (),
         schedule_at: Any = None,
+        reply_to_message_id: int | None = None,
     ) -> int | list[int]:
         if self._fail_send:
             raise RuntimeError("telegram error")
@@ -77,6 +78,7 @@ class FakeMessageBackend:
                     "topic_id": topic_id,
                     "files": files,
                     "schedule_at": schedule_at,
+                    "reply_to_message_id": reply_to_message_id,
                     "id": ids[0],
                     "ids": ids,
                 }
@@ -91,6 +93,7 @@ class FakeMessageBackend:
                 "topic_id": topic_id,
                 "files": files,
                 "schedule_at": schedule_at,
+                "reply_to_message_id": reply_to_message_id,
                 "id": msg_id,
             }
         )
@@ -450,6 +453,47 @@ async def test_send_message_replay_preserves_schedule_at(
     assert first.schedule_at == when.isoformat()
     assert second.replayed is True
     assert second.schedule_at == when.isoformat()
+
+
+async def test_send_message_reply_to_passed_to_backend(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="a reply",
+        reply_to_message_id=4242,
+        operation_id="reply-text",
+    )
+    _, op = await send_message(backend=backend, store=store, request=req)
+    assert backend.sent[0]["reply_to_message_id"] == 4242
+    assert op.request_payload["reply_to_message_id"] == 4242
+
+
+async def test_send_message_reply_to_passed_for_media(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="caption",
+        files=("/data/a.png",),
+        reply_to_message_id=7,
+        operation_id="reply-media",
+    )
+    await send_message(backend=backend, store=store, request=req)
+    assert backend.sent[0]["reply_to_message_id"] == 7
+
+
+async def test_send_message_omits_reply_to_when_not_set(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100, text="plain", operation_id="no-reply"
+    )
+    await send_message(backend=backend, store=store, request=req)
+    assert backend.sent[0]["reply_to_message_id"] is None
 
 
 @pytest.mark.parametrize("returned", [None, [], [0]])

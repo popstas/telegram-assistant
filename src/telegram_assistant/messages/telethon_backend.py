@@ -138,8 +138,15 @@ class TelethonMessageBackend:
         topic_id: int | None = None,
         files: tuple[str, ...] = (),
         schedule_at: datetime | None = None,
+        reply_to_message_id: int | None = None,
     ) -> int | list[int]:
         files = tuple(files)
+        # ``reply_to`` carries either an explicit reply target or, in a forum,
+        # the topic root. An explicit ``reply_to_message_id`` wins: replying to
+        # a message inside a topic keeps the reply threaded in that topic.
+        reply_to = (
+            reply_to_message_id if reply_to_message_id is not None else topic_id
+        )
         try:
             if files:
                 kwargs: dict[str, Any] = {
@@ -147,8 +154,8 @@ class TelethonMessageBackend:
                     # a stray empty-text message alongside the media.
                     "caption": text or None,
                 }
-                if topic_id is not None:
-                    kwargs["reply_to"] = topic_id
+                if reply_to is not None:
+                    kwargs["reply_to"] = reply_to
                 if schedule_at is not None:
                     kwargs["schedule"] = schedule_at
                 sent = await self._client.send_file(
@@ -158,8 +165,8 @@ class TelethonMessageBackend:
                 )
             else:
                 kwargs = {}
-                if topic_id is not None:
-                    kwargs["reply_to"] = topic_id
+                if reply_to is not None:
+                    kwargs["reply_to"] = reply_to
                 if schedule_at is not None:
                     kwargs["schedule"] = schedule_at
                 sent = await self._client.send_message(chat_id, text, **kwargs)

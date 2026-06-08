@@ -415,14 +415,16 @@ edits `data/config.yml` to widen access on its own.
   optional attachments (`--file` for a local file path, `--file-url`
   for an http(s) URL — both repeatable), optional scheduling
   (`--schedule-at` ISO-8601 datetime, or `--delay` relative duration
-  like `10m`, `2h`, `1d`).
+  like `10m`, `2h`, `1d`), and optional `--reply-to <message_id>` to
+  thread the send as a reply (targeted-only; in a forum it wins over the
+  topic root, keeping the reply inside the topic).
 - Required flags: exactly one targeting shape — targeted
   (`--chat-id`/`--chat-name` + optional `--topic-id`/`--topic-name`)
   or mass (`--mass` or no chat ref, plus `--topic-name` and
   `--folder-name`). `--text` is required unless at least one
   `--file`/`--file-url` is supplied (in which case `--text` is the
-  caption). Attachments and scheduling are targeted-only — never combine
-  them with `--mass`.
+  caption). Attachments, scheduling, and `--reply-to` are targeted-only —
+  never combine them with `--mass`.
 - From config: `--folder-name` default for both targeted resolution and
   mass mode.
 - Temp file: no — message text goes via `--text`, attachments via
@@ -433,16 +435,16 @@ edits `data/config.yml` to widen access on its own.
 - Automation: pass service commands (`/task 123456`) verbatim. Pass at
   most one of `--schedule-at` / `--delay`. Map «отправь через 2 часа» →
   `--delay 2h`, «запланируй на 2026-06-07T09:00» → `--schedule-at`. The
-  dry-run JSON echoes `files`, `file_urls`, `schedule_at`, and
-  `scheduled` so the plan can show attachments and the resolved send
-  time.
+  dry-run JSON echoes `files`, `file_urls`, `schedule_at`, `scheduled`,
+  and `reply_to_message_id` so the plan can show attachments, the resolved
+  send time, and any reply target.
 - Confirmation: required after dry-run. Mass mode plans must list every
   resolved chat row and call out `would_skip` rows with their reason
   (`topic_not_found`, `topic_ambiguous`, `list_topics_failed: ...`).
 - Typical errors: `messages send requires non-empty --text`
   (when no attachments), `--mass cannot be combined with --chat-id or
-  --chat-name`, `--file/--file-url/--schedule-at/--delay are only
-  supported for targeted sends`, `provide only one of --schedule-at or
+  --chat-name`, `--file/--file-url/--schedule-at/--delay/--reply-to are
+  only supported for targeted sends`, `provide only one of --schedule-at or
   --delay`, past-schedule rejection (exit code 2), missing/empty
   attachment file, non-http(s) `--file-url`, `MessageSendNeedsReview`.
 

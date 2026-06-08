@@ -213,12 +213,12 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 8: `reply_to` on message send (all surfaces)
-- [ ] thread a `reply_to_message_id: int | None` through `messages/service.py` send + the
+- [x] thread a `reply_to_message_id: int | None` through `messages/service.py` send + the
       Telethon backend (`reply_to=`)
-- [ ] expose it: CLI `messages send --reply-to`, HTTP send request field, MCP
+- [x] expose it: CLI `messages send --reply-to`, HTTP send request field, MCP
       `telegram_messages_send` arg, and the skill send flow
-- [ ] write tests: reply_to passed to backend for text + media sends; omitted → normal send
-- [ ] run tests + `ruff` — must pass before next task
+- [x] write tests: reply_to passed to backend for text + media sends; omitted → normal send
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 9: `messages recent --minutes`
 - [ ] add a `minutes: int | None` filter to the recent op in `messages/service.py` (return only

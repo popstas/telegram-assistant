@@ -90,6 +90,8 @@ class MessageSendBody(BaseModel):
     file_urls: list[str] | None = None
     schedule_at: datetime | None = None
     delay_seconds: int | None = None
+    # Thread the send as a reply to an existing message id (targeted only).
+    reply_to_message_id: int | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> MessageSendBody:
@@ -108,6 +110,8 @@ class MessageSendBody(BaseModel):
             )
         if self.schedule_at is not None and self.delay_seconds is not None:
             raise ValueError("provide only one of schedule_at or delay_seconds")
+        if self.reply_to_message_id is not None and self.reply_to_message_id <= 0:
+            raise ValueError("reply_to_message_id must be a positive integer")
 
         # ``entity`` is a direct chat reference, equivalent to telegram_chat_id
         # for shape purposes (no folder lookup needed).
@@ -134,10 +138,11 @@ class MessageSendBody(BaseModel):
                 has_attachments
                 or self.schedule_at is not None
                 or self.delay_seconds is not None
+                or self.reply_to_message_id is not None
             ):
                 raise ValueError(
-                    "files/file_urls/schedule_at/delay_seconds are only supported "
-                    "for targeted sends, not mass mode"
+                    "files/file_urls/schedule_at/delay_seconds/reply_to_message_id "
+                    "are only supported for targeted sends, not mass mode"
                 )
             return self
 
@@ -561,6 +566,7 @@ def build_router() -> APIRouter:
             files=files,
             file_urls=file_urls,
             schedule_at=resolved_schedule_at,
+            reply_to_message_id=body.reply_to_message_id,
         )
 
         try:

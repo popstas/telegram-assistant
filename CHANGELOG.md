@@ -5,6 +5,7 @@
 
 ### Features
 
+- Session-limit delete flag + delete surfaces (CLI/HTTP/MCP)
 - Delete-message domain operation gated on delete permission
 - SentMessageRegistry tracking process-sent message ids
 - Access management CLI commands (list/check/add)

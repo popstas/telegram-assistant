@@ -675,6 +675,7 @@ async def _resolve_message_send(
             files=files,
             file_urls=file_urls,
             schedule_at=resolved_schedule_at,
+            reply_to_message_id=body.reply_to_message_id,
         ),
         authorizer=authorizer,
         sent_registry=sent_message_registry(request),  # type: ignore[arg-type]
@@ -869,6 +870,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         file_urls: list[str] | None = None,
         schedule_at: datetime | None = None,
         delay_seconds: int | None = None,
+        reply_to_message_id: int | None = None,
     ) -> dict[str, Any]:
         """Send a message or run the folder/topic mass-send mode."""
         request = _request(provider)
@@ -887,6 +889,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 file_urls=file_urls,
                 schedule_at=schedule_at,
                 delay_seconds=delay_seconds,
+                reply_to_message_id=reply_to_message_id,
             )
             return await _resolve_message_send(request, body)
         except Exception as exc:

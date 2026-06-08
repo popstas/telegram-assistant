@@ -2525,6 +2525,11 @@ def messages_send(
         help="Defer delivery by a relative duration like 10m, 2h, 1d "
         "(mutually exclusive with --schedule-at).",
     ),
+    reply_to: int | None = typer.Option(
+        None,
+        "--reply-to",
+        help="Thread the send as a reply to an existing message id (targeted send).",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -2597,14 +2602,17 @@ def messages_send(
     has_attachments = bool(files or file_urls)
     has_schedule_input = schedule_at is not None or delay is not None
 
-    # Media and scheduling are targeted-only; mass mode iterates many chats and
-    # has no single attachment/schedule semantics.
-    if is_mass and (has_attachments or has_schedule_input):
+    # Media, scheduling, and reply threading are targeted-only; mass mode
+    # iterates many chats and has no single attachment/schedule/reply semantics.
+    if is_mass and (has_attachments or has_schedule_input or reply_to is not None):
         typer.echo(
-            "--file/--file-url/--schedule-at/--delay are only supported for "
-            "targeted sends, not mass mode",
+            "--file/--file-url/--schedule-at/--delay/--reply-to are only supported "
+            "for targeted sends, not mass mode",
             err=True,
         )
+        raise typer.Exit(code=2)
+    if reply_to is not None and reply_to <= 0:
+        typer.echo("--reply-to must be a positive integer", err=True)
         raise typer.Exit(code=2)
 
     # Resolve scheduling (rejects conflicting modes and past absolute times) and
@@ -2858,6 +2866,7 @@ def messages_send(
                     else None
                 ),
                 "scheduled": resolved_schedule_at is not None,
+                "reply_to_message_id": reply_to,
             }
             if chat_name is not None:
                 resolved_payload["folder_name"] = resolved_folder_name
@@ -2953,6 +2962,7 @@ def messages_send(
                 files=files,
                 file_urls=file_urls,
                 schedule_at=resolved_schedule_at,
+                reply_to_message_id=reply_to,
             )
             result_single, op = await send_message(
                 backend=message_backend,

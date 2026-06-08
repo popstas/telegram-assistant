@@ -238,6 +238,7 @@ class MessageBackend(Protocol):
         topic_id: int | None = None,
         files: tuple[str, ...] = (),
         schedule_at: datetime | None = None,
+        reply_to_message_id: int | None = None,
     ) -> int | list[int]:
         ...
 
@@ -297,7 +298,10 @@ class SendMessageRequest:
     in declaration order (``files`` then ``file_urls``); supplying more than
     one attachment sends an album. ``schedule_at`` defers delivery to a future
     time. ``text`` doubles as the caption when attachments are present and may
-    be empty for a media-only send.
+    be empty for a media-only send. ``reply_to_message_id`` threads the send as
+    a reply to an existing message; in a forum it takes precedence over the
+    topic root for the Telethon ``reply_to`` (replying to a message inside a
+    topic keeps the reply in that topic).
     """
 
     telegram_chat_id: int
@@ -309,6 +313,7 @@ class SendMessageRequest:
     files: tuple[str, ...] = field(default_factory=tuple)
     file_urls: tuple[str, ...] = field(default_factory=tuple)
     schedule_at: datetime | None = None
+    reply_to_message_id: int | None = None
 
     @property
     def attachment_refs(self) -> tuple[str, ...]:
@@ -341,6 +346,7 @@ class SendMessageRequest:
                 if self.schedule_at is not None
                 else None
             ),
+            "reply_to_message_id": self.reply_to_message_id,
         }
 
 
@@ -485,6 +491,8 @@ async def send_message(
         extra["files"] = request.attachment_refs
     if request.schedule_at is not None:
         extra["schedule_at"] = request.schedule_at
+    if request.reply_to_message_id is not None:
+        extra["reply_to_message_id"] = request.reply_to_message_id
     try:
         raw_id = await backend.send_message(
             chat_id=request.telegram_chat_id,

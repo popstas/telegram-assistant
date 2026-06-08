@@ -93,6 +93,42 @@ async def test_text_send_forwards_topic_and_schedule() -> None:
 
 
 @pytest.mark.asyncio
+async def test_text_send_reply_to_message_id_sets_reply_to() -> None:
+    client = _RecordingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(chat_id=42, text="re", reply_to_message_id=99)
+
+    assert client.message_calls[0]["kwargs"]["reply_to"] == 99
+
+
+@pytest.mark.asyncio
+async def test_reply_to_message_id_wins_over_topic_id() -> None:
+    """A forum reply targets the message; replying inside a topic keeps it
+    threaded, so an explicit reply id takes precedence over the topic root."""
+    client = _RecordingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=42, text="re", topic_id=7, reply_to_message_id=99
+    )
+
+    assert client.message_calls[0]["kwargs"]["reply_to"] == 99
+
+
+@pytest.mark.asyncio
+async def test_file_send_reply_to_message_id_sets_reply_to() -> None:
+    client = _RecordingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=10, text="cap", files=("/tmp/a.png",), reply_to_message_id=12
+    )
+
+    assert client.file_calls[0]["kwargs"]["reply_to"] == 12
+
+
+@pytest.mark.asyncio
 async def test_single_file_returns_single_id_with_caption() -> None:
     client = _RecordingClient()
     backend = TelethonMessageBackend(client)

@@ -53,7 +53,7 @@ Top-level:
 
 `messages` — send messages and service commands:
 
-- `messages send` — send a message or service command (targeted or folder-wide mass mode). Attach local files with repeated `--file` and/or remote URLs with repeated `--file-url` (multiple attachments send an album); defer delivery with `--schedule-at` (ISO-8601 datetime) or `--delay` (relative duration like `10m`, `2h`, `1d`). `--text` may be omitted for media-only sends. Attachments and scheduling apply to targeted sends only, not mass mode.
+- `messages send` — send a message or service command (targeted or folder-wide mass mode). Attach local files with repeated `--file` and/or remote URLs with repeated `--file-url` (multiple attachments send an album); defer delivery with `--schedule-at` (ISO-8601 datetime) or `--delay` (relative duration like `10m`, `2h`, `1d`); thread a reply with `--reply-to <message_id>`. `--text` may be omitted for media-only sends. Attachments, scheduling, and `--reply-to` apply to targeted sends only, not mass mode.
 - `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5).
 - `messages react` — set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated).
 - `messages forward` — forward one or more messages (`--message-id`, repeatable) from a source (`--from-chat-id`/`--from-entity`) to a target (`--to-chat-id`/`--to-entity`, or the usual target aliases `--chat-id`/`--chat-name`/`--entity`); READ-gated on the source, WRITE-gated on the target.
@@ -130,7 +130,7 @@ MCP tool catalog:
 | --- | --- |
 | `telegram_health` | none |
 | `telegram_messages_recent` | `chat_id`, `limit` |
-| `telegram_messages_send` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `text`, `telegram_topic_id`/`topic_name`, `file_urls`, `schedule_at`, `delay_seconds`, `operation_id`; server-local `files` are rejected |
+| `telegram_messages_send` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `text`, `telegram_topic_id`/`topic_name`, `file_urls`, `schedule_at`, `delay_seconds`, `reply_to_message_id`, `operation_id`; server-local `files` are rejected |
 | `telegram_messages_forward` | `from_chat_id`/`from_entity`, `to_chat_id`/`to_entity`, `message_ids`, `operation_id` |
 | `telegram_messages_react` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `emoji` or `clear` |
 | `telegram_groups_create` | `title`, `about`, `admins`, `members`, `folder_name`/`folder_id`, `external_ref`, `topics_layout`, reserve/skip flags |
