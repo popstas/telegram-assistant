@@ -25,6 +25,7 @@
 
 ### Documentation
 
+- plans: Add access/delete/MCP feature-batch plan
 - todo: Add MCP follow-up tasks
 - todo: Fix completed MCP plan link
 - Move plans

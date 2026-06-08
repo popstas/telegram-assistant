@@ -56,9 +56,15 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 
 - Hot-reload via **`watchdog`** observer on `data/config.yml` with a **2s debounce**.
 - Access schema extension is **backward-compatible** (singular forms keep working; add list forms).
-- `delete` is a **distinct** capability — `write` does **not** imply `delete`; `delete` implies
-  `read` only. Internally the authorizer moves from a max-`AccessLevel` to a **capability-set**
-  model so a chat can hold e.g. `{read, write, delete}`.
+- Permissions are **fully independent**: `read`, `write`, and `delete` each grant *only*
+  themselves — **no implications** (`write` does **not** imply `read`). A chat that should be
+  both readable and writable must be granted `permissions: [read, write]`. Internally the
+  authorizer moves from a linear max-`AccessLevel` to an **independent capability-set** model so a
+  chat can hold any subset of `{read, write, delete}`.
+  - ⚠️ **Backward-compat break (intentional, per review):** the current codebase has `write`
+    imply `read` (`WRITE > READ`). Removing that implication means existing configs that grant
+    `write` to a chat and rely on implicit read (e.g. `messages recent`) will start being denied
+    READ until updated to list `read` explicitly. Task 16 docs must call this out as a migration note.
 - Session-limited delete tracks `(chat_id, message_id)` for the **server process lifetime**
   (in-memory, cleared on restart).
 - Verification **extends the live `scripts/e2e_*.sh`** scripts in addition to unit/integration
@@ -71,9 +77,11 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - Complete each task fully before the next. Small, focused changes. Run tests after each change.
 - **Every task includes new/updated unit tests** (success + error/edge cases) and they **must
   pass before starting the next task**.
-- Maintain **backward compatibility**: `telegram.access` omitted ⇒ allow-all; existing
-  single-target/single-permission rules keep working; existing MCP/HTTP/CLI signatures stay
-  valid except the explicitly-requested `telegram_messages_send` arg reduction.
+- Maintain **backward compatibility** *except where intentionally changed*: `telegram.access`
+  omitted ⇒ allow-all; existing single-target rules still parse and apply. **Intentional breaks
+  (per review):** `write` no longer implies `read` (permissions are independent), and
+  `telegram_messages_send` drops `chat_name`/`folder_name`/`folder_id`/`files`. Both are called
+  out as migration notes in Task 16.
 - Use `.venv` for all Python commands (`source .venv/bin/activate`). Lint with
   `ruff check src tests`.
 - **Update this plan file when scope changes during implementation.**
@@ -118,18 +126,19 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
       old config and logs; watcher start/stop lifecycle
 - [ ] run tests + `ruff` — must pass before next task
 
-### Task 2: Authorizer capability-set model + `delete` permission
-- [ ] in `access/service.py` add `DELETE` to `AccessLevel` and a capability-set internal index:
-      replace `dict[int, AccessLevel]` max-merge with `dict[int, set[AccessLevel]]`, applying
-      implications at build time (`write` ⇒ `{read, write}`, `delete` ⇒ `{read, delete}`,
-      `read` ⇒ `{read}`)
+### Task 2: Authorizer independent-capability model + `delete` permission
+- [ ] in `access/service.py` add `DELETE` to the `AccessLevel`/capability set and replace the
+      linear `dict[int, AccessLevel]` max-merge with an **independent** capability set
+      `dict[int, set[AccessLevel]]` — **no implications**: `read`⇒`{read}`, `write`⇒`{write}`,
+      `delete`⇒`{delete}`. Drop the `WRITE > READ` ordering semantics entirely.
 - [ ] update `_PERMISSION_TO_LEVEL`, `_effective_chat_level`, `require`, `require_folder`,
-      `allows` to test **capability membership** instead of `granted >= level`
-- [ ] keep external API stable: `require(chat_id, AccessLevel.WRITE)` etc. still works; add
+      `allows` to test **capability membership** (`level in caps`) instead of `granted >= level`;
+      union across matching rules is a set-union of capabilities
+- [ ] keep call sites stable: `require(chat_id, AccessLevel.WRITE)` etc. still compile; add the
       `AccessLevel.DELETE` path
-- [ ] write tests: `write` grants read+write but **not** delete; `delete` grants read+delete but
-      **not** write; union across `all`/folder/chat rules accumulates capabilities; `-100`
-      normalisation still matches
+- [ ] write tests: `write` grants **only** write (read denied, delete denied); `delete` grants
+      **only** delete; `read` grants only read; a rule with multiple permissions grants exactly
+      that set; union across `all`/folder/chat rules accumulates caps; `-100` normalisation matches
 - [ ] run tests + `ruff` — must pass before next task
 
 ### Task 3: Backward-compatible multi-chat / multi-permission access rules
@@ -146,13 +155,22 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
       multi-target / empty permissions
 - [ ] run tests + `ruff` — must pass before next task
 
-### Task 4: Access-inspection CLI commands
-- [ ] add an `access` command group to `cli/main.py`: `access list` (print the effective rules /
-      capability index from the loaded config) and `access check --entity <ref>
-      --permission read|write|delete` (resolve the chat and report grant verdict + matched rule)
+### Task 4: Access management CLI commands (CLI + skill only, NOT MCP)
+- [ ] add an `access` command group to `cli/main.py`:
+      - `access list` — print the effective rules / capability index from the loaded config
+      - `access check --entity <ref> --permission read|write|delete` — resolve the chat and report
+        grant verdict + matched rule
+      - `access add` — append a rule to `data/config.yml` (e.g.
+        `access add --entity <ref>|--folder <name>|--all --permission read,write,delete`),
+        re-serialising the access block; the watchdog hot-reload (Task 1) then applies it live.
+        Support `--dry-run` (print the resulting rule, don't write).
 - [ ] `access check` exits **0** when granted, **3** (AccessDenied convention) when denied, **2**
-      when the entity cannot be resolved
-- [ ] write tests: `list` output for a sample config; `check` granted/denied/not-found exit codes
+      when the entity cannot be resolved; `access add` validates the rule (reuse the Task 3
+      validator) before writing
+- [ ] expose the same access flows in the **skill** (Task 14/16); **do NOT add any access tool to
+      MCP** — access management stays CLI + skill only
+- [ ] write tests: `list` output for a sample config; `check` granted/denied/not-found exit codes;
+      `access add` writes a valid rule (and `--dry-run` does not), round-trips through `load_config`
 - [ ] run tests + `ruff` — must pass before next task
 
 ### Task 5: SentMessageRegistry (in-memory, process lifetime)
@@ -179,7 +197,9 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [ ] run tests + `ruff` — must pass before next task
 
 ### Task 7: Session-limit config flag + delete surfaces (CLI/HTTP/MCP)
-- [ ] add `telegram.access.delete_only_session_messages: bool = False` to `config/models.py`
+- [ ] add `telegram.access.delete_only_session_messages: bool = True` to `config/models.py`
+      (**safe default**: out of the box, delete is restricted to messages this server process
+      sent; operators opt out by setting it `false` to allow deleting arbitrary messages)
 - [ ] CLI: `messages delete --entity/--chat-id --message-id ... [--revoke/--no-revoke]
       [--dry-run] [--force]` in `cli/main.py`
 - [ ] HTTP: delete endpoint in `http_api/messages.py` (factory → **503** when backend unavailable;
@@ -217,7 +237,7 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 
 ### Task 11: Base64 file attachments for MCP send
 - [ ] accept base64 attachment input on the send path: `{filename, mime, content_b64}` with a
-      configurable **max size** (default 10 MB) and allowed-type validation in
+      configurable **max size** (default **1 MB**) and allowed-type validation in
       `messages/attachments.py`; decode to a temp file, send, clean up
 - [ ] expose via MCP `telegram_messages_send` (and HTTP send request) as a new attachments field
 - [ ] write tests: valid base64 → temp file sent + cleaned up; oversize rejected; bad base64 /
@@ -265,7 +285,12 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
       tools) and **resync** to `~/.claude/skills/telegram-assistant/SKILL.md`
 - [ ] update `README.md` Commands/usage + MCP tool catalog
 - [ ] document new config keys: `telegram.access` multi-chat/multi-permission + `delete`,
-      `delete_only_session_messages`, hot-reload behavior, `mcp.disabled_tools`, base64/file_urls limits
+      `delete_only_session_messages` (default **true**), hot-reload behavior, `mcp.disabled_tools`,
+      base64/file_urls limits (base64 default **1 MB**)
+- [ ] add **migration notes**: (1) permissions are now independent — `write` no longer implies
+      `read`, so update configs to list `read` explicitly where needed; (2) `telegram_messages_send`
+      dropped `chat_name`/`folder_name`/`folder_id`/`files`. Update `CLAUDE.md`'s access section to
+      match the new independent-capability semantics.
 - [ ] run `tests/test_skill_inventory.py` and `tests/test_mcp_mount.py` — must pass
 
 ### Task 17: Verify acceptance criteria
@@ -278,20 +303,22 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 
 ## Technical Details
 
-- **Capability-set authorizer**: index becomes `default_caps: set[AccessLevel]`,
+- **Independent-capability authorizer**: index becomes `default_caps: set[AccessLevel]`,
   `chat_caps: dict[int, set[AccessLevel]]`, `folder_caps: dict[str, set[AccessLevel]]`.
-  Build-time implication expansion: `write→{read,write}`, `delete→{read,delete}`. `require(level)`
-  passes iff `level in effective_caps(chat)`.
+  **No implication expansion** — each permission maps only to itself (`read→{read}`,
+  `write→{write}`, `delete→{delete}`); a rule's caps union across matching rules. `require(level)`
+  passes iff `level in effective_caps(chat)`. The previous `WRITE > READ` ordering is removed.
 - **AccessRule (extended)**: exactly one target kind among `{chat|chats}`, `folder`, `all`;
-  permissions = `permissions or [permission]`; each ∈ `{read,write,delete}`.
+  permissions = `permissions or [permission]`; each ∈ `{read,write,delete}`. To grant read **and**
+  write to a chat, list both explicitly (`permissions: [read, write]`).
 - **Hot-reload**: `watchdog.observers.Observer` + a debouncing handler (2s); reload swaps
   `app.state.config` under a lock; failures keep the last-good config.
 - **SentMessageRegistry**: process-global `set[tuple[int,int]]`, ids canonicalised like the
   authorizer; populated by every successful send; consulted by delete when
-  `delete_only_session_messages` is true.
+  `delete_only_session_messages` is true (**default true**).
 - **Delete**: Telethon `client.delete_messages(entity, [ids], revoke=True)` by default.
 - **file_urls / base64**: download/decode to `tempfile`, enforce size + time limits, send local
-  path, `finally` cleanup. Base64 max default 10 MB (configurable).
+  path, `finally` cleanup. Base64 max default **1 MB** (configurable).
 - **MCP tool filtering**: applied at mount; recomputed when config hot-reloads.
 
 ## Post-Completion
