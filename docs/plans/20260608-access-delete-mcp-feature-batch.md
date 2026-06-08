@@ -247,17 +247,19 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 12: Slim `telegram_messages_send` args + disable tools by prefix
-- [ ] reduce `telegram_messages_send` args in `http_api/mcp/tools.py`: remove `chat_name`,
+- [x] reduce `telegram_messages_send` args in `http_api/mcp/tools.py`: remove `chat_name`,
       `folder_name`, `folder_id`, and `files`; keep `entity`/`chat_id`, `text`, `file_urls`,
       `reply_to`, and base64 attachments (chat targeting goes through the entity resolver)
-- [ ] add `mcp.disabled_tools: list[str]` to `config/models.py`, matching exact names and
+- [x] add `mcp.disabled_tools: list[str]` to `config/models.py`, matching exact names and
       prefixes (`telegram_groups_*`, `telegram_topics_*`, `telegram_members_*`,
       `telegram_folders_*`, `telegram_notifications_*`); filter tools at mount time in
       `mcp/server.py` and re-apply on hot-reload
-- [ ] update `EXPECTED_TOOL_NAMES` and the README MCP tool catalog for the reduced/added tools
-- [ ] write tests: send tool no longer exposes removed args; disabled prefixes/names are absent
+- [x] update `EXPECTED_TOOL_NAMES` and the README MCP tool catalog for the reduced/added tools
+      (tool set unchanged — names stay the same; README send-tool row updated for dropped args
+      and `disabled_tools` documented)
+- [x] write tests: send tool no longer exposes removed args; disabled prefixes/names are absent
       from the mounted tool list; empty `disabled_tools` exposes the full set
-- [ ] run tests + `ruff` — must pass before next task
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 13: Quieter `/health` logging
 - [ ] in `observability/logging.py` (or app setup) raise the level of / filter Telethon loggers

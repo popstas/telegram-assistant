@@ -130,7 +130,7 @@ MCP tool catalog:
 | --- | --- |
 | `telegram_health` | none |
 | `telegram_messages_recent` | `chat_id`, `limit` |
-| `telegram_messages_send` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `text`, `telegram_topic_id`/`topic_name`, `file_urls`, `schedule_at`, `delay_seconds`, `reply_to_message_id`, `operation_id`; server-local `files` are rejected |
+| `telegram_messages_send` | `telegram_chat_id`/`entity`, `text`, `telegram_topic_id`/`topic_name`, `file_urls`, base64 `base64_files`, `schedule_at`, `delay_seconds`, `reply_to_message_id`, `operation_id`; `chat_name`/`folder_name`/`folder_id` and server-local `files` are not part of the MCP surface (target via `entity`) |
 | `telegram_messages_forward` | `from_chat_id`/`from_entity`, `to_chat_id`/`to_entity`, `message_ids`, `operation_id` |
 | `telegram_messages_react` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `emoji` or `clear` |
 | `telegram_groups_create` | `title`, `about`, `admins`, `members`, `folder_name`/`folder_id`, `external_ref`, `topics_layout`, reserve/skip flags |
@@ -180,7 +180,14 @@ mcp:
   access_token_ttl_seconds: 3600
   refresh_token_ttl_seconds: 2592000
   signing_secret: "<output-of-openssl-rand-base64-32>"
+  disabled_tools: []   # e.g. ["telegram_groups_*", "telegram_health"]
 ```
+
+`disabled_tools` omits tools from the mounted MCP surface. An entry ending in
+`*` matches by prefix (e.g. `telegram_groups_*` hides every group tool);
+otherwise it matches the exact tool name. The filter is applied at mount and
+re-applied on config hot-reload, so editing `data/config.yml` adds or restores
+tools without a restart.
 
 For Google OAuth, create a Web application client and register
 `<issuer_url>/authorize` as an authorized redirect URI. If the service is behind

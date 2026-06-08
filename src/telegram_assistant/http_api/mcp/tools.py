@@ -879,39 +879,33 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
     async def telegram_messages_send(
         text: str = "",
         telegram_chat_id: int | None = None,
-        chat_name: str | None = None,
         entity: str | int | None = None,
-        folder_name: str | None = None,
-        folder_id: int | None = None,
         telegram_topic_id: int | None = None,
         topic_name: str | None = None,
         operation_id: str | None = None,
-        files: list[str] | None = None,
         file_urls: list[str] | None = None,
         base64_files: list[dict[str, Any]] | None = None,
         schedule_at: datetime | None = None,
         delay_seconds: int | None = None,
         reply_to_message_id: int | None = None,
     ) -> dict[str, Any]:
-        """Send a message or run the folder/topic mass-send mode.
+        """Send a message to a chat (targeted by ``entity`` or ``telegram_chat_id``).
 
         ``base64_files`` are inline attachments ``[{filename, mime, content_b64}]``
         decoded to a temp file and sent (max 1 MB each); ``file_urls`` carry
-        http(s) URLs downloaded server-side before the send.
+        http(s) URLs downloaded server-side before the send. Chat targeting goes
+        through the entity resolver; folder/chat-name and server-local ``files``
+        are not part of the MCP surface.
         """
         request = _request(provider)
         try:
             body = MessageSendBody(
                 text=text,
                 telegram_chat_id=telegram_chat_id,
-                chat_name=chat_name,
                 entity=entity,
-                folder_name=folder_name,
-                folder_id=folder_id,
                 telegram_topic_id=telegram_topic_id,
                 topic_name=topic_name,
                 operation_id=operation_id,
-                files=files,
                 file_urls=file_urls,
                 base64_files=base64_files,
                 schedule_at=schedule_at,

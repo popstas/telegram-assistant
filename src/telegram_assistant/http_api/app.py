@@ -31,6 +31,7 @@ from telegram_assistant.http_api.mcp import (
     OAuthAuthorizationServer,
     build_fastmcp_server,
     build_oauth_router,
+    configure_mcp_tools,
 )
 from telegram_assistant.http_api.members import build_router as build_members_router
 from telegram_assistant.http_api.messages import build_router as build_messages_router
@@ -533,10 +534,17 @@ def create_app(
 
                 def _on_swap(new_config: AppConfig) -> None:
                     # Rebuild config-derived state that is constructed once
-                    # rather than per-request. The Authorizer and MCP
-                    # disabled-tools set read `app.state.config` lazily, so they
-                    # pick up the swap automatically.
+                    # rather than per-request. The Authorizer reads
+                    # `app.state.config` lazily, so it picks up the swap
+                    # automatically; the MCP tool surface is registered once, so
+                    # re-apply `mcp.disabled_tools` explicitly here.
                     app.state.plugin_registry = build_registry(new_config)
+                    if mcp_fastmcp_server is not None and new_config.mcp is not None:
+                        configure_mcp_tools(
+                            mcp_fastmcp_server,
+                            _mcp_app_state,
+                            new_config.mcp.disabled_tools,
+                        )
 
                 def _on_reload() -> None:
                     reload_config_into_state(

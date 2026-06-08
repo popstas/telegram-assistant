@@ -5,6 +5,7 @@
 
 ### Features
 
+- Base64 inline file attachments for message send
 - Reliable file_urls upload via download-to-temp
 - Messages recent --minutes time-window filter
 - Reply_to on message send across CLI/HTTP/MCP

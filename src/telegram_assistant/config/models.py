@@ -221,6 +221,10 @@ class McpConfig(BaseModel):
     access_token_ttl_seconds: int = Field(default=3600, ge=1)
     refresh_token_ttl_seconds: int = Field(default=2592000, ge=1)
     signing_secret: str | None = Field(default=None, min_length=32)
+    # Tool names or prefixes to omit from the mounted MCP surface. An entry
+    # ending in ``*`` matches by prefix (e.g. ``telegram_groups_*``); otherwise
+    # it matches the exact tool name. Re-applied on config hot-reload.
+    disabled_tools: list[str] = Field(default_factory=list)
 
     @field_validator(
         "allowed_emails",
@@ -230,6 +234,7 @@ class McpConfig(BaseModel):
         "allowed_redirect_uris",
         "allowed_redirect_hosts",
         "required_scopes",
+        "disabled_tools",
     )
     @classmethod
     def _entries_non_empty(cls, v: list[str]) -> list[str]:

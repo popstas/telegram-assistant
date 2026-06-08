@@ -319,9 +319,12 @@ def test_mcp_send_message_uses_operation_store_idempotency(
     assert len(backend.sent) == 1
 
 
-def test_mcp_send_message_rejects_server_local_files(
+def test_mcp_send_message_drops_server_local_files_arg(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:
+    # ``files`` is no longer part of the MCP send surface (Task 12). An extra
+    # ``files`` kwarg is not in the tool schema and is ignored, so the text send
+    # proceeds with no server-local attachments.
     backend = FakeMessageBackend()
     with _client(minimal_config_yaml, tmp_path, message_backend=backend) as client:
         token = _mint_token(client)
@@ -338,11 +341,9 @@ def test_mcp_send_message_rejects_server_local_files(
             },
         )
 
-    assert result["isError"] is True
-    text = result["content"][0]["text"]
-    assert '"error": "invalid_request"' in text
-    assert "server-local files are not supported" in text
-    assert backend.sent == []
+    assert result["isError"] is False
+    assert len(backend.sent) == 1
+    assert backend.sent[0]["files"] == ()
 
 
 def test_mcp_tool_maps_access_denied_to_actionable_error(
