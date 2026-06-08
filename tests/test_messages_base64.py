@@ -125,6 +125,28 @@ def test_materialize_writes_files_preserving_name() -> None:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
+def test_materialize_strips_path_traversal_in_filename() -> None:
+    """A crafted ``filename`` with directory components must not escape tmpdir."""
+    atts = [
+        Base64Attachment(
+            filename="../../etc/evil.txt",
+            content_b64=base64.b64encode(b"EVIL").decode("ascii"),
+        ),
+    ]
+    tmpdir, paths = materialize_base64_attachments(atts)
+    try:
+        assert tmpdir is not None
+        # The written file stays directly inside tmpdir; no parent escape.
+        real_tmp = os.path.realpath(tmpdir)
+        real_dest = os.path.realpath(paths[0])
+        assert os.path.dirname(real_dest) == real_tmp
+        assert os.path.basename(paths[0]) == "0-evil.txt"
+    finally:
+        import shutil
+
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
 def test_materialize_empty_returns_none() -> None:
     tmpdir, paths = materialize_base64_attachments([])
     assert tmpdir is None

@@ -420,6 +420,23 @@ async def test_denied_carries_required_and_matched_metadata() -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture
+def _restore_logging():
+    """Snapshot/restore the root logger so ``configure_logging(force=True)`` in
+    the logging tests below doesn't leave the root handler writing to a dead
+    StringIO buffer (which would corrupt log capture in later tests)."""
+    import logging
+
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    try:
+        yield
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+
 def _capture_access_log(buf: io.StringIO) -> list[dict]:
     records = []
     for line in buf.getvalue().strip().splitlines():
@@ -431,7 +448,7 @@ def _capture_access_log(buf: io.StringIO) -> list[dict]:
 
 
 @pytest.mark.asyncio
-async def test_denied_chat_emits_structured_log_line() -> None:
+async def test_denied_chat_emits_structured_log_line(_restore_logging) -> None:
     buf = io.StringIO()
     configure_logging(level="DEBUG", stream=buf, force=True)
     auth = Authorizer(AccessConfig(rules=[AccessRule(all=True, permission="read")]))
@@ -450,7 +467,7 @@ async def test_denied_chat_emits_structured_log_line() -> None:
 
 
 @pytest.mark.asyncio
-async def test_denied_folder_emits_structured_log_line() -> None:
+async def test_denied_folder_emits_structured_log_line(_restore_logging) -> None:
     buf = io.StringIO()
     configure_logging(level="DEBUG", stream=buf, force=True)
     auth = Authorizer(

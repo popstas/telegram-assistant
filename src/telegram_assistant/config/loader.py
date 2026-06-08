@@ -31,19 +31,21 @@ telegram:
     enable_topics: true
     create_invite_link: true
     topics_layout: list             # "list" (default) or "tabs"
-  # Read/write access policy. Omitting `access` entirely keeps the default
+  # Read/write/delete access policy. Omitting `access` entirely keeps the default
   # allow-all behavior. Adding it switches to deny-by-default: only chats
-  # granted by a matching rule may be touched. Rules combine as a union and the
-  # highest level wins; `write` implies `read`. Each rule sets exactly one of
-  # `chat` / `folder` / `all`.
+  # granted by a matching rule may be touched. Matching rules union their
+  # capabilities, and capabilities are INDEPENDENT — `write` does NOT imply
+  # `read`, so a chat that should be both readable and writable must list both.
+  # Each rule sets exactly one of `chat` / `chats` / `folder` / `all`, plus
+  # `permission` (single) or `permissions` (list of read/write/delete).
   # access:
   #   rules:
   #     - all: true                 # read every chat (wildcard baseline)
   #       permission: read
-  #     - folder: "Clients"         # manage members/topics + send in this folder
-  #       permission: write
-  #     - chat: "@client_chat"      # write to one specific chat by @username
-  #       permission: write
+  #     - folder: "Clients"         # read + write members/topics + send here
+  #       permissions: [read, write]
+  #     - chat: "@client_chat"      # read + write + delete one specific chat
+  #       permissions: [read, write, delete]
 
 http:
   host: "127.0.0.1"
