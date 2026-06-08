@@ -42,18 +42,23 @@ This section is the contract that applies to every action.
 
 ## Liveness check: `health`
 
-Before any state-changing command in a fresh agent session run:
+Run `health` **only when there is a reason to** — do not probe proactively when
+nothing is wrong:
 
 ```bash
 telegram-assistant health
 ```
 
+- Do **not** run `health` before a change just to be safe. Go straight to the
+  command flow. Run `health` only when something actually looks wrong:
+  a command fails, a dry-run reports an auth/DB/folder problem, the session
+  looks unauthorised, or the human explicitly asks «проверь health».
 - If `health` reports a problem (auth missing, DB unreachable, default folder
   missing, etc.), stop and report it. Do not attempt to "fix" it by running
   other commands.
 - `health` is read-only; no confirmation is needed.
-- Within the same session, `health` does not need to be repeated before every
-  command, but it must have succeeded at least once before any change.
+- Once `health` has succeeded in a session, do not repeat it for later
+  commands unless a new failure surfaces.
 
 ## Confirmation policy
 
@@ -133,9 +138,11 @@ not skip steps, even if the request looks obvious.
    (alias `planfix_task_id`), folder. Treat anything missing as missing —
    never invent values.
 4. If a required parameter is missing or ambiguous, ask a short clarifying
-   question (one question, no preamble).
-5. Run `telegram-assistant health` if it has not yet succeeded in
-   the current session.
+   question (one question, no preamble). For `messages send`, if the message
+   text is missing, ask the human for it (AskUser) — never invent the message.
+5. Do **not** run `telegram-assistant health` proactively. Skip it when nothing
+   is wrong and go to the next step; run it only if a later command or dry-run
+   surfaces an auth/DB/folder problem, or the human asks for it.
 6. For bulk-style commands, prepare a temporary CSV/JSON in `/tmp` as
    described above.
 7. For state-changing commands that support `--dry-run`, run with
@@ -616,7 +623,7 @@ Request: «Создай группу для клиента Клиент / про
    `--member @member_username`. Folder defaults to the configured
    `Planfix clients`. Add `--topics-layout tabs` only if the human asks
    for tabs; otherwise the configured `topics_layout` default applies.
-3. Run `telegram-assistant health` if not yet done.
+3. Skip `health` unless a problem surfaces (don't probe when nothing is wrong).
 4. Dry-run:
 
    ```bash
@@ -647,7 +654,7 @@ Request: «Переключи топики чата -1003911170598 на tabs.»
 2. Extracted: `--chat-id -1003911170598`, `--layout tabs`. If the human
    does not name a layout, fall back to
    `telegram.defaults.topics_layout` and surface that choice in the plan.
-3. Run `telegram-assistant health` if not yet done.
+3. Skip `health` unless a problem surfaces (don't probe when nothing is wrong).
 4. Dry-run:
 
    ```bash

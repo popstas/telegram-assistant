@@ -270,11 +270,11 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 14: Skill update — conditional health check + prompt for message
-- [ ] update the `change` skill flow (referenced in TODO) so it does **not** run a health check
+- [x] update the `change` skill flow (referenced in TODO) so it does **not** run a health check
       when there are no issues, and uses AskUser to obtain the message to send
-- [ ] reflect any new send options (`reply_to`, attachments) the skill should pass through
-- [ ] write/adjust the skill-inventory expectations so `tests/test_skill_inventory.py` stays green
-- [ ] run tests + `ruff` — must pass before next task
+- [x] reflect any new send options (`reply_to`, attachments) the skill should pass through
+- [x] write/adjust the skill-inventory expectations so `tests/test_skill_inventory.py` stays green
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 15: Extend live e2e scripts
 - [ ] add idempotent steps to `scripts/e2e_*.sh` for: delete (revoke + `delete_only_session_messages`

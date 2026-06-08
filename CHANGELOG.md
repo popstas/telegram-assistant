@@ -5,6 +5,7 @@
 
 ### Features
 
+- Tests for quieter /health Telethon logging
 - Slim MCP send args + mcp.disabled_tools filtering
 - Base64 inline file attachments for message send
 - Reliable file_urls upload via download-to-temp
