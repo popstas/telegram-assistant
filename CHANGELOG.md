@@ -32,6 +32,7 @@
 
 ### Bug Fixes
 
+- review: Correct access config template + harden base64/logging tests
 - health: Skip default folder probe
 - health: Preserve Telegram auth status
 - health: Allow slower Telegram probes

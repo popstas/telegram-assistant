@@ -186,11 +186,15 @@ def materialize_base64_attachments(
                 max_bytes=max_bytes,
                 allowed_top_types=allowed_top_types,
             )
-            # Index-prefix the basename so two attachments that share a filename
-            # don't clobber each other while still preserving the real name and
-            # extension for Telegram.
+            # Give each attachment its own indexed subdirectory so two
+            # attachments that share a filename don't clobber each other while
+            # the basename stays the real name — Telegram derives the displayed
+            # filename from the path basename, so any prefix would be visible to
+            # recipients.
             safe = os.path.basename(att.filename.strip())
-            dest = os.path.join(tmpdir, f"{index}-{safe}")
+            subdir = os.path.join(tmpdir, str(index))
+            os.mkdir(subdir)
+            dest = os.path.join(subdir, safe)
             with open(dest, "wb") as fh:
                 fh.write(data)
             paths.append(dest)
