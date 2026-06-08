@@ -820,8 +820,13 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         chat_id: int | None = None,
         entity: str | None = None,
         limit: int = 5,
+        minutes: int | None = None,
     ) -> dict[str, Any]:
-        """Return recent messages from a chat."""
+        """Return recent messages from a chat.
+
+        ``minutes`` optionally restricts the result to messages newer than
+        ``now - minutes`` (composed with ``limit``).
+        """
         request = _request(provider)
         try:
             if (chat_id is None) == (entity is None):
@@ -840,11 +845,13 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 backend=backend,
                 chat_id=resolved_chat_id,  # type: ignore[arg-type]
                 limit=limit,
+                minutes=minutes,
                 authorizer=authorizer,
             )
             return {
                 "telegram_chat_id": resolved_chat_id,
                 "limit": limit,
+                "minutes": minutes,
                 "count": len(messages),
                 "messages": [message.to_dict() for message in messages],
             }

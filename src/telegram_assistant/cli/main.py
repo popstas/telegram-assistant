@@ -3070,6 +3070,11 @@ def messages_recent(
         "--limit",
         help="Maximum number of recent messages to return (default 5).",
     ),
+    minutes: int | None = typer.Option(
+        None,
+        "--minutes",
+        help="Only return messages newer than now - MINUTES (composed with --limit).",
+    ),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -3094,6 +3099,9 @@ def messages_recent(
         raise typer.Exit(code=2)
     if limit <= 0:
         typer.echo("--limit must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+    if minutes is not None and minutes <= 0:
+        typer.echo("--minutes must be a positive integer", err=True)
         raise typer.Exit(code=2)
 
     config, manager, open_backends = _build_message_read_backends(config_path)
@@ -3130,11 +3138,13 @@ def messages_recent(
                 backend=read_backend,
                 chat_id=resolved_chat_id,
                 limit=limit,
+                minutes=minutes,
                 authorizer=authorizer,
             )
             return {
                 "telegram_chat_id": resolved_chat_id,
                 "limit": limit,
+                "minutes": minutes,
                 "count": len(messages),
                 "messages": [m.to_dict() for m in messages],
             }

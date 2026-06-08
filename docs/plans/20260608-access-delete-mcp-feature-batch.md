@@ -221,11 +221,11 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 9: `messages recent --minutes`
-- [ ] add a `minutes: int | None` filter to the recent op in `messages/service.py` (return only
+- [x] add a `minutes: int | None` filter to the recent op in `messages/service.py` (return only
       messages newer than `now - minutes`); compose with existing limit
-- [ ] expose via CLI `messages recent --minutes`, HTTP request field, and MCP recent tool
-- [ ] write tests: messages outside the window excluded; boundary handling; combined with limit
-- [ ] run tests + `ruff` — must pass before next task
+- [x] expose via CLI `messages recent --minutes`, HTTP request field, and MCP recent tool
+- [x] write tests: messages outside the window excluded; boundary handling; combined with limit
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 10: Reliable `file_urls` upload (download-to-temp)
 - [ ] in `messages/attachments.py` (or a new `messages/downloads.py`) add a helper that downloads

@@ -770,12 +770,15 @@ def build_router() -> APIRouter:
         chat_id: int | None = None,
         entity: str | None = None,
         limit: int = 5,
+        minutes: int | None = None,
     ) -> dict[str, Any]:
         """Return up to ``limit`` recent messages (READ-gated).
 
         Accepts either a numeric ``chat_id`` or a flexible ``entity`` reference
         (resolved via the shared resolver). The op requires READ on the resolved
-        chat; an unpermitted chat returns 403.
+        chat; an unpermitted chat returns 403. ``minutes`` optionally restricts
+        the result to messages newer than ``now - minutes`` (composed with
+        ``limit``).
         """
         if (chat_id is None) == (entity is None):
             raise HTTPException(
@@ -786,6 +789,11 @@ def build_router() -> APIRouter:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="limit must be a positive integer",
+            )
+        if minutes is not None and minutes <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="minutes must be a positive integer",
             )
 
         backend = _read_backend_or_503(request)
@@ -802,6 +810,7 @@ def build_router() -> APIRouter:
                 backend=backend,
                 chat_id=resolved_chat_id,
                 limit=limit,
+                minutes=minutes,
                 authorizer=authorizer,
             )
         except AccessDenied as exc:
@@ -814,6 +823,7 @@ def build_router() -> APIRouter:
         return {
             "telegram_chat_id": resolved_chat_id,
             "limit": limit,
+            "minutes": minutes,
             "count": len(messages),
             "messages": [m.to_dict() for m in messages],
         }

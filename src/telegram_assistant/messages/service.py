@@ -552,21 +552,54 @@ async def get_recent_messages(
     backend: MessageReadBackend,
     chat_id: int,
     limit: int = 5,
+    minutes: int | None = None,
     authorizer: Authorizer | None = None,
+    now: datetime | None = None,
 ) -> list[RecentMessage]:
     """Return up to ``limit`` recent messages for ``chat_id``, newest first.
 
     This is a READ op: when an ``authorizer`` is supplied it must grant READ on
     the target chat or :class:`AccessDenied` is raised before any Telegram call.
     ``limit`` defaults to 5 and must be positive.
+
+    ``minutes`` optionally narrows the result to messages newer than
+    ``now - minutes`` (default ``now`` is the current UTC time). It composes with
+    ``limit``: the backend returns the newest ``limit`` messages and the window
+    then drops any that fall outside it, so the result may be shorter than
+    ``limit``. Messages whose ``date`` the backend could not supply are excluded
+    when a window is active (their age is unknown). ``minutes`` must be positive
+    when given.
     """
     if limit <= 0:
         raise ValueError("get_recent_messages requires a positive limit")
+    if minutes is not None and minutes <= 0:
+        raise ValueError("get_recent_messages requires a positive minutes window")
 
     if authorizer is not None:
         await authorizer.require(chat_id, AccessLevel.READ)
 
-    return await backend.get_recent_messages(chat_id=chat_id, limit=limit)
+    messages = await backend.get_recent_messages(chat_id=chat_id, limit=limit)
+    if minutes is None:
+        return messages
+
+    reference = now if now is not None else datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    cutoff = reference - timedelta(minutes=minutes)
+
+    filtered: list[RecentMessage] = []
+    for message in messages:
+        if message.date is None:
+            continue
+        try:
+            stamp = datetime.fromisoformat(message.date)
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        if stamp >= cutoff:
+            filtered.append(message)
+    return filtered
 
 
 # ---------------------------------------------------------------------------
