@@ -17,6 +17,7 @@ from telegram_assistant.messages.reactions import (
     SendReactionResult,
     set_message_reaction,
 )
+from telegram_assistant.messages.sent_registry import SentMessageRegistry
 from telegram_assistant.messages.service import (
     MassSendItemResult,
     MassSendRequest,
@@ -56,6 +57,7 @@ __all__ = [
     "ReactionBackend",
     "RecentMessage",
     "ScheduleError",
+    "SentMessageRegistry",
     "SendMessageRequest",
     "SendMessageResult",
     "SendReactionRequest",

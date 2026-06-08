@@ -5,6 +5,7 @@
 
 ### Features
 
+- Access management CLI commands (list/check/add)
 - Backward-compatible multi-chat/multi-permission access rules
 - Independent-capability authorizer + delete permission
 - Config hot-reload via watchdog

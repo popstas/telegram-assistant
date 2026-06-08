@@ -30,6 +30,7 @@ from telegram_assistant.folders import (
     FolderBackend,
     resolve_folder,
 )
+from telegram_assistant.messages.sent_registry import SentMessageRegistry
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
     OperationRecord,
@@ -414,6 +415,7 @@ async def send_message(
     store: OperationStore,
     request: SendMessageRequest,
     authorizer: Authorizer | None = None,
+    sent_registry: SentMessageRegistry | None = None,
 ) -> tuple[SendMessageResult, OperationRecord]:
     """Send a single message (or service command), or replay the saved result.
 
@@ -427,6 +429,10 @@ async def send_message(
     Sending is a WRITE op: when an ``authorizer`` is supplied it must grant
     WRITE on the target chat or :class:`AccessDenied` is raised before any
     operation row is created.
+
+    When a ``sent_registry`` is supplied, the id(s) of a freshly-sent message
+    are recorded so the session-limited delete op can later recognise them.
+    Recording is best-effort and only happens for fresh sends, never replays.
 
     A send needs either non-empty ``text`` or at least one attachment. Media
     sends pass ``files``/``schedule_at`` through to the backend; a plain text
@@ -515,6 +521,15 @@ async def send_message(
         ),
     )
     op = store.complete_operation(operation_id, result.to_dict())
+    # Record every id this process just sent (single send or album) so the
+    # session-limited delete op (Tasks 6/7) recognises them. Only fresh sends
+    # are recorded — a replay of a previously-completed op (handled above)
+    # belongs to whatever process originally sent it, not this one.
+    if sent_registry is not None:
+        ids = all_ids if all_ids is not None else (primary_id,)
+        for message_id in ids:
+            if message_id is not None:
+                sent_registry.record(request.telegram_chat_id, message_id)
     return result, op
 
 
@@ -656,6 +671,7 @@ async def mass_send_message(
     store: OperationStore,
     request: MassSendRequest,
     authorizer: Authorizer | None = None,
+    sent_registry: SentMessageRegistry | None = None,
 ) -> MassSendResult:
     """Send ``request.text`` to every chat in ``folder_name`` that has the
     matching ``topic_name``.
@@ -775,6 +791,7 @@ async def mass_send_message(
                 backend=message_backend,
                 store=store,
                 request=send_req,
+                sent_registry=sent_registry,
             )
         except (MessageSendFailed, MessageSendPending, MessageSendNeedsReview) as exc:
             failed += 1

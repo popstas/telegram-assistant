@@ -44,6 +44,7 @@ from telegram_assistant.messages import (
     MessageBackend,
     MessageReadBackend,
     ReactionBackend,
+    SentMessageRegistry,
 )
 from telegram_assistant.notifications import NotificationBackend
 from telegram_assistant.observability.logging import configure_logging
@@ -555,6 +556,10 @@ def create_app(
     app.state.config_lock = threading.Lock()
     app.state.config_watcher = None
     app.state.plugin_registry = build_registry(config)
+    # One registry per server process, reachable from HTTP/MCP via app.state.
+    # Tracks the ids this process has sent so the session-limited delete op
+    # (Tasks 6/7) can recognise them; cleared on restart.
+    app.state.sent_message_registry = SentMessageRegistry()
     app.state.session_manager = session_manager
     app.state.database_path = database_path
     app.state.folder_backend_factory = (

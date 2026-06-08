@@ -175,14 +175,14 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 5: SentMessageRegistry (in-memory, process lifetime)
-- [ ] add `messages/sent_registry.py` with a thread/async-safe `SentMessageRegistry` storing a
+- [x] add `messages/sent_registry.py` with a thread/async-safe `SentMessageRegistry` storing a
       set of `(chat_id, message_id)` with `record()` and `contains()`; one instance per server
       process, held on `app.state` and injected into MCP context
-- [ ] record sent message ids from **all** send paths (text/media/scheduled) after a successful
+- [x] record sent message ids from **all** send paths (text/media/scheduled) after a successful
       send in `messages/service.py` (or where send results return the message id)
-- [ ] write tests: record + contains round-trip; canonical `-100` id handling matches the
+- [x] write tests: record + contains round-trip; canonical `-100` id handling matches the
       authorizer; recording is best-effort and never fails a send
-- [ ] run tests + `ruff` — must pass before next task
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 6: Delete-message domain operation
 - [ ] add a delete op in `messages/service.py` (+ a `DeleteBackend` protocol) and implement it in
