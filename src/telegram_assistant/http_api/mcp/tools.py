@@ -163,6 +163,7 @@ from telegram_assistant.messages import (
     delete_messages,
     forward_messages,
     get_recent_messages,
+    make_url_downloader,
     mass_send_message,
     resolve_schedule_at,
     send_message,
@@ -679,6 +680,7 @@ async def _resolve_message_send(
         ),
         authorizer=authorizer,
         sent_registry=sent_message_registry(request),  # type: ignore[arg-type]
+        downloader=make_url_downloader() if file_urls else None,
     )
     payload = result.to_dict()
     payload["operation_id"] = op.id

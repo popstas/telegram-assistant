@@ -2558,6 +2558,7 @@ def messages_send(
         ScheduleError,
         SendMessageRequest,
         is_service_command,
+        make_url_downloader,
         mass_send_message,
         parse_delay,
         parse_schedule_at,
@@ -2969,6 +2970,7 @@ def messages_send(
                 store=store,
                 request=req_single,
                 authorizer=authorizer,
+                downloader=make_url_downloader() if file_urls else None,
             )
             payload = result_single.to_dict()
             payload["operation_id"] = op.id

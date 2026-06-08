@@ -46,6 +46,7 @@ from telegram_assistant.messages import (
     delete_messages,
     forward_messages,
     get_recent_messages,
+    make_url_downloader,
     mass_send_message,
     resolve_schedule_at,
     send_message,
@@ -576,6 +577,15 @@ def build_router() -> APIRouter:
                 request=domain_request,
                 authorizer=authorizer,
                 sent_registry=sent_message_registry(request),
+                downloader=(
+                    make_url_downloader(
+                        fetcher=getattr(
+                            request.app.state, "attachment_fetcher", None
+                        )
+                    )
+                    if file_urls
+                    else None
+                ),
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc

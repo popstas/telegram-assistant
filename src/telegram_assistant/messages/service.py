@@ -21,7 +21,9 @@ they are not naturally pinned to a Planfix task id).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -31,6 +33,7 @@ from telegram_assistant.folders import (
     FolderBackend,
     resolve_folder,
 )
+from telegram_assistant.messages.downloads import Downloader
 from telegram_assistant.messages.sent_registry import SentMessageRegistry
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
@@ -423,6 +426,7 @@ async def send_message(
     request: SendMessageRequest,
     authorizer: Authorizer | None = None,
     sent_registry: SentMessageRegistry | None = None,
+    downloader: Downloader | None = None,
 ) -> tuple[SendMessageResult, OperationRecord]:
     """Send a single message (or service command), or replay the saved result.
 
@@ -440,6 +444,13 @@ async def send_message(
     When a ``sent_registry`` is supplied, the id(s) of a freshly-sent message
     are recorded so the session-limited delete op can later recognise them.
     Recording is best-effort and only happens for fresh sends, never replays.
+
+    When a ``downloader`` is supplied, each ``file_urls`` entry is downloaded to
+    a local temp file (bounded by size + time) and the local path — not the
+    URL — is handed to the backend; the temp files are removed in a ``finally``
+    after the send. A download failure marks the operation ``failed`` and
+    propagates. Without a ``downloader`` the URLs are passed through to the
+    backend unchanged (backward compatible).
 
     A send needs either non-empty ``text`` or at least one attachment. Media
     sends pass ``files``/``schedule_at`` through to the backend; a plain text
@@ -483,36 +494,51 @@ async def send_message(
         )
 
     operation_id = begin.operation.id
-    # Only pass the media/schedule kwargs when set so a plain text send hits
-    # the backend with the exact original signature (backward compatible with
-    # text-only backends that predate attachments).
-    extra: dict[str, Any] = {}
-    if request.attachment_refs:
-        extra["files"] = request.attachment_refs
-    if request.schedule_at is not None:
-        extra["schedule_at"] = request.schedule_at
-    if request.reply_to_message_id is not None:
-        extra["reply_to_message_id"] = request.reply_to_message_id
+    # When a downloader is supplied, ``file_urls`` are fetched to local temp
+    # files first and the local paths replace the URLs in the attachment list;
+    # the temp files are cleaned up in the ``finally`` once the send is done.
+    downloaded_paths: list[str] = []
     try:
-        raw_id = await backend.send_message(
-            chat_id=request.telegram_chat_id,
-            text=request.text,
-            topic_id=request.telegram_topic_id,
-            **extra,
-        )
-        primary_id, all_ids = _normalize_message_ids(raw_id)
-    except FloodWaitError as exc:
-        # FLOOD_WAIT is transient — marking the op `failed` would lock the
-        # idempotency key on a terminal state and the retry would surface
-        # MessageSendFailed forever. Mark needs_review so an operator can
-        # `operations retry` to reopen the slot.
-        store.mark_needs_review(
-            operation_id, f"FLOOD_WAIT during message send: {exc}"
-        )
-        raise MessageSendNeedsReview(str(exc)) from exc
-    except Exception as exc:
-        store.fail_operation(operation_id, str(exc))
-        raise
+        try:
+            if request.file_urls and downloader is not None:
+                for url in request.file_urls:
+                    downloaded_paths.append(await downloader(url))
+                attachment_refs = tuple(request.files) + tuple(downloaded_paths)
+            else:
+                attachment_refs = request.attachment_refs
+            # Only pass the media/schedule kwargs when set so a plain text send
+            # hits the backend with the exact original signature (backward
+            # compatible with text-only backends that predate attachments).
+            extra: dict[str, Any] = {}
+            if attachment_refs:
+                extra["files"] = attachment_refs
+            if request.schedule_at is not None:
+                extra["schedule_at"] = request.schedule_at
+            if request.reply_to_message_id is not None:
+                extra["reply_to_message_id"] = request.reply_to_message_id
+            raw_id = await backend.send_message(
+                chat_id=request.telegram_chat_id,
+                text=request.text,
+                topic_id=request.telegram_topic_id,
+                **extra,
+            )
+            primary_id, all_ids = _normalize_message_ids(raw_id)
+        except FloodWaitError as exc:
+            # FLOOD_WAIT is transient — marking the op `failed` would lock the
+            # idempotency key on a terminal state and the retry would surface
+            # MessageSendFailed forever. Mark needs_review so an operator can
+            # `operations retry` to reopen the slot.
+            store.mark_needs_review(
+                operation_id, f"FLOOD_WAIT during message send: {exc}"
+            )
+            raise MessageSendNeedsReview(str(exc)) from exc
+        except Exception as exc:
+            store.fail_operation(operation_id, str(exc))
+            raise
+    finally:
+        for path in downloaded_paths:
+            with suppress(OSError):
+                os.unlink(path)
 
     result = SendMessageResult(
         telegram_chat_id=request.telegram_chat_id,

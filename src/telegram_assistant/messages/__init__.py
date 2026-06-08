@@ -5,6 +5,13 @@ from telegram_assistant.messages.attachments import (
     validate_file_urls,
     validate_local_files,
 )
+from telegram_assistant.messages.downloads import (
+    Downloader,
+    DownloadError,
+    Fetcher,
+    download_url_to_temp,
+    make_url_downloader,
+)
 from telegram_assistant.messages.forwarding import (
     ForwardBackend,
     ForwardMessagesRequest,
@@ -49,6 +56,9 @@ from telegram_assistant.messages.service import (
 __all__ = [
     "AttachmentError",
     "DeleteBackend",
+    "DownloadError",
+    "Downloader",
+    "Fetcher",
     "DeleteMessagesRequest",
     "DeleteMessagesResult",
     "ForwardBackend",
@@ -72,7 +82,9 @@ __all__ = [
     "SendReactionRequest",
     "SendReactionResult",
     "delete_messages",
+    "download_url_to_temp",
     "forward_messages",
+    "make_url_downloader",
     "get_recent_messages",
     "is_service_command",
     "mass_send_message",

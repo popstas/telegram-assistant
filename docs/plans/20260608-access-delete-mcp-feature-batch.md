@@ -228,14 +228,14 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 10: Reliable `file_urls` upload (download-to-temp)
-- [ ] in `messages/attachments.py` (or a new `messages/downloads.py`) add a helper that downloads
+- [x] in `messages/attachments.py` (or a new `messages/downloads.py`) add a helper that downloads
       http(s) URLs to a temp file with **size and time limits**, returns the local path, and is
       cleaned up after send (try/finally)
-- [ ] route `file_urls` through this helper before handing local paths to Telethon; surface clear
+- [x] route `file_urls` through this helper before handing local paths to Telethon; surface clear
       errors on oversize / timeout / unreachable
-- [ ] write tests: successful download→send→cleanup (fake fetcher); size-limit and timeout
+- [x] write tests: successful download→send→cleanup (fake fetcher); size-limit and timeout
       rejection; cleanup on send failure
-- [ ] run tests + `ruff` — must pass before next task
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 11: Base64 file attachments for MCP send
 - [ ] accept base64 attachment input on the send path: `{filename, mime, content_b64}` with a

@@ -377,6 +377,133 @@ async def test_send_message_album_returns_all_ids(store: OperationStore) -> None
     )
 
 
+async def test_send_message_downloads_file_urls_to_temp_and_cleans_up(
+    store: OperationStore,
+) -> None:
+    import os
+
+    backend = FakeMessageBackend()
+    downloaded: list[str] = []
+
+    async def fake_downloader(url: str) -> str:
+        # Stand in for the real download: write the URL to a temp file.
+        import tempfile
+
+        fd, path = tempfile.mkstemp(prefix="tg-test-")
+        with os.fdopen(fd, "w") as fh:
+            fh.write(url)
+        downloaded.append(path)
+        return path
+
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="caption",
+        files=("/data/local.png",),
+        file_urls=("https://example.com/remote.png",),
+        operation_id="dl-1",
+    )
+    result, op = await send_message(
+        backend=backend,
+        store=store,
+        request=req,
+        downloader=fake_downloader,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    assert result.telegram_message_id is not None
+    # Backend received the local file path plus the *downloaded* temp path,
+    # not the original URL.
+    sent_files = backend.sent[0]["files"]
+    assert sent_files[0] == "/data/local.png"
+    assert sent_files[1] == downloaded[0]
+    assert "https://example.com/remote.png" not in sent_files
+    # Temp file is cleaned up after a successful send.
+    assert not os.path.exists(downloaded[0])
+    # The persisted payload still records the original URL, never the temp path.
+    assert op.request_payload["file_urls"] == ["https://example.com/remote.png"]
+
+
+async def test_send_message_cleans_up_temp_on_send_failure(
+    store: OperationStore,
+) -> None:
+    import os
+
+    backend = FakeMessageBackend(fail_send=True)
+    downloaded: list[str] = []
+
+    async def fake_downloader(url: str) -> str:
+        import tempfile
+
+        fd, path = tempfile.mkstemp(prefix="tg-test-")
+        os.close(fd)
+        downloaded.append(path)
+        return path
+
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="caption",
+        file_urls=("https://example.com/remote.png",),
+        operation_id="dl-fail",
+    )
+    with pytest.raises(RuntimeError):
+        await send_message(
+            backend=backend,
+            store=store,
+            request=req,
+            downloader=fake_downloader,
+        )
+
+    # The op is marked failed and the temp file is removed even on failure.
+    op = store.find_by_idempotency_key("message_send:chat=-100:topic=-:id=dl-fail")
+    assert op is not None and op.status is OperationStatus.FAILED
+    assert downloaded and not os.path.exists(downloaded[0])
+
+
+async def test_send_message_download_error_marks_failed(
+    store: OperationStore,
+) -> None:
+    from telegram_assistant.messages.downloads import DownloadError
+
+    backend = FakeMessageBackend()
+
+    async def broken_downloader(url: str) -> str:
+        raise DownloadError(f"unreachable: {url}")
+
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="caption",
+        file_urls=("https://example.com/remote.png",),
+        operation_id="dl-broken",
+    )
+    with pytest.raises(DownloadError):
+        await send_message(
+            backend=backend,
+            store=store,
+            request=req,
+            downloader=broken_downloader,
+        )
+
+    # A download failure never reaches the backend and fails the operation.
+    assert backend.sent == []
+    op = store.find_by_idempotency_key("message_send:chat=-100:topic=-:id=dl-broken")
+    assert op is not None and op.status is OperationStatus.FAILED
+
+
+async def test_send_message_without_downloader_passes_urls_through(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="caption",
+        file_urls=("https://example.com/remote.png",),
+        operation_id="dl-passthrough",
+    )
+    await send_message(backend=backend, store=store, request=req)
+    # No downloader → URL handed to the backend unchanged (backward compatible).
+    assert backend.sent[0]["files"] == ("https://example.com/remote.png",)
+
+
 async def test_send_message_rejects_empty_when_no_text_and_no_files(
     store: OperationStore,
 ) -> None:
@@ -1465,8 +1592,19 @@ def test_cli_messages_send_rejects_missing_local_file(
 
 
 def test_http_send_media_via_urls(minimal_config_yaml: str) -> None:
+    import os
+    from collections.abc import AsyncIterator
+
     backend = FakeMessageBackend()
     client = _http_client(minimal_config_yaml, message_backend=backend)
+
+    # Inject a fake fetcher so file_urls are downloaded to temp files without
+    # real network traffic; the body of each temp file is the URL itself.
+    async def _fetch(url: str, timeout: float) -> AsyncIterator[bytes]:
+        yield url.encode()
+
+    client.app.state.attachment_fetcher = _fetch
+
     resp = client.post(
         "/telegram/messages",
         json={
@@ -1485,10 +1623,13 @@ def test_http_send_media_via_urls(minimal_config_yaml: str) -> None:
     # Two attachments → album → list of ids.
     assert body["telegram_message_ids"] is not None
     assert len(body["telegram_message_ids"]) == 2
-    assert backend.sent[0]["files"] == (
-        "https://example.com/a.jpg",
-        "https://example.com/b.jpg",
-    )
+    # The backend received local temp paths (downloaded), not the URLs, and the
+    # temp files are cleaned up after the send.
+    sent_files = backend.sent[0]["files"]
+    assert len(sent_files) == 2
+    for path in sent_files:
+        assert path.startswith("https://") is False
+        assert not os.path.exists(path)
 
 
 def test_http_send_rejects_server_local_files(minimal_config_yaml: str, tmp_path: Path) -> None:
