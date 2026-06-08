@@ -20,7 +20,8 @@ This section is the contract that applies to every action.
   subcommand of it (`groups create`, `topics bulk-create`, `members bulk-add`,
   `messages send`, `folders inspect`, `operations status`, ...).
 - The runtime config lives at `data/config.yml`. The agent reads it for
-  defaults but never edits it. Notable keys:
+  defaults and never edits it by hand — the only write path is the
+  `access add` command (and only after a confirmed `--dry-run`). Notable keys:
   - `telegram.default_chat_folder.folder_name` — used as `--folder-name` when
     the human request does not name a folder explicitly.
   - `mcp` — optional Streamable-HTTP MCP/OAuth config. This skill still uses
@@ -238,10 +239,13 @@ reference the CLI exits with code 2 (`EntityNotFoundError` /
 `AmbiguousEntityError`) — surface the message and ask, do not guess.
 
 If the project configures `telegram.access` in `data/config.yml`, every
-chat-scoped command is gated (read vs write). When the policy does not
+chat-scoped command is gated (read / write / delete — capabilities are
+independent, so `write` does not imply `read`). When the policy does not
 permit a chat or destination folder the CLI exits with code 3 and prints
 `access denied ...`. The agent surfaces that verbatim and stops — it never
-edits `data/config.yml` to widen access on its own.
+widens access on its own initiative. Granting access is only done via an
+explicit human request through `access add` (confirmed after `--dry-run`),
+never silently to get a blocked command through.
 
 #### `auth` / `login`
 
@@ -458,19 +462,22 @@ edits `data/config.yml` to widen access on its own.
 #### `messages` / `recent`
 
 - Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
-  optional `--limit` (count of recent messages).
+  optional `--limit` (count of recent messages), optional `--minutes`
+  (only messages newer than `now - minutes`).
 - Required flags: exactly one chat reference.
 - From config: `--folder-name` default when resolving `--chat-name`.
 - Temp file: no.
 - Automation: read-only — run immediately when the human asks «покажи
   последние сообщения чата X» / «что писали в X». No `--dry-run`.
   `--limit` defaults to 5; pass it through only when the human names a
-  count.
+  count. Add `--minutes N` when the human scopes by time («что писали
+  за последний час» → `--minutes 60`); it composes with `--limit`.
 - Confirmation: not required (read-only). Still READ-gated by the
   `telegram.access` policy — if the chat is not permitted the CLI exits
   non-zero with `access denied`; surface that and stop.
 - Typical errors: `exactly one of --chat-id, --chat-name, or --entity
-  must be supplied`, `access denied ...` (exit code 3), entity
+  must be supplied`, `--minutes must be a positive integer`,
+  `access denied ...` (exit code 3), entity
   not-found / ambiguous (exit code 2).
 
 #### `messages` / `react`
@@ -512,6 +519,31 @@ edits `data/config.yml` to widen access on its own.
   --from-entity must be supplied`, `exactly one target must be supplied`,
   `access denied ...` (exit code 3), entity
   not-found / ambiguous (exit code 2).
+
+#### `messages` / `delete`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`), one or
+  more `--message-id` (repeat the flag per message), optional
+  `--revoke`/`--no-revoke`, optional `--force`.
+- Required flags: exactly one chat reference and at least one `--message-id`.
+- From config: `--folder-name` default when resolving `--chat-name`. The
+  `telegram.access.delete_only_session_messages` flag (default `true`) limits
+  deletes to messages this server process sent.
+- Temp file: no.
+- Automation: none — DELETE-gated destructive change. Run `--dry-run` first
+  (resolves + authorizes + runs the session-limit check without deleting),
+  show the plan, wait for confirmation, then run without `--dry-run`. Default
+  `--revoke` (delete for everyone); add `--no-revoke` only when the human asks
+  to delete just for themselves. Map «удали сообщение N в чате X» →
+  `--entity X --message-id N`.
+- Confirmation: required (bucket 2/3 — destructive). The plan must list every
+  message id that would be deleted and whether revoke is on.
+- Typical errors: `at least one --message-id is required`, `every --message-id
+  must be a positive integer`, `exactly one of --chat-id, --chat-name, or
+  --entity must be supplied`, `message delete forbidden ...` (id not sent by
+  this process while `delete_only_session_messages` is on), `access denied ...`
+  (exit code 3 — chat lacks the `delete` capability), entity not-found /
+  ambiguous (exit code 2).
 
 #### `notifications` / `mute`
 
@@ -603,6 +635,50 @@ edits `data/config.yml` to widen access on its own.
 - Confirmation: required after dry-run.
 - Typical errors: `operation <id> not found`, `operation <id> is
   completed; nothing to retry`.
+
+#### `access` / `list`
+
+- Extract: nothing.
+- Required flags: none.
+- From config: reads the loaded `telegram.access` policy.
+- Temp file: no.
+- Automation: read-only — run immediately when the human asks «покажи
+  права доступа» / «какие чаты разрешены». No `--dry-run`.
+- Confirmation: not required (read-only).
+- Typical errors: none beyond config-load failures — surface verbatim.
+
+#### `access` / `check`
+
+- Extract: chat reference (`--entity`), `--permission` (one of
+  `read`/`write`/`delete`).
+- Required flags: `--entity` and `--permission`.
+- From config: reads the loaded `telegram.access` policy.
+- Temp file: no.
+- Automation: read-only diagnostic — run immediately when the human asks
+  «есть ли доступ на запись в чат X» and report the verdict and matched rule.
+  No `--dry-run`.
+- Confirmation: not required (read-only).
+- Typical errors: exit `0` granted, exit `3` denied (`access denied ...`),
+  exit `2` when the entity cannot be resolved — surface the message and stop.
+
+#### `access` / `add`
+
+- Extract: exactly one target (`--entity` / `--folder` / `--all`) and
+  `--permission` (comma-separated subset of `read,write,delete`).
+- Required flags: one target and `--permission`.
+- From config: writes into `data/config.yml` (the one place the agent may edit
+  it, and only for `access add`); hot-reload applies the rule within ~2s.
+- Temp file: no.
+- Automation: none — this widens access. Run `--dry-run` first to show the
+  resulting rule, wait for explicit confirmation, then run without `--dry-run`.
+  Warn the human that adding the first rule to a config with no
+  `telegram.access` block switches the policy from allow-all to
+  deny-by-default.
+- Confirmation: required (bucket 2 — it changes policy).
+- Typical errors: `exactly one of --entity, --folder, or --all must be
+  supplied`, `--permission must list at least one of read,write,delete`,
+  validation errors from the access-rule model (surface verbatim), entity
+  not-found / ambiguous (exit code 2).
 
 ## Scenarios
 
@@ -1023,9 +1099,9 @@ Reuse the short templates from "Clarification templates" below.
   admins / reserve members or `@planfix_bot`) — never add `--force`
   on the agent's own initiative.
 - The human asks for an action that is not in the resource/action
-  table (writing a new bot, calling Telethon directly, editing
-  `data/config.yml`, etc.). Decline and ask whether the CLI flow
-  covers what they need.
+  table (writing a new bot, calling Telethon directly, hand-editing
+  `data/config.yml` outside the `access add` command, etc.). Decline and
+  ask whether the CLI flow covers what they need.
 - The request implies the agent should run `auth` itself, or collect
   a phone, code or 2FA password from the chat.
 

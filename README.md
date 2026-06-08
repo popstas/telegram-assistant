@@ -54,9 +54,10 @@ Top-level:
 `messages` — send messages and service commands:
 
 - `messages send` — send a message or service command (targeted or folder-wide mass mode). Attach local files with repeated `--file` and/or remote URLs with repeated `--file-url` (multiple attachments send an album); defer delivery with `--schedule-at` (ISO-8601 datetime) or `--delay` (relative duration like `10m`, `2h`, `1d`); thread a reply with `--reply-to <message_id>`. `--text` may be omitted for media-only sends. Attachments, scheduling, and `--reply-to` apply to targeted sends only, not mass mode.
-- `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5).
+- `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5, optional `--minutes N` keeps only messages newer than `now - N` minutes).
 - `messages react` — set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated).
 - `messages forward` — forward one or more messages (`--message-id`, repeatable) from a source (`--from-chat-id`/`--from-entity`) to a target (`--to-chat-id`/`--to-entity`, or the usual target aliases `--chat-id`/`--chat-name`/`--entity`); READ-gated on the source, WRITE-gated on the target.
+- `messages delete` — delete one or more messages (`--message-id`, repeatable) from a chat (DELETE-gated). `--revoke`/`--no-revoke` toggles delete-for-everyone (default revoke); `--dry-run` resolves + authorizes without deleting; `--force` is carried for surface consistency. Honors `telegram.access.delete_only_session_messages` (default `true`): when active, only messages this server process sent may be deleted.
 
 `notifications` — mute and unmute chat/contact notifications:
 
@@ -75,7 +76,32 @@ Mutating CLI commands support `--dry-run` before the real run. Local `--file` at
 
 ### Access control
 
-`telegram.access` in `data/config.yml` gates which chats/folders this instance may read or write. Omitting it means allow-all (backward compatible); once present it is deny-by-default, `write` implies `read`, and rules combine as a union with the highest level winning. Denials surface as a non-zero CLI exit (code 3) and `HTTP 403` on the API.
+`telegram.access` in `data/config.yml` gates which chats/folders this instance may read, write, or delete in. Omitting it means allow-all (backward compatible); once present it is deny-by-default. Capabilities are **independent** — `read`, `write`, and `delete` each grant *only* themselves, so `write` no longer implies `read`. Matching rules combine as a set-union of capabilities. Denials surface as a non-zero CLI exit (code 3) and `HTTP 403` on the API.
+
+Each rule names exactly one *target kind* — a single chat (`chat`/`--entity`), a list of chats (`chats`), a folder (`folder`), or the wildcard (`all`) — and a capability set via `permissions: [read, write, delete]` (or the legacy singular `permission`, default `write`). Legacy single-target / singular-permission rules still parse and apply. A common shape is a wildcard `all: read` baseline layered with targeted `[write]` or `[write, delete]` rules:
+
+```yaml
+telegram:
+  access:
+    delete_only_session_messages: true   # default; only delete messages this process sent
+    rules:
+      - all: true
+        permissions: [read]
+      - folder: "Planfix clients"
+        permissions: [read, write]
+      - chats: ["@some_chat", -1001234567890]
+        permissions: [read, write, delete]
+```
+
+Config edits are hot-reloaded: a `watchdog` observer on `data/config.yml` re-runs the loader with a 2s debounce and atomically swaps the live config on success (a parse/validation error keeps the last-good config), so access-rule changes apply within ~2s without restarting the server.
+
+> **Migration note (capabilities are now independent):** earlier versions had `write` imply `read`. That implication is gone — a chat granted only `write` is now **denied** `read` (e.g. `messages recent` will fail). Update existing configs to list `read` explicitly wherever it is needed, e.g. `permissions: [read, write]`.
+
+`access` — inspect and edit the access policy (CLI + skill only; not exposed over MCP):
+
+- `access list` — print the effective policy (allow-all, or the deny-by-default rules and the capabilities each grants).
+- `access check --entity <ref> --permission read|write|delete` — resolve a chat and report the grant verdict (exit `0` granted, `3` denied, `2` unresolved).
+- `access add` — append one rule (`--entity`/`--folder`/`--all` + `--permission read,write,delete`) to `data/config.yml`; the hot-reload watcher then applies it live. `--dry-run` prints the rule without writing.
 
 `operations` — inspect and retry queued operations:
 
@@ -88,9 +114,10 @@ Updating this list: descriptions are sourced from each Typer command's docstring
 
 All `/telegram/*` endpoints require `Authorization: Bearer <token>` and use the same access policy as the CLI.
 
-- `POST /telegram/messages` sends targeted or mass messages. Targeted bodies accept `telegram_chat_id`, `entity`, or `chat_name` + `folder_name`, plus optional `telegram_topic_id`/`topic_name`, `file_urls`, `schedule_at`, `delay_seconds`, and `operation_id`. HTTP server-local `files` are rejected; use `file_urls` for media over HTTP. Responses include `telegram_message_id`, `telegram_message_ids` for albums, `scheduled`, `schedule_at`, `operation_id`, and `operation_status`.
+- `POST /telegram/messages` sends targeted or mass messages. Targeted bodies accept `telegram_chat_id`, `entity`, or `chat_name` + `folder_name`, plus optional `telegram_topic_id`/`topic_name`, `file_urls`, base64 `base64_files` (`{filename, mime, content_b64}`, default max 1 MB each), `reply_to_message_id`, `schedule_at`, `delay_seconds`, and `operation_id`. HTTP server-local `files` are rejected; use `file_urls` (downloaded to a temp file with size/time limits) or `base64_files` for media over HTTP. Responses include `telegram_message_id`, `telegram_message_ids` for albums, `scheduled`, `schedule_at`, `operation_id`, and `operation_status`.
 - `POST /telegram/messages/reactions` sets or clears a reaction with `message_id` plus exactly one of `emoji` or `clear=true`.
 - `POST /telegram/messages/forward` forwards `message_ids` from `from_chat_id`/`from_entity` to `to_chat_id`/`to_entity`.
+- `POST /telegram/messages/delete` deletes `message_ids` from a target chat (DELETE-gated). Optional `revoke` (default `true`), `dry_run`, and `force`. Honors `telegram.access.delete_only_session_messages`; the backend factory returns `503` when the session is not connected.
 - `POST /telegram/notifications/mute` and `/telegram/notifications/unmute` mute or unmute a target chat/contact; mute accepts positive `duration_hours`.
 - `DELETE /telegram/folders/{folder_name}/chats` removes `chat_id`, `chat_name`, or `entity` from a folder and returns `already_absent` when no change was needed.
 
@@ -129,9 +156,10 @@ MCP tool catalog:
 | Tool | Key arguments |
 | --- | --- |
 | `telegram_health` | none |
-| `telegram_messages_recent` | `chat_id`, `limit` |
+| `telegram_messages_recent` | `chat_id`, `limit`, optional `minutes` (only messages newer than `now - minutes`) |
 | `telegram_messages_send` | `telegram_chat_id`/`entity`, `text`, `telegram_topic_id`/`topic_name`, `file_urls`, base64 `base64_files`, `schedule_at`, `delay_seconds`, `reply_to_message_id`, `operation_id`; `chat_name`/`folder_name`/`folder_id` and server-local `files` are not part of the MCP surface (target via `entity`) |
 | `telegram_messages_forward` | `from_chat_id`/`from_entity`, `to_chat_id`/`to_entity`, `message_ids`, `operation_id` |
+| `telegram_messages_delete` | `telegram_chat_id`/`entity`, `message_ids`, `revoke`, `dry_run`, `force`; gated on DELETE, honors `delete_only_session_messages` |
 | `telegram_messages_react` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `emoji` or `clear` |
 | `telegram_groups_create` | `title`, `about`, `admins`, `members`, `folder_name`/`folder_id`, `external_ref`, `topics_layout`, reserve/skip flags |
 | `telegram_topics_layout` | `chat_id`, optional `layout` (`list`/`tabs`) |
@@ -182,6 +210,11 @@ mcp:
   signing_secret: "<output-of-openssl-rand-base64-32>"
   disabled_tools: []   # e.g. ["telegram_groups_*", "telegram_health"]
 ```
+
+> **Migration note (`telegram_messages_send` args):** the send tool dropped
+> `chat_name`, `folder_name`, `folder_id`, and server-local `files`. Target the
+> chat through `entity` (or `telegram_chat_id`) and attach media via `file_urls`
+> or base64 `base64_files`. MCP clients passing the removed args must migrate.
 
 `disabled_tools` omits tools from the mounted MCP surface. An entry ending in
 `*` matches by prefix (e.g. `telegram_groups_*` hides every group tool);

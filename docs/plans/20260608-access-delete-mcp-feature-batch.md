@@ -285,17 +285,17 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run `bash -n` on all e2e scripts — must pass before next task
 
 ### Task 16: Docs + inventory sync
-- [ ] update `skills/telegram-assistant/SKILL.md` (new/changed CLI commands, HTTP endpoints, MCP
+- [x] update `skills/telegram-assistant/SKILL.md` (new/changed CLI commands, HTTP endpoints, MCP
       tools) and **resync** to `~/.claude/skills/telegram-assistant/SKILL.md`
-- [ ] update `README.md` Commands/usage + MCP tool catalog
-- [ ] document new config keys: `telegram.access` multi-chat/multi-permission + `delete`,
+- [x] update `README.md` Commands/usage + MCP tool catalog
+- [x] document new config keys: `telegram.access` multi-chat/multi-permission + `delete`,
       `delete_only_session_messages` (default **true**), hot-reload behavior, `mcp.disabled_tools`,
       base64/file_urls limits (base64 default **1 MB**)
-- [ ] add **migration notes**: (1) permissions are now independent — `write` no longer implies
+- [x] add **migration notes**: (1) permissions are now independent — `write` no longer implies
       `read`, so update configs to list `read` explicitly where needed; (2) `telegram_messages_send`
       dropped `chat_name`/`folder_name`/`folder_id`/`files`. Update `CLAUDE.md`'s access section to
       match the new independent-capability semantics.
-- [ ] run `tests/test_skill_inventory.py` and `tests/test_mcp_mount.py` — must pass
+- [x] run `tests/test_skill_inventory.py` and `tests/test_mcp_mount.py` — must pass
 
 ### Task 17: Verify acceptance criteria
 - [ ] verify all 14 TODO items are implemented and reflected in `docs/TODO.md` (check off `[x]`)
