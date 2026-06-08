@@ -168,6 +168,34 @@ class TelethonMessageBackend:
         return _message_ids(sent)
 
 
+class TelethonDeleteBackend:
+    """Adapter from the Telethon ``TelegramClient`` to :class:`DeleteBackend`.
+
+    Resolves the peer then calls ``delete_messages(entity, ids, revoke=...)``.
+    ``revoke=True`` (the default) deletes for everyone; ``revoke=False`` removes
+    only the technical account's local copy. ``FloodWaitError`` is translated so
+    the worker queue can pause-and-retry rather than mark a generic failure.
+    Returns the count of requested ids (Telegram does not report a per-id
+    success vector, so a non-erroring call is treated as all-affected).
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def delete_messages(
+        self, *, chat_id: int, message_ids: tuple[int, ...], revoke: bool = True
+    ) -> int:
+        message_ids = tuple(message_ids)
+        try:
+            entity = await self._client.get_input_entity(chat_id)
+            await self._client.delete_messages(
+                entity, list(message_ids), revoke=revoke
+            )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        return len(message_ids)
+
+
 class TelethonReactionBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`ReactionBackend`.
 
@@ -236,6 +264,7 @@ class TelethonForwardBackend:
 __all__ = [
     "TelethonMessageReadBackend",
     "TelethonMessageBackend",
+    "TelethonDeleteBackend",
     "TelethonReactionBackend",
     "TelethonForwardBackend",
 ]

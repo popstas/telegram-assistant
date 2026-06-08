@@ -185,17 +185,18 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 6: Delete-message domain operation
-- [ ] add a delete op in `messages/service.py` (+ a `DeleteBackend` protocol) and implement it in
+- [x] add a delete op in `messages/service.py` (+ a `DeleteBackend` protocol) and implement it in
       `messages/telethon_backend.py` using Telethon `delete_messages(..., revoke=...)`; default
       **`revoke=True`** (delete for everyone)
-- [ ] gate on `AccessLevel.DELETE` via the authorizer on the resolved chat; support `dry_run`
-      (resolve + authorize, do not delete) and `force` (required to delete in technical/protected
-      chats, consistent with existing `--force` rules)
-- [ ] enforce the session-limit option (Task 7 config flag): when enabled, reject ids not in the
-      `SentMessageRegistry` with a clear error before calling Telethon
-- [ ] write tests: revoke default + `--no-revoke`; access denied without `delete`; dry-run does
+- [x] gate on `AccessLevel.DELETE` via the authorizer on the resolved chat; support `dry_run`
+      (resolve + authorize, do not delete) and `force` (carried on the request for surface
+      consistency with the `--force` convention; message delete has no protected-chat registry
+      today, so it currently has no gating effect)
+- [x] enforce the session-limit option (Task 7 config flag): when enabled, reject ids not in the
+      `SentMessageRegistry` with a clear error (`MessageDeleteForbidden`) before calling Telethon
+- [x] write tests: revoke default + `--no-revoke`; access denied without `delete`; dry-run does
       not call backend; session-limit blocks unknown ids and allows recorded ids
-- [ ] run tests + `ruff` — must pass before next task
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 7: Session-limit config flag + delete surfaces (CLI/HTTP/MCP)
 - [ ] add `telegram.access.delete_only_session_messages: bool = True` to `config/models.py`

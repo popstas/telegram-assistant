@@ -5,6 +5,7 @@
 
 ### Features
 
+- SentMessageRegistry tracking process-sent message ids
 - Access management CLI commands (list/check/add)
 - Backward-compatible multi-chat/multi-permission access rules
 - Independent-capability authorizer + delete permission

@@ -19,10 +19,14 @@ from telegram_assistant.messages.reactions import (
 )
 from telegram_assistant.messages.sent_registry import SentMessageRegistry
 from telegram_assistant.messages.service import (
+    DeleteBackend,
+    DeleteMessagesRequest,
+    DeleteMessagesResult,
     MassSendItemResult,
     MassSendRequest,
     MassSendResult,
     MessageBackend,
+    MessageDeleteForbidden,
     MessageReadBackend,
     MessageSendFailed,
     MessageSendNeedsReview,
@@ -31,6 +35,7 @@ from telegram_assistant.messages.service import (
     ScheduleError,
     SendMessageRequest,
     SendMessageResult,
+    delete_messages,
     get_recent_messages,
     is_service_command,
     mass_send_message,
@@ -43,6 +48,9 @@ from telegram_assistant.messages.service import (
 
 __all__ = [
     "AttachmentError",
+    "DeleteBackend",
+    "DeleteMessagesRequest",
+    "DeleteMessagesResult",
     "ForwardBackend",
     "ForwardMessagesRequest",
     "ForwardMessagesResult",
@@ -50,6 +58,7 @@ __all__ = [
     "MassSendRequest",
     "MassSendResult",
     "MessageBackend",
+    "MessageDeleteForbidden",
     "MessageReadBackend",
     "MessageSendFailed",
     "MessageSendNeedsReview",
@@ -62,6 +71,7 @@ __all__ = [
     "SendMessageResult",
     "SendReactionRequest",
     "SendReactionResult",
+    "delete_messages",
     "forward_messages",
     "get_recent_messages",
     "is_service_command",
