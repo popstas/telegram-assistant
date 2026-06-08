@@ -150,6 +150,7 @@ from telegram_assistant.members import (
 )
 from telegram_assistant.messages import (
     AttachmentError,
+    Base64Attachment,
     DeleteMessagesRequest,
     ForwardMessagesRequest,
     MassSendRequest,
@@ -663,6 +664,15 @@ async def _resolve_message_send(
     file_urls = tuple(body.file_urls or ())
     validate_file_urls(file_urls)
 
+    base64_files = tuple(
+        Base64Attachment(
+            filename=att.filename,
+            content_b64=att.content_b64,
+            mime=att.mime,
+        )
+        for att in (body.base64_files or ())
+    )
+
     result, op = await send_message(
         backend=backend,
         store=store,
@@ -675,6 +685,7 @@ async def _resolve_message_send(
             topic_name=topic_name_for_log,
             files=files,
             file_urls=file_urls,
+            base64_files=base64_files,
             schedule_at=resolved_schedule_at,
             reply_to_message_id=body.reply_to_message_id,
         ),
@@ -877,11 +888,17 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         operation_id: str | None = None,
         files: list[str] | None = None,
         file_urls: list[str] | None = None,
+        base64_files: list[dict[str, Any]] | None = None,
         schedule_at: datetime | None = None,
         delay_seconds: int | None = None,
         reply_to_message_id: int | None = None,
     ) -> dict[str, Any]:
-        """Send a message or run the folder/topic mass-send mode."""
+        """Send a message or run the folder/topic mass-send mode.
+
+        ``base64_files`` are inline attachments ``[{filename, mime, content_b64}]``
+        decoded to a temp file and sent (max 1 MB each); ``file_urls`` carry
+        http(s) URLs downloaded server-side before the send.
+        """
         request = _request(provider)
         try:
             body = MessageSendBody(
@@ -896,6 +913,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 operation_id=operation_id,
                 files=files,
                 file_urls=file_urls,
+                base64_files=base64_files,
                 schedule_at=schedule_at,
                 delay_seconds=delay_seconds,
                 reply_to_message_id=reply_to_message_id,

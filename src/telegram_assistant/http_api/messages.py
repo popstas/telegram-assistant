@@ -28,6 +28,7 @@ from telegram_assistant.http_api.access import (
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.messages import (
     AttachmentError,
+    Base64Attachment,
     DeleteBackend,
     DeleteMessagesRequest,
     ForwardBackend,
@@ -70,6 +71,20 @@ def _translate_flood_wait(exc: FloodWaitError) -> HTTPException:
     )
 
 
+class Base64AttachmentBody(BaseModel):
+    """One inline base64 attachment ``{filename, mime, content_b64}``.
+
+    ``filename`` is required (names the file and supplies the extension);
+    ``content_b64`` is the standard base64 of the file bytes; ``mime`` is
+    optional and validated against the allowed top-level types when present.
+    Decoded content is bounded by the send path's base64 size limit (1 MB).
+    """
+
+    filename: str
+    content_b64: str
+    mime: str | None = None
+
+
 class MessageSendBody(BaseModel):
     # ``text`` doubles as the caption and may be empty when attachments are
     # present (media-only send), so it is optional with an empty-string default.
@@ -89,6 +104,8 @@ class MessageSendBody(BaseModel):
     # not uploaded over HTTP.
     files: list[str] | None = None
     file_urls: list[str] | None = None
+    # Inline base64 attachments (decoded to a temp file, sent, cleaned up).
+    base64_files: list[Base64AttachmentBody] | None = None
     schedule_at: datetime | None = None
     delay_seconds: int | None = None
     # Thread the send as a reply to an existing message id (targeted only).
@@ -103,7 +120,7 @@ class MessageSendBody(BaseModel):
         has_topic_name = self.topic_name is not None
         has_topic_id = self.telegram_topic_id is not None
 
-        has_attachments = bool(self.files or self.file_urls)
+        has_attachments = bool(self.files or self.file_urls or self.base64_files)
         if not (self.text and self.text.strip()) and not has_attachments:
             raise ValueError(
                 "must provide non-empty text or at least one files/file_urls "
@@ -142,8 +159,9 @@ class MessageSendBody(BaseModel):
                 or self.reply_to_message_id is not None
             ):
                 raise ValueError(
-                    "files/file_urls/schedule_at/delay_seconds/reply_to_message_id "
-                    "are only supported for targeted sends, not mass mode"
+                    "files/file_urls/base64_files/schedule_at/delay_seconds/"
+                    "reply_to_message_id are only supported for targeted sends, "
+                    "not mass mode"
                 )
             return self
 
@@ -557,6 +575,15 @@ def build_router() -> APIRouter:
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
+        base64_files = tuple(
+            Base64Attachment(
+                filename=att.filename,
+                content_b64=att.content_b64,
+                mime=att.mime,
+            )
+            for att in (body.base64_files or ())
+        )
+
         domain_request = SendMessageRequest(
             telegram_chat_id=telegram_chat_id,
             text=body.text,
@@ -566,6 +593,7 @@ def build_router() -> APIRouter:
             topic_name=topic_name_for_log,
             files=files,
             file_urls=file_urls,
+            base64_files=base64_files,
             schedule_at=resolved_schedule_at,
             reply_to_message_id=body.reply_to_message_id,
         )

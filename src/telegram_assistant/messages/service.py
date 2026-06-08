@@ -22,6 +22,7 @@ they are not naturally pinned to a Planfix task id).
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Iterable
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -32,6 +33,12 @@ from telegram_assistant.access.service import AccessDenied, AccessLevel, Authori
 from telegram_assistant.folders import (
     FolderBackend,
     resolve_folder,
+)
+from telegram_assistant.messages.attachments import (
+    DEFAULT_MAX_BASE64_BYTES,
+    Base64Attachment,
+    decode_base64_attachment,
+    materialize_base64_attachments,
 )
 from telegram_assistant.messages.downloads import Downloader
 from telegram_assistant.messages.sent_registry import SentMessageRegistry
@@ -305,6 +312,11 @@ class SendMessageRequest:
     a reply to an existing message; in a forum it takes precedence over the
     topic root for the Telethon ``reply_to`` (replying to a message inside a
     topic keeps the reply in that topic).
+
+    ``base64_files`` are small inline attachments supplied as base64 content
+    (``{filename, mime, content_b64}``); each is decoded to a temp file under
+    ``base64_max_bytes`` (default 1 MB) and cleaned up after the send. They are
+    appended to the attachment list after ``files`` and ``file_urls``.
     """
 
     telegram_chat_id: int
@@ -315,17 +327,23 @@ class SendMessageRequest:
     topic_name: str | None = None
     files: tuple[str, ...] = field(default_factory=tuple)
     file_urls: tuple[str, ...] = field(default_factory=tuple)
+    base64_files: tuple[Base64Attachment, ...] = field(default_factory=tuple)
+    base64_max_bytes: int = DEFAULT_MAX_BASE64_BYTES
     schedule_at: datetime | None = None
     reply_to_message_id: int | None = None
 
     @property
     def attachment_refs(self) -> tuple[str, ...]:
-        """All attachments as one ordered list (``files`` then ``file_urls``)."""
+        """All ref-style attachments in order (``files`` then ``file_urls``).
+
+        Base64 attachments carry content, not a reference, so they are not
+        included here; the send path materialises them to temp files separately.
+        """
         return tuple(self.files) + tuple(self.file_urls)
 
     @property
     def has_attachments(self) -> bool:
-        return bool(self.files or self.file_urls)
+        return bool(self.files or self.file_urls or self.base64_files)
 
     def to_payload(self) -> dict[str, Any]:
         redacted = (
@@ -344,6 +362,12 @@ class SendMessageRequest:
             # Only attachment *references* are persisted, never file contents.
             "files": list(self.files),
             "file_urls": list(self.file_urls),
+            # Base64 attachments: persist filename/mime metadata only, never the
+            # base64 content itself.
+            "base64_files": [
+                {"filename": att.filename, "mime": att.mime}
+                for att in self.base64_files
+            ],
             "schedule_at": (
                 self.schedule_at.isoformat()
                 if self.schedule_at is not None
@@ -452,6 +476,10 @@ async def send_message(
     propagates. Without a ``downloader`` the URLs are passed through to the
     backend unchanged (backward compatible).
 
+    ``base64_files`` are decoded and validated up front (a bad/oversize payload
+    raises before any operation row is created), then materialised to temp files
+    after the operation begins and cleaned up in the ``finally``.
+
     A send needs either non-empty ``text`` or at least one attachment. Media
     sends pass ``files``/``schedule_at`` through to the backend; a plain text
     send calls the backend exactly as before for backward compatibility.
@@ -463,6 +491,16 @@ async def send_message(
         )
     _validate_attachment_refs(request.files, kind="files")
     _validate_attachment_refs(request.file_urls, kind="file_urls")
+    # Validate base64 attachments before opening the operation so malformed or
+    # oversize input surfaces as a clean error without poisoning the idempotency
+    # key. The bytes are materialised to temp files only after the op begins.
+    for att in request.base64_files:
+        decode_base64_attachment(
+            filename=att.filename,
+            content_b64=att.content_b64,
+            mime=att.mime,
+            max_bytes=request.base64_max_bytes,
+        )
 
     if authorizer is not None:
         await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
@@ -496,16 +534,25 @@ async def send_message(
     operation_id = begin.operation.id
     # When a downloader is supplied, ``file_urls`` are fetched to local temp
     # files first and the local paths replace the URLs in the attachment list;
-    # the temp files are cleaned up in the ``finally`` once the send is done.
+    # base64 attachments are decoded into a temp dir. Both are cleaned up in the
+    # ``finally`` once the send is done.
     downloaded_paths: list[str] = []
+    base64_tmpdir: str | None = None
     try:
         try:
             if request.file_urls and downloader is not None:
                 for url in request.file_urls:
                     downloaded_paths.append(await downloader(url))
-                attachment_refs = tuple(request.files) + tuple(downloaded_paths)
+                url_refs = tuple(downloaded_paths)
             else:
-                attachment_refs = request.attachment_refs
+                url_refs = tuple(request.file_urls)
+            base64_tmpdir, base64_paths = materialize_base64_attachments(
+                request.base64_files,
+                max_bytes=request.base64_max_bytes,
+            )
+            attachment_refs = (
+                tuple(request.files) + url_refs + tuple(base64_paths)
+            )
             # Only pass the media/schedule kwargs when set so a plain text send
             # hits the backend with the exact original signature (backward
             # compatible with text-only backends that predate attachments).
@@ -539,6 +586,8 @@ async def send_message(
         for path in downloaded_paths:
             with suppress(OSError):
                 os.unlink(path)
+        if base64_tmpdir is not None:
+            shutil.rmtree(base64_tmpdir, ignore_errors=True)
 
     result = SendMessageResult(
         telegram_chat_id=request.telegram_chat_id,

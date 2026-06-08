@@ -1,7 +1,12 @@
 """Message-send domain shared by HTTP, CLI, and the worker."""
 
 from telegram_assistant.messages.attachments import (
+    ALLOWED_BASE64_MIME_TOP_TYPES,
+    DEFAULT_MAX_BASE64_BYTES,
     AttachmentError,
+    Base64Attachment,
+    decode_base64_attachment,
+    materialize_base64_attachments,
     validate_file_urls,
     validate_local_files,
 )
@@ -54,7 +59,12 @@ from telegram_assistant.messages.service import (
 )
 
 __all__ = [
+    "ALLOWED_BASE64_MIME_TOP_TYPES",
+    "DEFAULT_MAX_BASE64_BYTES",
     "AttachmentError",
+    "Base64Attachment",
+    "decode_base64_attachment",
+    "materialize_base64_attachments",
     "DeleteBackend",
     "DownloadError",
     "Downloader",

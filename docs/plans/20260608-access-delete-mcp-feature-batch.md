@@ -238,13 +238,13 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 11: Base64 file attachments for MCP send
-- [ ] accept base64 attachment input on the send path: `{filename, mime, content_b64}` with a
+- [x] accept base64 attachment input on the send path: `{filename, mime, content_b64}` with a
       configurable **max size** (default **1 MB**) and allowed-type validation in
       `messages/attachments.py`; decode to a temp file, send, clean up
-- [ ] expose via MCP `telegram_messages_send` (and HTTP send request) as a new attachments field
-- [ ] write tests: valid base64 → temp file sent + cleaned up; oversize rejected; bad base64 /
+- [x] expose via MCP `telegram_messages_send` (and HTTP send request) as a new attachments field
+- [x] write tests: valid base64 → temp file sent + cleaned up; oversize rejected; bad base64 /
       missing filename rejected
-- [ ] run tests + `ruff` — must pass before next task
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 12: Slim `telegram_messages_send` args + disable tools by prefix
 - [ ] reduce `telegram_messages_send` args in `http_api/mcp/tools.py`: remove `chat_name`,
