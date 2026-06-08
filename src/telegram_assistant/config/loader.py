@@ -126,6 +126,22 @@ def _write_default_template(target: Path) -> None:
         raise ConfigError(f"Could not create template at {target}: {exc}") from exc
 
 
+def resolve_config_path(path: str | Path | None = None) -> Path | None:
+    """Return the config path that :func:`load_config` would read, or ``None``.
+
+    Mirrors :func:`load_config`'s lookup order without loading or writing
+    anything, so callers (e.g. the hot-reload watcher) can learn which file is
+    the live config. Returns ``None`` when no config file currently exists.
+    """
+    if path is not None:
+        return Path(path)
+    if CWD_CONFIG_PATH.exists():
+        return CWD_CONFIG_PATH
+    if USER_CONFIG_PATH.exists():
+        return USER_CONFIG_PATH
+    return None
+
+
 def load_config(path: str | Path | None = None) -> AppConfig:
     """Load and validate the application config from disk.
 

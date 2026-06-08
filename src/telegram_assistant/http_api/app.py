@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -11,7 +12,13 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from telegram_assistant import __version__
-from telegram_assistant.config import AppConfig, load_config
+from telegram_assistant.config import (
+    AppConfig,
+    ConfigWatcher,
+    load_config,
+    reload_config_into_state,
+    resolve_config_path,
+)
 from telegram_assistant.entities import EntityResolver
 from telegram_assistant.folders import FolderBackend
 from telegram_assistant.groups import GroupBackend
@@ -372,6 +379,10 @@ def create_app(
     :func:`default_database_path` so HTTP requests can replay completed
     operations from the same SQLite file the worker writes to.
     """
+    # Only production (`uvicorn ... --factory`) leaves config unset; that is the
+    # path where live config hot-reload makes sense. Tests inject an AppConfig
+    # directly and should not have a background observer swapping it out.
+    config_was_loaded_from_disk = config is None
     if config is None:
         config = load_config()
 
@@ -480,6 +491,48 @@ def create_app(
 
         lifespan = _combined_lifespan
 
+    if config_was_loaded_from_disk:
+        inner_lifespan = lifespan
+
+        @asynccontextmanager
+        async def _with_config_watcher(app: FastAPI) -> AsyncIterator[None]:
+            # Live config hot-reload: watch the resolved config file and swap
+            # `app.state.config` (plus config-derived state) on a debounced,
+            # validation-gated reload. A bad edit keeps the last-good config.
+            config_path = resolve_config_path()
+            watcher: ConfigWatcher | None = None
+            if config_path is not None:
+
+                def _on_swap(new_config: AppConfig) -> None:
+                    # Rebuild config-derived state that is constructed once
+                    # rather than per-request. The Authorizer and MCP
+                    # disabled-tools set read `app.state.config` lazily, so they
+                    # pick up the swap automatically.
+                    app.state.plugin_registry = build_registry(new_config)
+
+                def _on_reload() -> None:
+                    reload_config_into_state(
+                        app.state,
+                        config_path,
+                        lock=app.state.config_lock,
+                        on_swap=_on_swap,
+                    )
+
+                watcher = ConfigWatcher(config_path, _on_reload)
+                watcher.start()
+                app.state.config_watcher = watcher
+            try:
+                async with AsyncExitStack() as stack:
+                    if inner_lifespan is not None:
+                        await stack.enter_async_context(inner_lifespan(app))
+                    yield
+            finally:
+                if watcher is not None:
+                    watcher.stop()
+                    app.state.config_watcher = None
+
+        lifespan = _with_config_watcher
+
     app = FastAPI(
         title="telegram-assistant",
         version=__version__,
@@ -495,6 +548,12 @@ def create_app(
         )
     mcp_app_ref["app"] = app
     app.state.config = config
+    # Guards atomic swaps of `app.state.config` performed by the hot-reload
+    # watcher (Task 1). Readers that snapshot config under this lock see a
+    # consistent object; routers reading `app.state.config` directly get either
+    # the old or the new config, never a partially-applied one.
+    app.state.config_lock = threading.Lock()
+    app.state.config_watcher = None
     app.state.plugin_registry = build_registry(config)
     app.state.session_manager = session_manager
     app.state.database_path = database_path

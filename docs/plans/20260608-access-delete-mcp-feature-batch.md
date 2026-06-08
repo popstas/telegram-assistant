@@ -112,19 +112,19 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 ## Implementation Steps
 
 ### Task 1: Config hot-reload via watchdog
-- [ ] add `watchdog` to `[project.dependencies]` in `pyproject.toml`
-- [ ] add a `config/reload.py` (or extend `config/loader.py`) with a `ConfigWatcher` that
+- [x] add `watchdog` to `[project.dependencies]` in `pyproject.toml`
+- [x] add a `config/reload.py` (or extend `config/loader.py`) with a `ConfigWatcher` that
       observes the resolved `data/config.yml` path, debounces events for **2s**, and calls a
       reload callback
-- [ ] on reload: re-run `load_config()`, and on success atomically swap the config object held
+- [x] on reload: re-run `load_config()`, and on success atomically swap the config object held
       on `app.state` under a lock; on parse/validation error, log and **keep the previous config**
-- [ ] rebuild config-derived state on swap: the `Authorizer`/`AccessConfig` source and the MCP
+- [x] rebuild config-derived state on swap: the `Authorizer`/`AccessConfig` source and the MCP
       disabled-tools set (Task 12) read the current `app.state` config
-- [ ] start the watcher in the `create_app()` lifespan (start on startup, stop on shutdown);
+- [x] start the watcher in the `create_app()` lifespan (start on startup, stop on shutdown);
       no-op cleanly when the config file path does not exist
-- [ ] write tests: debounce coalesces rapid edits; valid edit swaps config; invalid edit keeps
+- [x] write tests: debounce coalesces rapid edits; valid edit swaps config; invalid edit keeps
       old config and logs; watcher start/stop lifecycle
-- [ ] run tests + `ruff` — must pass before next task
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 2: Authorizer independent-capability model + `delete` permission
 - [ ] in `access/service.py` add `DELETE` to the `AccessLevel`/capability set and replace the
