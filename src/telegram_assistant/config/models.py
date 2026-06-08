@@ -127,6 +127,15 @@ class AccessConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     rules: list[AccessRule] = Field(default_factory=list)
+    delete_only_session_messages: bool = Field(
+        default=True,
+        description=(
+            "When true (the safe default), message delete is restricted to "
+            "messages this server process sent (tracked in-memory for the "
+            "process lifetime). Set false to allow deleting arbitrary messages "
+            "the delete permission covers."
+        ),
+    )
 
 
 class TelegramConfig(BaseModel):

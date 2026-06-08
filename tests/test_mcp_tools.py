@@ -162,12 +162,27 @@ def _with_access(minimal_config_yaml: str, access_block: str) -> str:
     )
 
 
+class FakeDeleteBackend:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def delete_messages(
+        self, *, chat_id: int, message_ids: tuple[int, ...], revoke: bool = True
+    ) -> int:
+        message_ids = tuple(message_ids)
+        self.calls.append(
+            {"chat_id": chat_id, "message_ids": message_ids, "revoke": revoke}
+        )
+        return len(message_ids)
+
+
 def _client(
     config_yaml: str,
     tmp_path: Path,
     *,
     read_backend: FakeReadBackend | None = None,
     message_backend: FakeMessageBackend | None = None,
+    delete_backend: FakeDeleteBackend | None = None,
     group_backend: FakeLayoutBackend | None = None,
     topic_backend: FakeTopicBackend | None = None,
     member_backend: FakeMemberBackend | None = None,
@@ -203,6 +218,11 @@ def _client(
         message_backend_factory=(
             (lambda _r: message_backend)
             if message_backend is not None
+            else (lambda _r: None)
+        ),
+        delete_backend_factory=(
+            (lambda _r: delete_backend)
+            if delete_backend is not None
             else (lambda _r: None)
         ),
         operation_store=OperationStore(tmp_path / "state.db"),
@@ -582,4 +602,157 @@ def test_mcp_tool_maps_backend_unavailable_to_actionable_error(
     assert result["isError"] is True
     text = result["content"][0]["text"]
     assert '"error": "backend_unavailable"' in text
+    assert '"status": 503' in text
+
+
+# ---------------------------------------------------------------------------
+# Delete tool (Task 7)
+# ---------------------------------------------------------------------------
+
+
+def test_mcp_delete_session_limit_blocks_unsent_message(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    # Default config has no access block -> delete_only_session_messages
+    # defaults to true; an id this process never sent is rejected.
+    backend = FakeDeleteBackend()
+    with _client(minimal_config_yaml, tmp_path, delete_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_delete",
+            {"telegram_chat_id": -100123, "message_ids": [999]},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "delete_forbidden"' in text
+    assert '"status": 403' in text
+    assert backend.calls == []
+
+
+def test_mcp_delete_allows_message_this_process_sent(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    # Send through the MCP send tool first so the id lands in the process
+    # registry, then delete it: the session-limit lets it through end-to-end.
+    message_backend = FakeMessageBackend()
+    delete_backend = FakeDeleteBackend()
+    with _client(
+        minimal_config_yaml,
+        tmp_path,
+        message_backend=message_backend,
+        delete_backend=delete_backend,
+    ) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        send = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {"telegram_chat_id": -100123, "text": "hi"},
+        )
+        assert send["isError"] is False
+        sent_id = send["structuredContent"]["telegram_message_id"]
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_delete",
+            {"telegram_chat_id": -100123, "message_ids": [sent_id]},
+        )
+
+    assert result["isError"] is False, result
+    payload = result["structuredContent"]
+    assert payload["deleted"] == 1
+    assert payload["revoke"] is True
+    assert delete_backend.calls == [
+        {"chat_id": -100123, "message_ids": (sent_id,), "revoke": True}
+    ]
+
+
+def test_mcp_delete_session_limit_off_allows_arbitrary_ids(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeDeleteBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: delete\n"
+        "    delete_only_session_messages: false\n",
+    )
+    with _client(config_yaml, tmp_path, delete_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_delete",
+            {"telegram_chat_id": -100123, "message_ids": [42], "revoke": False},
+        )
+
+    assert result["isError"] is False, result
+    payload = result["structuredContent"]
+    assert payload["deleted"] == 1
+    assert payload["revoke"] is False
+    assert backend.calls == [
+        {"chat_id": -100123, "message_ids": (42,), "revoke": False}
+    ]
+
+
+def test_mcp_delete_denied_without_delete_permission(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeDeleteBackend()
+    # write-only on the chat plus session-limit off -> access denied (not
+    # delete_forbidden) since the policy never grants DELETE.
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: write\n"
+        "    delete_only_session_messages: false\n",
+    )
+    with _client(config_yaml, tmp_path, delete_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_delete",
+            {"telegram_chat_id": -100123, "message_ids": [42]},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "access_denied"' in text
+    assert backend.calls == []
+
+
+def test_mcp_delete_503_when_backend_unavailable(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    # No delete backend wired and session-limit off so the backend lookup is
+    # reached: surfaces backend_unavailable (503).
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: delete\n"
+        "    delete_only_session_messages: false\n",
+    )
+    with _client(config_yaml, tmp_path) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_delete",
+            {"telegram_chat_id": -100123, "message_ids": [42]},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
     assert '"status": 503' in text

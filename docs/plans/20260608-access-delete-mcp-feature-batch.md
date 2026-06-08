@@ -199,18 +199,18 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 7: Session-limit config flag + delete surfaces (CLI/HTTP/MCP)
-- [ ] add `telegram.access.delete_only_session_messages: bool = True` to `config/models.py`
+- [x] add `telegram.access.delete_only_session_messages: bool = True` to `config/models.py`
       (**safe default**: out of the box, delete is restricted to messages this server process
       sent; operators opt out by setting it `false` to allow deleting arbitrary messages)
-- [ ] CLI: `messages delete --entity/--chat-id --message-id ... [--revoke/--no-revoke]
+- [x] CLI: `messages delete --entity/--chat-id --message-id ... [--revoke/--no-revoke]
       [--dry-run] [--force]` in `cli/main.py`
-- [ ] HTTP: delete endpoint in `http_api/messages.py` (factory → **503** when backend unavailable;
+- [x] HTTP: delete endpoint in `http_api/messages.py` (factory → **503** when backend unavailable;
       AccessDenied → **403**, not-found → **404**, ambiguous → **409**)
-- [ ] MCP: `telegram_messages_delete` tool in `http_api/mcp/tools.py`, reusing the same domain op
+- [x] MCP: `telegram_messages_delete` tool in `http_api/mcp/tools.py`, reusing the same domain op
       and registry; add to `EXPECTED_TOOL_NAMES`
-- [ ] write tests: CLI exit codes; HTTP status codes incl. 503/403/404; MCP tool present and
+- [x] write tests: CLI exit codes; HTTP status codes incl. 503/403/404; MCP tool present and
       delegates correctly; `delete_only_session_messages` honored end-to-end through each surface
-- [ ] run tests + `ruff` — must pass before next task
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 8: `reply_to` on message send (all surfaces)
 - [ ] thread a `reply_to_message_id: int | None` through `messages/service.py` send + the

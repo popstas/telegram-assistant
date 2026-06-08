@@ -40,6 +40,7 @@ from telegram_assistant.http_api.notifications import (
 from telegram_assistant.http_api.topics import build_router as build_topics_router
 from telegram_assistant.members import MemberAddBackend, MemberRemoveBackend
 from telegram_assistant.messages import (
+    DeleteBackend,
     ForwardBackend,
     MessageBackend,
     MessageReadBackend,
@@ -64,6 +65,7 @@ MessageBackendFactory = Callable[[Request], MessageBackend | None]
 MessageReadBackendFactory = Callable[[Request], MessageReadBackend | None]
 ReactionBackendFactory = Callable[[Request], ReactionBackend | None]
 ForwardBackendFactory = Callable[[Request], ForwardBackend | None]
+DeleteBackendFactory = Callable[[Request], DeleteBackend | None]
 NotificationBackendFactory = Callable[[Request], NotificationBackend | None]
 ResolverFactory = Callable[[Request], EntityResolver | None]
 
@@ -301,6 +303,30 @@ def _default_forward_backend_factory(
     return _factory
 
 
+def _default_delete_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> DeleteBackendFactory:
+    """Build a Telethon-backed message-delete backend factory.
+
+    Mirrors :func:`_default_forward_backend_factory`: returns ``None`` until a
+    Telethon client is available so the delete endpoint can return 503.
+    """
+
+    def _factory(_request: Request) -> DeleteBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonDeleteBackend,
+        )
+
+        return TelethonDeleteBackend(client)
+
+    return _factory
+
+
 def _default_notification_backend_factory(
     session_manager: TelethonSessionManager | None,
 ) -> NotificationBackendFactory:
@@ -362,6 +388,7 @@ def create_app(
     message_read_backend_factory: MessageReadBackendFactory | None = None,
     reaction_backend_factory: ReactionBackendFactory | None = None,
     forward_backend_factory: ForwardBackendFactory | None = None,
+    delete_backend_factory: DeleteBackendFactory | None = None,
     notification_backend_factory: NotificationBackendFactory | None = None,
     resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
@@ -607,6 +634,11 @@ def create_app(
         forward_backend_factory
         if forward_backend_factory is not None
         else _default_forward_backend_factory(session_manager)
+    )
+    app.state.delete_backend_factory = (
+        delete_backend_factory
+        if delete_backend_factory is not None
+        else _default_delete_backend_factory(session_manager)
     )
     app.state.notification_backend_factory = (
         notification_backend_factory

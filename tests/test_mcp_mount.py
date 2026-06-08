@@ -195,6 +195,7 @@ EXPECTED_TOOL_NAMES = {
     "telegram_health",
     "telegram_members_add",
     "telegram_members_remove",
+    "telegram_messages_delete",
     "telegram_messages_forward",
     "telegram_messages_react",
     "telegram_messages_recent",

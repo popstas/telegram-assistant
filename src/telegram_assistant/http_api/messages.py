@@ -20,16 +20,21 @@ from telegram_assistant.folders import (
 )
 from telegram_assistant.http_api.access import (
     build_authorizer,
+    delete_only_session_messages,
     resolve_entity_chat_id,
+    sent_message_registry,
     translate_access_error,
 )
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.messages import (
     AttachmentError,
+    DeleteBackend,
+    DeleteMessagesRequest,
     ForwardBackend,
     ForwardMessagesRequest,
     MassSendRequest,
     MessageBackend,
+    MessageDeleteForbidden,
     MessageReadBackend,
     MessageSendFailed,
     MessageSendNeedsReview,
@@ -38,6 +43,7 @@ from telegram_assistant.messages import (
     ScheduleError,
     SendMessageRequest,
     SendReactionRequest,
+    delete_messages,
     forward_messages,
     get_recent_messages,
     mass_send_message,
@@ -221,6 +227,49 @@ class ForwardBody(BaseModel):
         return self
 
 
+class DeleteBody(BaseModel):
+    """Delete one or more messages from a target chat (DELETE-gated).
+
+    The target is one of ``telegram_chat_id`` / ``entity`` / ``chat_name`` +
+    ``folder_name`` (same shape as a targeted send). ``message_ids`` must hold at
+    least one positive id. ``revoke`` defaults to ``True`` (delete for everyone).
+    ``dry_run`` resolves + authorizes (and runs the session-limit check) without
+    deleting; ``force`` is carried for surface consistency with the project's
+    ``--force`` convention.
+    """
+
+    message_ids: list[int]
+    revoke: bool = True
+    dry_run: bool = False
+    force: bool = False
+    telegram_chat_id: int | None = None
+    entity: str | int | None = None
+    chat_name: str | None = None
+    folder_name: str | None = None
+    folder_id: int | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> DeleteBody:
+        if not self.message_ids:
+            raise ValueError("message_ids must contain at least one id")
+        if any(mid <= 0 for mid in self.message_ids):
+            raise ValueError("every message_id must be a positive integer")
+        refs = sum(
+            [
+                self.telegram_chat_id is not None,
+                self.entity is not None,
+                self.chat_name is not None,
+            ]
+        )
+        if refs != 1:
+            raise ValueError(
+                "provide exactly one of telegram_chat_id, entity, or chat_name"
+            )
+        if self.chat_name is not None and self.folder_name is None:
+            raise ValueError("chat_name requires folder_name")
+        return self
+
+
 def _message_backend_or_503(request: Request) -> MessageBackend:
     factory = getattr(request.app.state, "message_backend_factory", None)
     if factory is None:
@@ -265,6 +314,22 @@ def _forward_backend_or_503(request: Request) -> ForwardBackend:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram forward backend is not available",
+        )
+    return backend
+
+
+def _delete_backend_or_503(request: Request) -> DeleteBackend:
+    factory = getattr(request.app.state, "delete_backend_factory", None)
+    if factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram delete backend is not configured (session may be unauthorized)",
+        )
+    backend = factory(request)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram delete backend is not available",
         )
     return backend
 
@@ -504,6 +569,7 @@ def build_router() -> APIRouter:
                 store=store,
                 request=domain_request,
                 authorizer=authorizer,
+                sent_registry=sent_message_registry(request),
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc
@@ -616,6 +682,73 @@ def build_router() -> APIRouter:
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc
+        except FloodWaitError as exc:
+            raise _translate_flood_wait(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        return result.to_dict()
+
+    @router.post("/messages/delete")
+    async def delete(body: DeleteBody, request: Request) -> dict[str, Any]:
+        """Delete messages from a chat (DELETE-gated).
+
+        Honors ``telegram.access.delete_only_session_messages`` (default true):
+        when active, only messages this server process sent can be deleted.
+        """
+        backend = _delete_backend_or_503(request)
+
+        if body.entity is not None:
+            telegram_chat_id = await resolve_entity_chat_id(request, body.entity)
+            chat_name_for_log: str | None = None
+        elif body.telegram_chat_id is not None:
+            telegram_chat_id = body.telegram_chat_id
+            chat_name_for_log = None
+        else:
+            folder_backend = _folder_backend_or_503(request)
+            try:
+                chat = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=body.folder_name or "",
+                    chat_name=body.chat_name or "",
+                    folder_id=body.folder_id,
+                )
+            except FolderError as exc:
+                raise _translate_folder_error(exc) from exc
+            telegram_chat_id = chat.chat_id
+            chat_name_for_log = chat.title
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        try:
+            result = await delete_messages(
+                backend,
+                request=DeleteMessagesRequest(
+                    telegram_chat_id=telegram_chat_id,
+                    message_ids=tuple(body.message_ids),
+                    revoke=body.revoke,
+                    dry_run=body.dry_run,
+                    force=body.force,
+                    chat_name=chat_name_for_log,
+                ),
+                authorizer=authorizer,
+                sent_registry=sent_message_registry(request),
+                only_session_messages=delete_only_session_messages(request),
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except MessageDeleteForbidden as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "delete_forbidden",
+                    "message": str(exc),
+                    "message_ids": exc.message_ids,
+                },
+            ) from exc
         except FloodWaitError as exc:
             raise _translate_flood_wait(exc) from exc
         except ValueError as exc:
