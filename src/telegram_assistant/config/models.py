@@ -14,7 +14,7 @@ from pydantic import (
 )
 
 TopicsLayout = Literal["list", "tabs"]
-AccessPermission = Literal["read", "write"]
+AccessPermission = Literal["read", "write", "delete"]
 
 
 class DefaultChatFolderConfig(BaseModel):
@@ -60,9 +60,11 @@ class AccessRule(BaseModel):
       grant);
     * ``all: true`` — a wildcard matching every chat.
 
-    ``permission`` is ``write`` by default; ``write`` implies ``read``. Rules
-    combine as a union with highest-level-wins, so a wildcard ``all`` +
-    ``read`` baseline can coexist with targeted ``write`` rules.
+    ``permission`` is ``write`` by default. Capabilities are **independent** —
+    ``read``/``write``/``delete`` each grant only themselves (``write`` does not
+    imply ``read``). Rules combine as a set-union of capabilities, so a wildcard
+    ``all`` + ``read`` baseline can coexist with targeted ``write`` rules; a chat
+    covered by both ends up with ``{read, write}``.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -115,8 +117,9 @@ class TelegramConfig(BaseModel):
     access: AccessConfig | None = Field(
         default=None,
         description=(
-            "Read/write access policy. None (omitted) means allow-all; "
-            "present means deny-by-default with write implying read."
+            "Read/write/delete access policy. None (omitted) means allow-all; "
+            "present means deny-by-default with independent capabilities "
+            "(write does not imply read)."
         ),
     )
     proxy_url: str | None = Field(

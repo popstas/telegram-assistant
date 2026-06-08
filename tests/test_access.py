@@ -112,20 +112,25 @@ async def test_empty_policy_denies_everything() -> None:
 
 
 @pytest.mark.asyncio
-async def test_chat_rule_grants_write_and_implies_read() -> None:
+async def test_write_chat_rule_grants_only_write() -> None:
+    # Independent capabilities: write grants ONLY write — read and delete are
+    # denied (write no longer implies read).
     resolver = FakeResolver({"@client": 555})
     auth = Authorizer(
         AccessConfig(rules=[AccessRule(chat="@client", permission="write")]),
         resolver=resolver,
     )
     await auth.require(555, AccessLevel.WRITE)
-    await auth.require(555, AccessLevel.READ)  # write implies read
+    with pytest.raises(AccessDenied):
+        await auth.require(555, AccessLevel.READ)  # write does NOT imply read
+    with pytest.raises(AccessDenied):
+        await auth.require(555, AccessLevel.DELETE)
     with pytest.raises(AccessDenied):
         await auth.require(556, AccessLevel.READ)  # different chat
 
 
 @pytest.mark.asyncio
-async def test_read_chat_rule_denies_write() -> None:
+async def test_read_chat_rule_grants_only_read() -> None:
     resolver = FakeResolver({777: 777})
     auth = Authorizer(
         AccessConfig(rules=[AccessRule(chat=777, permission="read")]),
@@ -134,6 +139,43 @@ async def test_read_chat_rule_denies_write() -> None:
     await auth.require(777, AccessLevel.READ)
     with pytest.raises(AccessDenied):
         await auth.require(777, AccessLevel.WRITE)
+    with pytest.raises(AccessDenied):
+        await auth.require(777, AccessLevel.DELETE)
+
+
+@pytest.mark.asyncio
+async def test_delete_chat_rule_grants_only_delete() -> None:
+    resolver = FakeResolver({888: 888})
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(chat=888, permission="delete")]),
+        resolver=resolver,
+    )
+    await auth.require(888, AccessLevel.DELETE)
+    with pytest.raises(AccessDenied):
+        await auth.require(888, AccessLevel.READ)
+    with pytest.raises(AccessDenied):
+        await auth.require(888, AccessLevel.WRITE)
+
+
+@pytest.mark.asyncio
+async def test_multiple_permission_rules_accumulate_exact_caps() -> None:
+    # Two rules on the same chat (read + delete) grant exactly {read, delete};
+    # write is NOT implied.
+    resolver = FakeResolver({5: 5})
+    config = AccessConfig(
+        rules=[
+            AccessRule(chat=5, permission="read"),
+            AccessRule(chat=5, permission="delete"),
+        ]
+    )
+    auth = Authorizer(config, resolver=resolver)
+    await auth.require(5, AccessLevel.READ)
+    await auth.require(5, AccessLevel.DELETE)
+    assert await auth.allows(5, AccessLevel.READ) is True
+    assert await auth.allows(5, AccessLevel.DELETE) is True
+    assert await auth.allows(5, AccessLevel.WRITE) is False
+    with pytest.raises(AccessDenied):
+        await auth.require(5, AccessLevel.WRITE)
 
 
 @pytest.mark.asyncio
@@ -153,11 +195,11 @@ async def test_marked_request_chat_id_matches_bare_rule() -> None:
     )
     # Marked form (as a user would type with --chat-id) resolves to the rule.
     await auth.require(-1001234567890, AccessLevel.WRITE)
-    # Bare form matches the same rule too.
-    await auth.require(1234567890, AccessLevel.READ)
+    # Bare form matches the same rule too (granted cap is write, not read).
+    await auth.require(1234567890, AccessLevel.WRITE)
     # An unrelated chat is still denied.
     with pytest.raises(AccessDenied):
-        await auth.require(-1009999999999, AccessLevel.READ)
+        await auth.require(-1009999999999, AccessLevel.WRITE)
 
 
 # ---------------------------------------------------------------------------
@@ -221,12 +263,12 @@ async def test_wildcard_all_read_grants_read_everywhere() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Union / highest-level-wins
+# Union of capabilities across all / folder / chat rules
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_union_read_all_baseline_plus_targeted_write() -> None:
+async def test_union_caps_across_all_folder_and_chat_rules() -> None:
     resolver = FakeResolver({"@vip": 42})
     config = AccessConfig(
         rules=[
@@ -242,17 +284,23 @@ async def test_union_read_all_baseline_plus_targeted_write() -> None:
     )
     # Read everywhere (baseline).
     await auth.require(12345, AccessLevel.READ)
-    # Write to folder members (folder rule wins over read baseline).
+    # Folder member 10 unions the read baseline with the folder write rule.
     await auth.require(10, AccessLevel.WRITE)
-    # Write to the explicit chat.
+    await auth.require(10, AccessLevel.READ)
+    # The explicit chat unions read baseline + chat write rule.
     await auth.require(42, AccessLevel.WRITE)
+    await auth.require(42, AccessLevel.READ)
+    # No rule grants delete anywhere.
+    with pytest.raises(AccessDenied):
+        await auth.require(10, AccessLevel.DELETE)
     # But a random chat only gets read, not write.
     with pytest.raises(AccessDenied):
         await auth.require(99999, AccessLevel.WRITE)
 
 
 @pytest.mark.asyncio
-async def test_highest_level_wins_across_duplicate_targets() -> None:
+async def test_duplicate_targets_union_capabilities() -> None:
+    # Two rules on the same chat accumulate caps as a set-union (no ordering).
     resolver = FakeResolver({5: 5})
     config = AccessConfig(
         rules=[
@@ -261,7 +309,10 @@ async def test_highest_level_wins_across_duplicate_targets() -> None:
         ]
     )
     auth = Authorizer(config, resolver=resolver)
-    await auth.require(5, AccessLevel.WRITE)  # write rule wins
+    await auth.require(5, AccessLevel.WRITE)
+    await auth.require(5, AccessLevel.READ)
+    with pytest.raises(AccessDenied):
+        await auth.require(5, AccessLevel.DELETE)
 
 
 @pytest.mark.asyncio
@@ -272,6 +323,7 @@ async def test_denied_carries_required_and_matched_metadata() -> None:
     exc = excinfo.value
     assert exc.required_level is AccessLevel.WRITE
     assert exc.granted_level is AccessLevel.READ
+    assert exc.granted_caps == frozenset({AccessLevel.READ})
     assert exc.matched_rule == "all"
 
 

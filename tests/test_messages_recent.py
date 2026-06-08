@@ -92,14 +92,18 @@ async def test_get_recent_allowed_by_read_rule() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_recent_allowed_by_write_rule_write_implies_read() -> None:
+async def test_get_recent_denied_by_write_only_rule() -> None:
+    # Independent capabilities: a write-only rule no longer implies read, so
+    # `messages recent` (which requires READ) is denied. Operators must grant
+    # read explicitly (migration note in Task 16).
     backend = FakeReadBackend(_messages(1))
     config = AccessConfig(rules=[AccessRule(chat="@team", permission="write")])
     authorizer = Authorizer(config, resolver=FakeResolver({"@team": 42}))
-    out = await get_recent_messages(
-        backend=backend, chat_id=42, authorizer=authorizer
-    )
-    assert len(out) == 1
+    with pytest.raises(AccessDenied):
+        await get_recent_messages(
+            backend=backend, chat_id=42, authorizer=authorizer
+        )
+    assert backend.calls == []
 
 
 @pytest.mark.asyncio

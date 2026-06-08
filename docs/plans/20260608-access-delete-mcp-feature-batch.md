@@ -127,19 +127,19 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 2: Authorizer independent-capability model + `delete` permission
-- [ ] in `access/service.py` add `DELETE` to the `AccessLevel`/capability set and replace the
+- [x] in `access/service.py` add `DELETE` to the `AccessLevel`/capability set and replace the
       linear `dict[int, AccessLevel]` max-merge with an **independent** capability set
       `dict[int, set[AccessLevel]]` — **no implications**: `read`⇒`{read}`, `write`⇒`{write}`,
       `delete`⇒`{delete}`. Drop the `WRITE > READ` ordering semantics entirely.
-- [ ] update `_PERMISSION_TO_LEVEL`, `_effective_chat_level`, `require`, `require_folder`,
+- [x] update `_PERMISSION_TO_LEVEL`, `_effective_chat_level`, `require`, `require_folder`,
       `allows` to test **capability membership** (`level in caps`) instead of `granted >= level`;
       union across matching rules is a set-union of capabilities
-- [ ] keep call sites stable: `require(chat_id, AccessLevel.WRITE)` etc. still compile; add the
+- [x] keep call sites stable: `require(chat_id, AccessLevel.WRITE)` etc. still compile; add the
       `AccessLevel.DELETE` path
-- [ ] write tests: `write` grants **only** write (read denied, delete denied); `delete` grants
+- [x] write tests: `write` grants **only** write (read denied, delete denied); `delete` grants
       **only** delete; `read` grants only read; a rule with multiple permissions grants exactly
       that set; union across `all`/folder/chat rules accumulates caps; `-100` normalisation matches
-- [ ] run tests + `ruff` — must pass before next task
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 3: Backward-compatible multi-chat / multi-permission access rules
 - [ ] in `config/models.py` extend `AccessRule`: add optional `chats: list[EntityRef]` and

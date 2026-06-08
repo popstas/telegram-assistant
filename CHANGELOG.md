@@ -5,6 +5,7 @@
 
 ### Features
 
+- Config hot-reload via watchdog
 - Verify mcp acceptance criteria
 - Document optional mcp server
 - Add mcp oauth integration tests

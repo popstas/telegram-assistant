@@ -8,13 +8,16 @@ touch* (read vs write), not per-caller identity. The policy lives in
 * When ``telegram.access`` is ``None`` the authorizer is a no-op sentinel —
   every ``require`` returns immediately (allow-all, backward compatible).
 * When an ``access`` block is present it is deny-by-default. The effective
-  level for a chat is the **union, highest level wins** across every matching
-  rule: a wildcard ``all`` rule, any folder the chat belongs to, and an
-  explicit ``chat`` rule. ``write`` implies ``read`` (``WRITE > READ``).
+  *capability set* for a chat is the **union** of capabilities across every
+  matching rule: a wildcard ``all`` rule, any folder the chat belongs to, and an
+  explicit ``chat`` rule. Capabilities are **independent** — ``read``, ``write``
+  and ``delete`` each grant *only* themselves; ``write`` does **not** imply
+  ``read``. A chat that should be both readable and writable must be granted
+  both permissions explicitly.
 
 So one config can simultaneously express a read-all baseline (wildcard ``all``
 + ``permission: read``) layered with targeted ``write`` rules on selected
-chats/folders, without conflict.
+chats/folders; a chat covered by both ends up with ``{read, write}``.
 
 Following the service/backend split, the authorizer depends only on protocols
 (an :class:`EntityResolver` to resolve ``chat`` rule refs and a
@@ -39,16 +42,33 @@ _log = get_logger(__name__)
 
 
 class AccessLevel(enum.IntEnum):
-    """Ordered access levels. ``WRITE`` implies ``READ`` (``WRITE > READ``)."""
+    """Independent access capabilities.
+
+    These are **not** ordered semantically — each names a distinct capability
+    that grants only itself (``write`` does *not* imply ``read``). The integer
+    values exist only to give the members a stable, deterministic sort/display
+    order (e.g. when summarising a granted capability set).
+    """
 
     READ = 1
     WRITE = 2
+    DELETE = 3
 
 
 _PERMISSION_TO_LEVEL = {
     "read": AccessLevel.READ,
     "write": AccessLevel.WRITE,
+    "delete": AccessLevel.DELETE,
 }
+
+
+def _caps_repr(caps: set[AccessLevel]) -> str | None:
+    """A single representative capability name for a granted set (for logging).
+
+    Returns the highest-valued granted capability's lowercase name, or ``None``
+    when nothing is granted. Mirrors :attr:`AccessDenied.granted_level`.
+    """
+    return max(caps).name.lower() if caps else None
 
 
 def _canonical_chat_id(chat_id: int) -> int:
@@ -82,18 +102,31 @@ class AccessDenied(RuntimeError):
         *,
         chat_ref: object,
         required_level: AccessLevel,
-        granted_level: AccessLevel | None = None,
+        granted_caps: Iterable[AccessLevel] | None = None,
         matched_rule: str | None = None,
     ) -> None:
-        granted_text = granted_level.name.lower() if granted_level else "none"
+        caps = frozenset(granted_caps or ())
+        granted_text = (
+            ",".join(c.name.lower() for c in sorted(caps)) if caps else "none"
+        )
         super().__init__(
             f"access denied for {chat_ref!r}: requires "
             f"{required_level.name.lower()}, granted {granted_text}"
         )
         self.chat_ref = chat_ref
         self.required_level = required_level
-        self.granted_level = granted_level
+        self.granted_caps: frozenset[AccessLevel] = caps
         self.matched_rule = matched_rule
+
+    @property
+    def granted_level(self) -> AccessLevel | None:
+        """A single representative of the granted caps for display/logging.
+
+        The capability set is independent (no ordering semantics), but observers
+        and the HTTP error body expect one value; return the highest-valued
+        granted capability, or ``None`` when nothing was granted.
+        """
+        return max(self.granted_caps) if self.granted_caps else None
 
 
 class Authorizer:
@@ -118,9 +151,9 @@ class Authorizer:
         self._resolver = resolver
         self._folder_backend = folder_backend
         self._built = False
-        self._default_level: AccessLevel | None = None
-        self._chat_levels: dict[int, AccessLevel] = {}
-        self._folder_levels: dict[str, AccessLevel] = {}
+        self._default_caps: set[AccessLevel] = set()
+        self._chat_caps: dict[int, set[AccessLevel]] = {}
+        self._folder_caps: dict[str, set[AccessLevel]] = {}
         self._memberships: dict[int, set[str]] | None = None
 
     @property
@@ -131,16 +164,15 @@ class Authorizer:
     async def _ensure_index(self) -> None:
         if self._built or self._config is None:
             return
-        default: AccessLevel | None = None
-        chat_levels: dict[int, AccessLevel] = {}
-        folder_levels: dict[str, AccessLevel] = {}
+        default_caps: set[AccessLevel] = set()
+        chat_caps: dict[int, set[AccessLevel]] = {}
+        folder_caps: dict[str, set[AccessLevel]] = {}
         for rule in self._config.rules:
             level = _PERMISSION_TO_LEVEL[rule.permission]
             if rule.all:
-                default = level if default is None else max(default, level)
+                default_caps.add(level)
             elif rule.folder is not None:
-                cur = folder_levels.get(rule.folder)
-                folder_levels[rule.folder] = level if cur is None else max(cur, level)
+                folder_caps.setdefault(rule.folder, set()).add(level)
             elif rule.chat is not None:
                 if self._resolver is None:
                     raise RuntimeError(
@@ -148,18 +180,15 @@ class Authorizer:
                         "chat-targeted access rules"
                     )
                 resolved = await self._resolver.resolve(rule.chat)
-                cur = chat_levels.get(resolved.chat_id)
-                chat_levels[resolved.chat_id] = (
-                    level if cur is None else max(cur, level)
-                )
-        self._default_level = default
-        self._chat_levels = chat_levels
-        self._folder_levels = folder_levels
+                chat_caps.setdefault(resolved.chat_id, set()).add(level)
+        self._default_caps = default_caps
+        self._chat_caps = chat_caps
+        self._folder_caps = folder_caps
         self._built = True
 
     async def _folder_memberships(self, chat_id: int) -> set[str]:
         # No folder rules → folder membership is irrelevant; skip the scan.
-        if not self._folder_levels:
+        if not self._folder_caps:
             return set()
         if self._memberships is None:
             memberships: dict[int, set[str]] = {}
@@ -172,39 +201,44 @@ class Authorizer:
             self._memberships = memberships
         return self._memberships.get(chat_id, set())
 
-    def _effective_chat_level(
+    def _effective_chat_caps(
         self, chat_id: int, memberships: Iterable[str]
-    ) -> tuple[AccessLevel | None, str | None]:
-        """Return ``(granted_level, matched_rule_description)`` for a chat."""
-        best: AccessLevel | None = None
+    ) -> tuple[set[AccessLevel], str | None]:
+        """Return ``(granted_caps, matched_rule_description)`` for a chat.
+
+        Capabilities **union** across every matching rule. ``matched`` names the
+        most specific rule kind that contributed (``chat`` > ``folder`` >
+        ``all``), for observability.
+        """
+        caps: set[AccessLevel] = set()
         matched: str | None = None
-        if self._default_level is not None:
-            best = self._default_level
+        if self._default_caps:
+            caps |= self._default_caps
             matched = "all"
         for folder in memberships:
-            lv = self._folder_levels.get(folder)
-            if lv is not None and (best is None or lv > best):
-                best = lv
+            folder_caps = self._folder_caps.get(folder)
+            if folder_caps:
+                caps |= folder_caps
                 matched = f"folder:{folder}"
-        chat_level = self._chat_levels.get(chat_id)
-        if chat_level is not None and (best is None or chat_level > best):
-            best = chat_level
+        chat_caps = self._chat_caps.get(chat_id)
+        if chat_caps:
+            caps |= chat_caps
             matched = "chat"
-        return best, matched
+        return caps, matched
 
     async def _chat_access(
         self,
         chat_id: int,
         folder_memberships: Iterable[str] | None,
-    ) -> tuple[int, AccessLevel | None, str | None]:
+    ) -> tuple[int, set[AccessLevel], str | None]:
         await self._ensure_index()
         lookup_id = _canonical_chat_id(chat_id)
         if folder_memberships is None:
             memberships: Iterable[str] = await self._folder_memberships(lookup_id)
         else:
             memberships = set(folder_memberships)
-        granted, matched = self._effective_chat_level(lookup_id, memberships)
-        return lookup_id, granted, matched
+        caps, matched = self._effective_chat_caps(lookup_id, memberships)
+        return lookup_id, caps, matched
 
     async def allows(
         self,
@@ -216,10 +250,10 @@ class Authorizer:
         """Return whether ``chat_id`` has ``level`` without logging or raising."""
         if self._config is None:
             return True
-        _lookup_id, granted, _matched = await self._chat_access(
+        _lookup_id, caps, _matched = await self._chat_access(
             chat_id, folder_memberships
         )
-        return granted is not None and granted >= level
+        return level in caps
 
     async def require(
         self,
@@ -236,22 +270,22 @@ class Authorizer:
         """
         if self._config is None:
             return
-        _lookup_id, granted, matched = await self._chat_access(
+        _lookup_id, caps, matched = await self._chat_access(
             chat_id, folder_memberships
         )
-        if granted is None or granted < level:
+        if level not in caps:
             _log.warning(
                 "access_denied",
                 chat_ref=chat_id,
                 telegram_chat_id=chat_id,
                 required_level=level.name.lower(),
-                granted_level=granted.name.lower() if granted else None,
+                granted_level=_caps_repr(caps),
                 matched_rule=matched,
             )
             raise AccessDenied(
                 chat_ref=chat_id,
                 required_level=level,
-                granted_level=granted,
+                granted_caps=caps,
                 matched_rule=matched,
             )
         _log.debug(
@@ -259,7 +293,7 @@ class Authorizer:
             chat_ref=chat_id,
             telegram_chat_id=chat_id,
             required_level=level.name.lower(),
-            granted_level=granted.name.lower(),
+            granted_level=_caps_repr(caps),
             matched_rule=matched,
         )
 
@@ -267,40 +301,40 @@ class Authorizer:
         """Raise :class:`AccessDenied` unless ``folder_name`` is granted ``level``.
 
         Used for destination-folder gating (e.g. group create). The effective
-        level is the max of the wildcard default and any folder rule. With no
-        active policy this is a no-op.
+        capability set is the union of the wildcard default and any folder rule.
+        With no active policy this is a no-op.
         """
         if self._config is None:
             return
         await self._ensure_index()
-        best: AccessLevel | None = None
+        caps: set[AccessLevel] = set()
         matched: str | None = None
-        if self._default_level is not None:
-            best = self._default_level
+        if self._default_caps:
+            caps |= self._default_caps
             matched = "all"
-        folder_level = self._folder_levels.get(folder_name)
-        if folder_level is not None and (best is None or folder_level > best):
-            best = folder_level
+        folder_caps = self._folder_caps.get(folder_name)
+        if folder_caps:
+            caps |= folder_caps
             matched = f"folder:{folder_name}"
-        if best is None or best < level:
+        if level not in caps:
             _log.warning(
                 "access_denied",
                 chat_ref=f"folder:{folder_name}",
                 required_level=level.name.lower(),
-                granted_level=best.name.lower() if best else None,
+                granted_level=_caps_repr(caps),
                 matched_rule=matched,
             )
             raise AccessDenied(
                 chat_ref=f"folder:{folder_name}",
                 required_level=level,
-                granted_level=best,
+                granted_caps=caps,
                 matched_rule=matched,
             )
         _log.debug(
             "access_granted",
             chat_ref=f"folder:{folder_name}",
             required_level=level.name.lower(),
-            granted_level=best.name.lower(),
+            granted_level=_caps_repr(caps),
             matched_rule=matched,
         )
 
