@@ -5,6 +5,7 @@
 
 ### Features
 
+- Independent-capability authorizer + delete permission
 - Config hot-reload via watchdog
 - Verify mcp acceptance criteria
 - Document optional mcp server

@@ -50,43 +50,69 @@ class TelegramDefaults(BaseModel):
 
 
 class AccessRule(BaseModel):
-    """A single read/write grant for the technical account.
+    """A single read/write/delete grant for the technical account.
 
-    Exactly one *target* must be set per rule:
+    Exactly one *target kind* must be set per rule:
 
-    * ``chat`` — an entity reference (numeric id, ``@username``, link, phone, or
-      exact title) resolved via the shared entity resolver;
+    * ``chat`` / ``chats`` — one or many entity references (numeric id,
+      ``@username``, link, phone, or exact title) resolved via the shared entity
+      resolver. ``chat`` (singular) and ``chats`` (list) are the same kind and
+      may be combined — their refs union together;
     * ``folder`` — a Telegram chat-folder name (every chat in it inherits the
       grant);
     * ``all: true`` — a wildcard matching every chat.
 
-    ``permission`` is ``write`` by default. Capabilities are **independent** —
-    ``read``/``write``/``delete`` each grant only themselves (``write`` does not
-    imply ``read``). Rules combine as a set-union of capabilities, so a wildcard
-    ``all`` + ``read`` baseline can coexist with targeted ``write`` rules; a chat
-    covered by both ends up with ``{read, write}``.
+    Permissions come from ``permissions`` (a list) when set, otherwise from the
+    singular ``permission`` (default ``write``). Capabilities are **independent**
+    — ``read``/``write``/``delete`` each grant only themselves (``write`` does
+    not imply ``read``). Rules combine as a set-union of capabilities, so a
+    wildcard ``all`` + ``read`` baseline can coexist with targeted ``write``
+    rules; a chat covered by both ends up with ``{read, write}``. A single rule
+    can grant several caps to several chats at once via
+    ``chats: [...]`` + ``permissions: [read, write]``.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     chat: str | int | None = None
+    chats: list[str | int] = Field(default_factory=list)
     folder: str | None = None
     all: bool = False
     permission: AccessPermission = "write"
+    permissions: list[AccessPermission] = Field(default_factory=list)
+
+    @property
+    def chat_refs(self) -> list[str | int]:
+        """All chat refs named by this rule (singular ``chat`` plus ``chats``)."""
+        refs: list[str | int] = []
+        if self.chat is not None:
+            refs.append(self.chat)
+        refs.extend(self.chats)
+        return refs
+
+    @property
+    def effective_permissions(self) -> list[AccessPermission]:
+        """The permissions this rule grants.
+
+        ``permissions`` when explicitly set, otherwise ``[permission]``.
+        """
+        return list(self.permissions) if self.permissions else [self.permission]
 
     @model_validator(mode="after")
     def _exactly_one_target(self) -> AccessRule:
         targets = [
-            self.chat is not None,
+            bool(self.chat_refs),
             self.folder is not None,
             bool(self.all),
         ]
         set_count = sum(targets)
         if set_count != 1:
             raise ValueError(
-                "each access rule must set exactly one target of "
-                "'chat' / 'folder' / 'all: true'"
+                "each access rule must set exactly one target kind of "
+                "'chat'/'chats' / 'folder' / 'all: true'"
             )
+        if not self.effective_permissions:
+            raise ValueError("access rule must grant at least one permission")
         return self
 
 

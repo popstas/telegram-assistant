@@ -79,6 +79,34 @@ def test_access_rule_all_false_is_not_a_target() -> None:
     assert rule.chat == 123
 
 
+def test_access_rule_chats_list_is_a_target() -> None:
+    # `chats` (list form) counts as the chat target kind.
+    rule = AccessRule(chats=[1, 2], permission="write")
+    assert rule.chat_refs == [1, 2]
+    # chat (singular) + chats (list) union into the same kind.
+    rule2 = AccessRule(chat=1, chats=[2, 3])
+    assert rule2.chat_refs == [1, 2, 3]
+
+
+def test_access_rule_chats_conflicts_with_other_kinds() -> None:
+    with pytest.raises(ValueError):
+        AccessRule(chats=[1], folder="Clients")  # two target kinds
+    with pytest.raises(ValueError):
+        AccessRule(chats=[1], all=True)  # two target kinds
+    with pytest.raises(ValueError):
+        AccessRule(permissions=["read"])  # no target
+
+
+def test_access_rule_permissions_list_overrides_singular() -> None:
+    rule = AccessRule(chat=1, permissions=["read", "delete"])
+    assert rule.effective_permissions == ["read", "delete"]
+    # empty permissions falls back to the singular permission (default write).
+    rule2 = AccessRule(chat=1)
+    assert rule2.effective_permissions == ["write"]
+    rule3 = AccessRule(chat=1, permissions=[])
+    assert rule3.effective_permissions == ["write"]
+
+
 # ---------------------------------------------------------------------------
 # Allow-all (no policy)
 # ---------------------------------------------------------------------------
@@ -313,6 +341,66 @@ async def test_duplicate_targets_union_capabilities() -> None:
     await auth.require(5, AccessLevel.READ)
     with pytest.raises(AccessDenied):
         await auth.require(5, AccessLevel.DELETE)
+
+
+@pytest.mark.asyncio
+async def test_multi_chat_multi_permission_rule_grants_both() -> None:
+    # A single rule with chats: [a, b] + permissions: [write, delete] grants
+    # both caps to both chats — and nothing else.
+    resolver = FakeResolver({"@a": 100, "@b": 200})
+    config = AccessConfig(
+        rules=[
+            AccessRule(chats=["@a", "@b"], permissions=["write", "delete"]),
+        ]
+    )
+    auth = Authorizer(config, resolver=resolver)
+    for chat_id in (100, 200):
+        await auth.require(chat_id, AccessLevel.WRITE)
+        await auth.require(chat_id, AccessLevel.DELETE)
+        with pytest.raises(AccessDenied):
+            await auth.require(chat_id, AccessLevel.READ)  # not granted
+
+
+@pytest.mark.asyncio
+async def test_singular_chat_with_chats_union_in_one_rule() -> None:
+    # chat (singular) + chats (list) within the same rule union together.
+    resolver = FakeResolver({1: 1, 2: 2, 3: 3})
+    config = AccessConfig(
+        rules=[AccessRule(chat=1, chats=[2, 3], permission="read")],
+    )
+    auth = Authorizer(config, resolver=resolver)
+    for chat_id in (1, 2, 3):
+        await auth.require(chat_id, AccessLevel.READ)
+        with pytest.raises(AccessDenied):
+            await auth.require(chat_id, AccessLevel.WRITE)
+
+
+@pytest.mark.asyncio
+async def test_legacy_singular_rules_still_apply() -> None:
+    # Backward compatibility: the old singular chat + permission form keeps
+    # working unchanged.
+    resolver = FakeResolver({"@legacy": 9})
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(chat="@legacy", permission="write")]),
+        resolver=resolver,
+    )
+    await auth.require(9, AccessLevel.WRITE)
+    with pytest.raises(AccessDenied):
+        await auth.require(9, AccessLevel.READ)
+
+
+@pytest.mark.asyncio
+async def test_folder_rule_with_permissions_list() -> None:
+    auth = Authorizer(
+        AccessConfig(
+            rules=[AccessRule(folder="Clients", permissions=["read", "write"])]
+        ),
+        folder_backend=FakeFolderBackend([_clients_folder()]),
+    )
+    await auth.require(10, AccessLevel.READ)
+    await auth.require(10, AccessLevel.WRITE)
+    with pytest.raises(AccessDenied):
+        await auth.require(10, AccessLevel.DELETE)
 
 
 @pytest.mark.asyncio

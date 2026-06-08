@@ -142,18 +142,18 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 3: Backward-compatible multi-chat / multi-permission access rules
-- [ ] in `config/models.py` extend `AccessRule`: add optional `chats: list[EntityRef]` and
+- [x] in `config/models.py` extend `AccessRule`: add optional `chats: list[EntityRef]` and
       `permissions: list[Literal["read","write","delete"]]`; keep singular `chat`/`folder`/`all`
       + `permission`; add `delete` to the permission literal
-- [ ] add a validator: a rule must name exactly one *target kind* (`chat`/`chats` vs `folder`
+- [x] add a validator: a rule must name exactly one *target kind* (`chat`/`chats` vs `folder`
       vs `all`); permissions come from `permissions` if set else `[permission]`; reject empty
       permission sets
-- [ ] update `Authorizer._ensure_index` to expand a rule over its chats × permissions (resolve
+- [x] update `Authorizer._ensure_index` to expand a rule over its chats × permissions (resolve
       each chat ref via the resolver) into the capability-set index
-- [ ] write tests: a single rule with `chats: [a,b]` + `permissions: [write, delete]` grants both
+- [x] write tests: a single rule with `chats: [a,b]` + `permissions: [write, delete]` grants both
       caps to both chats; legacy singular rules still parse and apply; validation errors for
       multi-target / empty permissions
-- [ ] run tests + `ruff` — must pass before next task
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 4: Access management CLI commands (CLI + skill only, NOT MCP)
 - [ ] add an `access` command group to `cli/main.py`:

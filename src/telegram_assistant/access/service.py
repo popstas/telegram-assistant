@@ -168,19 +168,23 @@ class Authorizer:
         chat_caps: dict[int, set[AccessLevel]] = {}
         folder_caps: dict[str, set[AccessLevel]] = {}
         for rule in self._config.rules:
-            level = _PERMISSION_TO_LEVEL[rule.permission]
+            levels = {
+                _PERMISSION_TO_LEVEL[perm] for perm in rule.effective_permissions
+            }
             if rule.all:
-                default_caps.add(level)
+                default_caps |= levels
             elif rule.folder is not None:
-                folder_caps.setdefault(rule.folder, set()).add(level)
-            elif rule.chat is not None:
-                if self._resolver is None:
+                folder_caps.setdefault(rule.folder, set()).update(levels)
+            else:
+                refs = rule.chat_refs
+                if refs and self._resolver is None:
                     raise RuntimeError(
                         "authorizer requires an entity resolver to resolve "
                         "chat-targeted access rules"
                     )
-                resolved = await self._resolver.resolve(rule.chat)
-                chat_caps.setdefault(resolved.chat_id, set()).add(level)
+                for ref in refs:
+                    resolved = await self._resolver.resolve(ref)
+                    chat_caps.setdefault(resolved.chat_id, set()).update(levels)
         self._default_caps = default_caps
         self._chat_caps = chat_caps
         self._folder_caps = folder_caps
