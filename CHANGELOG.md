@@ -5,6 +5,7 @@
 
 ### Features
 
+- Backward-compatible multi-chat/multi-permission access rules
 - Independent-capability authorizer + delete permission
 - Config hot-reload via watchdog
 - Verify mcp acceptance criteria

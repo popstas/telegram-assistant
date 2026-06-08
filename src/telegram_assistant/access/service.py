@@ -259,6 +259,27 @@ class Authorizer:
         )
         return level in caps
 
+    async def describe(
+        self,
+        chat_id: int,
+        *,
+        folder_memberships: Iterable[str] | None = None,
+    ) -> tuple[frozenset[AccessLevel], str | None]:
+        """Return ``(granted_caps, matched_rule)`` for ``chat_id`` without raising.
+
+        Used by access-inspection tooling (e.g. the ``access check`` CLI) that
+        wants to report *what* a chat is granted rather than gate a single
+        operation. For the allow-all sentinel (no active policy) every
+        capability is granted and the matched rule is reported as
+        ``"allow_all"``.
+        """
+        if self._config is None:
+            return frozenset(AccessLevel), "allow_all"
+        _lookup_id, caps, matched = await self._chat_access(
+            chat_id, folder_memberships
+        )
+        return frozenset(caps), matched
+
     async def require(
         self,
         chat_id: int,

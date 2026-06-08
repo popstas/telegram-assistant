@@ -156,7 +156,7 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 4: Access management CLI commands (CLI + skill only, NOT MCP)
-- [ ] add an `access` command group to `cli/main.py`:
+- [x] add an `access` command group to `cli/main.py`:
       - `access list` — print the effective rules / capability index from the loaded config
       - `access check --entity <ref> --permission read|write|delete` — resolve the chat and report
         grant verdict + matched rule
@@ -164,14 +164,15 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
         `access add --entity <ref>|--folder <name>|--all --permission read,write,delete`),
         re-serialising the access block; the watchdog hot-reload (Task 1) then applies it live.
         Support `--dry-run` (print the resulting rule, don't write).
-- [ ] `access check` exits **0** when granted, **3** (AccessDenied convention) when denied, **2**
+- [x] `access check` exits **0** when granted, **3** (AccessDenied convention) when denied, **2**
       when the entity cannot be resolved; `access add` validates the rule (reuse the Task 3
       validator) before writing
-- [ ] expose the same access flows in the **skill** (Task 14/16); **do NOT add any access tool to
-      MCP** — access management stays CLI + skill only
-- [ ] write tests: `list` output for a sample config; `check` granted/denied/not-found exit codes;
+- [x] expose the same access flows in the **skill** (Task 14/16); **do NOT add any access tool to
+      MCP** — access management stays CLI + skill only (catalog rows added to `SKILL.md`; full
+      `~/.claude` resync handled by Task 16)
+- [x] write tests: `list` output for a sample config; `check` granted/denied/not-found exit codes;
       `access add` writes a valid rule (and `--dry-run` does not), round-trips through `load_config`
-- [ ] run tests + `ruff` — must pass before next task
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 5: SentMessageRegistry (in-memory, process lifetime)
 - [ ] add `messages/sent_registry.py` with a thread/async-safe `SentMessageRegistry` storing a

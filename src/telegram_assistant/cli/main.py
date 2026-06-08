@@ -4717,5 +4717,300 @@ def operations_retry(
     )
 
 
+# --- access -----------------------------------------------------------------
+
+access_app = typer.Typer(
+    help="Inspect and manage the access policy (telegram.access).",
+    no_args_is_help=True,
+)
+app.add_typer(access_app, name="access")
+
+
+def _build_access_resolver(config_path: Path | None):
+    """Open the Telethon-backed resolver + folder backend for access checks.
+
+    Mirrors :func:`_build_message_read_backends`: lazy Telethon imports keep
+    ``access check --help`` cheap. Tests monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.entities import TelethonEntityResolver
+        from telegram_assistant.folders import TelethonFolderBackend
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return TelethonEntityResolver(client), TelethonFolderBackend(client)
+
+    return config, manager, _open
+
+
+def _access_rule_target(rule) -> dict[str, object]:
+    """Summarise the target kind of an :class:`AccessRule` for display."""
+    if rule.all:
+        return {"kind": "all"}
+    if rule.folder is not None:
+        return {"kind": "folder", "folder": rule.folder}
+    return {"kind": "chat", "chats": [str(ref) for ref in rule.chat_refs]}
+
+
+@access_app.command("list")
+def access_list(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Print the effective access rules from the loaded config.
+
+    With ``telegram.access`` unset the policy is allow-all; otherwise each rule
+    is listed with its target kind and the (independent) capabilities it grants.
+    """
+    config = _load_config_or_exit(config_path)
+    access = config.telegram.access
+    if access is None:
+        payload: dict[str, object] = {
+            "policy": "allow_all",
+            "rules": [],
+            "note": (
+                "telegram.access is not set; every chat is allowed "
+                "(read/write/delete)."
+            ),
+        }
+        typer.echo(json.dumps(payload, sort_keys=True))
+        return
+
+    rules_out = [
+        {
+            "target": _access_rule_target(rule),
+            "permissions": list(rule.effective_permissions),
+        }
+        for rule in access.rules
+    ]
+    payload = {
+        "policy": "deny_by_default",
+        "rules": rules_out,
+        "rule_count": len(rules_out),
+    }
+    typer.echo(json.dumps(payload, sort_keys=True))
+
+
+@access_app.command("check")
+def access_check(
+    entity: str = typer.Option(
+        ...,
+        "--entity",
+        help="Entity reference (numeric id, @username, link, phone, or exact "
+        "title) resolved via the shared resolver.",
+    ),
+    permission: str = typer.Option(
+        "read",
+        "--permission",
+        help="Capability to check: read | write | delete.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Resolve a chat and report whether the policy grants a permission.
+
+    Exits 0 when granted, ``ACCESS_DENIED_EXIT_CODE`` (3) when denied, and 2
+    when the entity cannot be resolved (or the permission is invalid).
+    """
+    from telegram_assistant.access.service import _PERMISSION_TO_LEVEL
+
+    perm = permission.strip().lower()
+    if perm not in _PERMISSION_TO_LEVEL:
+        typer.echo(
+            f"invalid --permission {permission!r}: expected read|write|delete",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    level = _PERMISSION_TO_LEVEL[perm]
+
+    config, manager, open_backends = _build_access_resolver(config_path)
+
+    async def _run():
+        try:
+            resolver, folder_backend = await open_backends()
+            resolved = await resolver.resolve(entity)
+            authorizer = _cli_authorizer(
+                config, resolver=resolver, folder_backend=folder_backend
+            )
+            caps, matched = await authorizer.describe(resolved.chat_id)
+            return resolved, caps, matched, level in caps
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        resolved, caps, matched, granted = asyncio.run(_run())
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"access check failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    payload = {
+        "entity": entity,
+        "telegram_chat_id": resolved.chat_id,
+        "permission": perm,
+        "granted": granted,
+        "granted_permissions": sorted(c.name.lower() for c in caps),
+        "matched_rule": matched,
+    }
+    typer.echo(json.dumps(payload, sort_keys=True))
+    if not granted:
+        raise typer.Exit(code=ACCESS_DENIED_EXIT_CODE)
+
+
+@access_app.command("add")
+def access_add(
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Grant on a single chat (numeric id, @username, link, phone, "
+        "or exact title).",
+    ),
+    folder: str | None = typer.Option(
+        None,
+        "--folder",
+        help="Grant on every chat in this Telegram chat-folder.",
+    ),
+    all_chats: bool = typer.Option(
+        False,
+        "--all",
+        help="Grant on every chat (wildcard baseline).",
+    ),
+    permission: str = typer.Option(
+        "write",
+        "--permission",
+        help="Comma-separated capabilities to grant: read,write,delete.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the resulting rule without writing the config.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Append an access rule to the config file.
+
+    Exactly one target (``--entity`` / ``--folder`` / ``--all``) must be given.
+    The rule is validated (same model validator as the loader) before writing;
+    the hot-reload watcher then applies it live. ``--dry-run`` prints the rule
+    without touching the file. Note: adding the first rule to a config with no
+    ``telegram.access`` block switches the policy from allow-all to
+    deny-by-default.
+    """
+    import yaml
+
+    from telegram_assistant.config import (
+        load_config_from_text,
+        resolve_config_path,
+    )
+    from telegram_assistant.config.models import AccessRule
+
+    target_count = sum(
+        [entity is not None, folder is not None, bool(all_chats)]
+    )
+    if target_count != 1:
+        typer.echo(
+            "exactly one of --entity, --folder, or --all must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    perms = [p.strip().lower() for p in permission.split(",") if p.strip()]
+    if not perms:
+        typer.echo(
+            "--permission must list at least one of read,write,delete", err=True
+        )
+        raise typer.Exit(code=2)
+
+    rule_data: dict[str, object] = {"permissions": perms}
+    if entity is not None:
+        ref: str | int = entity
+        stripped = entity[1:] if entity.startswith("-") else entity
+        if stripped.isdigit():
+            ref = int(entity)
+        rule_data["chat"] = ref
+    elif folder is not None:
+        rule_data["folder"] = folder
+    else:
+        rule_data["all"] = True
+
+    # Validate via the shared model validator (rejects bad target / permission).
+    try:
+        AccessRule.model_validate(rule_data)
+    except Exception as exc:
+        typer.echo(f"invalid access rule: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    if dry_run:
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "access.add",
+            "rule": rule_data,
+        }
+        typer.echo(json.dumps(payload, sort_keys=True))
+        return
+
+    target_path = Path(config_path) if config_path is not None else resolve_config_path()
+    if target_path is None or not target_path.exists():
+        typer.echo("no config file found to update", err=True)
+        raise typer.Exit(code=2)
+
+    raw = yaml.safe_load(target_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        typer.echo(f"config at {target_path} is not a YAML mapping", err=True)
+        raise typer.Exit(code=2)
+    telegram = raw.setdefault("telegram", {})
+    access = telegram.get("access")
+    if access is None:
+        access = {"rules": []}
+        telegram["access"] = access
+    access.setdefault("rules", [])
+    access["rules"].append(rule_data)
+
+    new_text = yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
+    # Re-validate the whole resulting config before persisting.
+    try:
+        load_config_from_text(new_text, source=str(target_path))
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    target_path.write_text(new_text, encoding="utf-8")
+    payload = {
+        "status": "ok",
+        "command": "access.add",
+        "rule": rule_data,
+        "config_path": str(target_path),
+        "rule_count": len(access["rules"]),
+    }
+    typer.echo(json.dumps(payload, sort_keys=True))
+
+
 if __name__ == "__main__":  # pragma: no cover
     app()
