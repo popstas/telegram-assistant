@@ -5,6 +5,7 @@
 
 ### Features
 
+- Docs + inventory sync for access/delete/MCP batch
 - Extend live e2e scripts with delete/reply_to/recent-minutes/base64/file_urls steps
 - Conditional health check + prompt for message in skill flow
 - Tests for quieter /health Telethon logging

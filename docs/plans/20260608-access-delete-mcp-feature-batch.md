@@ -298,12 +298,13 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run `tests/test_skill_inventory.py` and `tests/test_mcp_mount.py` — must pass
 
 ### Task 17: Verify acceptance criteria
-- [ ] verify all 14 TODO items are implemented and reflected in `docs/TODO.md` (check off `[x]`)
-- [ ] run full unit suite (`pytest`) — all pass
-- [ ] run `ruff check src tests` — clean
-- [ ] `bash -n` all e2e scripts; record live e2e as run or skipped (no authorized session)
-- [ ] confirm backward compatibility: `telegram.access` omitted ⇒ allow-all; legacy single-target
-      rules still apply
+- [x] verify all 14 TODO items are implemented and reflected in `docs/TODO.md` (check off `[x]`)
+- [x] run full unit suite (`pytest`) — all pass (938 passed)
+- [x] run `ruff check src tests` — clean
+- [x] `bash -n` all e2e scripts; live e2e recorded as skipped (no authorized session available)
+- [x] confirm backward compatibility: `telegram.access` omitted ⇒ allow-all; legacy single-target
+      rules still apply (covered by `test_none_config_is_allow_all_noop` and
+      `test_legacy_singular_rules_still_apply`)
 
 ## Technical Details
 
