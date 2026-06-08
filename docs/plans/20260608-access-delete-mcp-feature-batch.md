@@ -262,12 +262,12 @@ messages; MCP clients get a smaller, more reliable, configurable tool surface.
 - [x] run tests + `ruff` — must pass before next task
 
 ### Task 13: Quieter `/health` logging
-- [ ] in `observability/logging.py` (or app setup) raise the level of / filter Telethon loggers
+- [x] in `observability/logging.py` (or app setup) raise the level of / filter Telethon loggers
       (`telethon`, `telethon.network.*`) so `/health` probes don't emit Telethon noise; keep HTTP
       server logs
-- [ ] make it not suppress genuine errors elsewhere (scope the filter to the noisy loggers)
-- [ ] write tests: Telethon logger output is suppressed at the configured level; HTTP logs remain
-- [ ] run tests + `ruff` — must pass before next task
+- [x] make it not suppress genuine errors elsewhere (scope the filter to the noisy loggers)
+- [x] write tests: Telethon logger output is suppressed at the configured level; HTTP logs remain
+- [x] run tests + `ruff` — must pass before next task
 
 ### Task 14: Skill update — conditional health check + prompt for message
 - [ ] update the `change` skill flow (referenced in TODO) so it does **not** run a health check

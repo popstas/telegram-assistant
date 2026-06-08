@@ -85,6 +85,46 @@ def test_telethon_level_override_reenables_debug() -> None:
     assert logging.getLogger("telethon").level == logging.DEBUG
 
 
+def test_telethon_network_children_inherit_cap() -> None:
+    # Child loggers (telethon.network.*) keep NOTSET but inherit the cap via the
+    # parent, so their effective level is the WARNING cap, not the app DEBUG.
+    configure_logging(level="DEBUG", stream=io.StringIO(), force=True)
+    child = logging.getLogger("telethon.network.connection")
+    assert child.getEffectiveLevel() == logging.WARNING
+
+
+def test_telethon_output_suppressed_but_http_logs_remain() -> None:
+    # Telethon chatter (INFO/DEBUG, incl. telethon.network.*) must be dropped
+    # while the app runs at DEBUG, but genuine non-Telethon logs (e.g. the HTTP
+    # server's uvicorn loggers) must still reach the handler.
+    buf = io.StringIO()
+    configure_logging(level="DEBUG", stream=buf, force=True)
+
+    logging.getLogger("telethon").info("User is already connected!")
+    logging.getLogger("telethon.network.mtprotosender").debug("sent packet")
+    logging.getLogger("uvicorn.access").info("GET /health 200")
+    logging.getLogger("uvicorn.error").error("boom")
+
+    output = buf.getvalue()
+    assert "already connected" not in output
+    assert "sent packet" not in output
+    assert "GET /health 200" in output
+    assert "boom" in output
+
+
+def test_telethon_warnings_and_errors_still_emit() -> None:
+    # Scoping the cap to noisy loggers must not swallow genuine Telethon errors.
+    buf = io.StringIO()
+    configure_logging(level="DEBUG", stream=buf, force=True)
+
+    logging.getLogger("telethon").warning("flood wait")
+    logging.getLogger("telethon.network").error("connection failed")
+
+    output = buf.getvalue()
+    assert "flood wait" in output
+    assert "connection failed" in output
+
+
 def test_bearer_token_is_redacted() -> None:
     record = _capture_log(
         lambda log: log.info(
