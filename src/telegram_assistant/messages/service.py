@@ -21,6 +21,10 @@ they are not naturally pinned to a Planfix task id).
 
 from __future__ import annotations
 
+import os
+import shutil
+from collections.abc import Iterable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
@@ -30,6 +34,14 @@ from telegram_assistant.folders import (
     FolderBackend,
     resolve_folder,
 )
+from telegram_assistant.messages.attachments import (
+    DEFAULT_MAX_BASE64_BYTES,
+    Base64Attachment,
+    decode_base64_attachment,
+    materialize_base64_attachments,
+)
+from telegram_assistant.messages.downloads import Downloader
+from telegram_assistant.messages.sent_registry import SentMessageRegistry
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
     OperationRecord,
@@ -236,6 +248,7 @@ class MessageBackend(Protocol):
         topic_id: int | None = None,
         files: tuple[str, ...] = (),
         schedule_at: datetime | None = None,
+        reply_to_message_id: int | None = None,
     ) -> int | list[int]:
         ...
 
@@ -295,7 +308,15 @@ class SendMessageRequest:
     in declaration order (``files`` then ``file_urls``); supplying more than
     one attachment sends an album. ``schedule_at`` defers delivery to a future
     time. ``text`` doubles as the caption when attachments are present and may
-    be empty for a media-only send.
+    be empty for a media-only send. ``reply_to_message_id`` threads the send as
+    a reply to an existing message; in a forum it takes precedence over the
+    topic root for the Telethon ``reply_to`` (replying to a message inside a
+    topic keeps the reply in that topic).
+
+    ``base64_files`` are small inline attachments supplied as base64 content
+    (``{filename, mime, content_b64}``); each is decoded to a temp file under
+    ``base64_max_bytes`` (default 1 MB) and cleaned up after the send. They are
+    appended to the attachment list after ``files`` and ``file_urls``.
     """
 
     telegram_chat_id: int
@@ -306,16 +327,23 @@ class SendMessageRequest:
     topic_name: str | None = None
     files: tuple[str, ...] = field(default_factory=tuple)
     file_urls: tuple[str, ...] = field(default_factory=tuple)
+    base64_files: tuple[Base64Attachment, ...] = field(default_factory=tuple)
+    base64_max_bytes: int = DEFAULT_MAX_BASE64_BYTES
     schedule_at: datetime | None = None
+    reply_to_message_id: int | None = None
 
     @property
     def attachment_refs(self) -> tuple[str, ...]:
-        """All attachments as one ordered list (``files`` then ``file_urls``)."""
+        """All ref-style attachments in order (``files`` then ``file_urls``).
+
+        Base64 attachments carry content, not a reference, so they are not
+        included here; the send path materialises them to temp files separately.
+        """
         return tuple(self.files) + tuple(self.file_urls)
 
     @property
     def has_attachments(self) -> bool:
-        return bool(self.files or self.file_urls)
+        return bool(self.files or self.file_urls or self.base64_files)
 
     def to_payload(self) -> dict[str, Any]:
         redacted = (
@@ -334,11 +362,18 @@ class SendMessageRequest:
             # Only attachment *references* are persisted, never file contents.
             "files": list(self.files),
             "file_urls": list(self.file_urls),
+            # Base64 attachments: persist filename/mime metadata only, never the
+            # base64 content itself.
+            "base64_files": [
+                {"filename": att.filename, "mime": att.mime}
+                for att in self.base64_files
+            ],
             "schedule_at": (
                 self.schedule_at.isoformat()
                 if self.schedule_at is not None
                 else None
             ),
+            "reply_to_message_id": self.reply_to_message_id,
         }
 
 
@@ -414,6 +449,8 @@ async def send_message(
     store: OperationStore,
     request: SendMessageRequest,
     authorizer: Authorizer | None = None,
+    sent_registry: SentMessageRegistry | None = None,
+    downloader: Downloader | None = None,
 ) -> tuple[SendMessageResult, OperationRecord]:
     """Send a single message (or service command), or replay the saved result.
 
@@ -428,6 +465,21 @@ async def send_message(
     WRITE on the target chat or :class:`AccessDenied` is raised before any
     operation row is created.
 
+    When a ``sent_registry`` is supplied, the id(s) of a freshly-sent message
+    are recorded so the session-limited delete op can later recognise them.
+    Recording is best-effort and only happens for fresh sends, never replays.
+
+    When a ``downloader`` is supplied, each ``file_urls`` entry is downloaded to
+    a local temp file (bounded by size + time) and the local path — not the
+    URL — is handed to the backend; the temp files are removed in a ``finally``
+    after the send. A download failure marks the operation ``failed`` and
+    propagates. Without a ``downloader`` the URLs are passed through to the
+    backend unchanged (backward compatible).
+
+    ``base64_files`` are decoded and validated up front (a bad/oversize payload
+    raises before any operation row is created), then materialised to temp files
+    after the operation begins and cleaned up in the ``finally``.
+
     A send needs either non-empty ``text`` or at least one attachment. Media
     sends pass ``files``/``schedule_at`` through to the backend; a plain text
     send calls the backend exactly as before for backward compatibility.
@@ -439,6 +491,16 @@ async def send_message(
         )
     _validate_attachment_refs(request.files, kind="files")
     _validate_attachment_refs(request.file_urls, kind="file_urls")
+    # Validate base64 attachments before opening the operation so malformed or
+    # oversize input surfaces as a clean error without poisoning the idempotency
+    # key. The bytes are materialised to temp files only after the op begins.
+    for att in request.base64_files:
+        decode_base64_attachment(
+            filename=att.filename,
+            content_b64=att.content_b64,
+            mime=att.mime,
+            max_bytes=request.base64_max_bytes,
+        )
 
     if authorizer is not None:
         await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
@@ -470,34 +532,62 @@ async def send_message(
         )
 
     operation_id = begin.operation.id
-    # Only pass the media/schedule kwargs when set so a plain text send hits
-    # the backend with the exact original signature (backward compatible with
-    # text-only backends that predate attachments).
-    extra: dict[str, Any] = {}
-    if request.attachment_refs:
-        extra["files"] = request.attachment_refs
-    if request.schedule_at is not None:
-        extra["schedule_at"] = request.schedule_at
+    # When a downloader is supplied, ``file_urls`` are fetched to local temp
+    # files first and the local paths replace the URLs in the attachment list;
+    # base64 attachments are decoded into a temp dir. Both are cleaned up in the
+    # ``finally`` once the send is done.
+    downloaded_paths: list[str] = []
+    base64_tmpdir: str | None = None
     try:
-        raw_id = await backend.send_message(
-            chat_id=request.telegram_chat_id,
-            text=request.text,
-            topic_id=request.telegram_topic_id,
-            **extra,
-        )
-        primary_id, all_ids = _normalize_message_ids(raw_id)
-    except FloodWaitError as exc:
-        # FLOOD_WAIT is transient — marking the op `failed` would lock the
-        # idempotency key on a terminal state and the retry would surface
-        # MessageSendFailed forever. Mark needs_review so an operator can
-        # `operations retry` to reopen the slot.
-        store.mark_needs_review(
-            operation_id, f"FLOOD_WAIT during message send: {exc}"
-        )
-        raise MessageSendNeedsReview(str(exc)) from exc
-    except Exception as exc:
-        store.fail_operation(operation_id, str(exc))
-        raise
+        try:
+            if request.file_urls and downloader is not None:
+                for url in request.file_urls:
+                    downloaded_paths.append(await downloader(url))
+                url_refs = tuple(downloaded_paths)
+            else:
+                url_refs = tuple(request.file_urls)
+            base64_tmpdir, base64_paths = materialize_base64_attachments(
+                request.base64_files,
+                max_bytes=request.base64_max_bytes,
+            )
+            attachment_refs = (
+                tuple(request.files) + url_refs + tuple(base64_paths)
+            )
+            # Only pass the media/schedule kwargs when set so a plain text send
+            # hits the backend with the exact original signature (backward
+            # compatible with text-only backends that predate attachments).
+            extra: dict[str, Any] = {}
+            if attachment_refs:
+                extra["files"] = attachment_refs
+            if request.schedule_at is not None:
+                extra["schedule_at"] = request.schedule_at
+            if request.reply_to_message_id is not None:
+                extra["reply_to_message_id"] = request.reply_to_message_id
+            raw_id = await backend.send_message(
+                chat_id=request.telegram_chat_id,
+                text=request.text,
+                topic_id=request.telegram_topic_id,
+                **extra,
+            )
+            primary_id, all_ids = _normalize_message_ids(raw_id)
+        except FloodWaitError as exc:
+            # FLOOD_WAIT is transient — marking the op `failed` would lock the
+            # idempotency key on a terminal state and the retry would surface
+            # MessageSendFailed forever. Mark needs_review so an operator can
+            # `operations retry` to reopen the slot.
+            store.mark_needs_review(
+                operation_id, f"FLOOD_WAIT during message send: {exc}"
+            )
+            raise MessageSendNeedsReview(str(exc)) from exc
+        except Exception as exc:
+            store.fail_operation(operation_id, str(exc))
+            raise
+    finally:
+        for path in downloaded_paths:
+            with suppress(OSError):
+                os.unlink(path)
+        if base64_tmpdir is not None:
+            shutil.rmtree(base64_tmpdir, ignore_errors=True)
 
     result = SendMessageResult(
         telegram_chat_id=request.telegram_chat_id,
@@ -515,6 +605,15 @@ async def send_message(
         ),
     )
     op = store.complete_operation(operation_id, result.to_dict())
+    # Record every id this process just sent (single send or album) so the
+    # session-limited delete op (Tasks 6/7) recognises them. Only fresh sends
+    # are recorded — a replay of a previously-completed op (handled above)
+    # belongs to whatever process originally sent it, not this one.
+    if sent_registry is not None:
+        ids = all_ids if all_ids is not None else (primary_id,)
+        for message_id in ids:
+            if message_id is not None:
+                sent_registry.record(request.telegram_chat_id, message_id)
     return result, op
 
 
@@ -528,21 +627,214 @@ async def get_recent_messages(
     backend: MessageReadBackend,
     chat_id: int,
     limit: int = 5,
+    minutes: int | None = None,
     authorizer: Authorizer | None = None,
+    now: datetime | None = None,
 ) -> list[RecentMessage]:
     """Return up to ``limit`` recent messages for ``chat_id``, newest first.
 
     This is a READ op: when an ``authorizer`` is supplied it must grant READ on
     the target chat or :class:`AccessDenied` is raised before any Telegram call.
     ``limit`` defaults to 5 and must be positive.
+
+    ``minutes`` optionally narrows the result to messages newer than
+    ``now - minutes`` (default ``now`` is the current UTC time). It composes with
+    ``limit``: the backend returns the newest ``limit`` messages and the window
+    then drops any that fall outside it, so the result may be shorter than
+    ``limit``. Messages whose ``date`` the backend could not supply are excluded
+    when a window is active (their age is unknown). ``minutes`` must be positive
+    when given.
     """
     if limit <= 0:
         raise ValueError("get_recent_messages requires a positive limit")
+    if minutes is not None and minutes <= 0:
+        raise ValueError("get_recent_messages requires a positive minutes window")
 
     if authorizer is not None:
         await authorizer.require(chat_id, AccessLevel.READ)
 
-    return await backend.get_recent_messages(chat_id=chat_id, limit=limit)
+    messages = await backend.get_recent_messages(chat_id=chat_id, limit=limit)
+    if minutes is None:
+        return messages
+
+    reference = now if now is not None else datetime.now(UTC)
+    if reference.tzinfo is None:
+        reference = reference.replace(tzinfo=UTC)
+    cutoff = reference - timedelta(minutes=minutes)
+
+    filtered: list[RecentMessage] = []
+    for message in messages:
+        if message.date is None:
+            continue
+        try:
+            stamp = datetime.fromisoformat(message.date)
+        except ValueError:
+            continue
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=UTC)
+        if stamp >= cutoff:
+            filtered.append(message)
+    return filtered
+
+
+# ---------------------------------------------------------------------------
+# Delete (delete op)
+# ---------------------------------------------------------------------------
+
+
+class MessageDeleteForbidden(RuntimeError):
+    """A delete was blocked by the session-limit guard.
+
+    Raised when ``delete_only_session_messages`` is active and one or more
+    requested message ids were not recorded by this process's
+    :class:`SentMessageRegistry`. ``message_ids`` lists the offending ids so a
+    surface can report exactly which deletes were refused. This is distinct from
+    :class:`AccessDenied` (a policy denial): the policy *does* grant ``delete``
+    here, but the session-limit narrows it to messages this process sent.
+    """
+
+    def __init__(self, message_ids: Iterable[int], *, chat_id: int) -> None:
+        self.message_ids = list(message_ids)
+        self.chat_id = chat_id
+        super().__init__(
+            f"delete blocked: messages {self.message_ids} in chat {chat_id} "
+            "were not sent by this server process "
+            "(delete_only_session_messages is enabled)"
+        )
+
+
+class DeleteBackend(Protocol):
+    """Telethon-facing surface needed to delete messages from a chat.
+
+    ``revoke=True`` deletes for everyone (the default); ``revoke=False`` deletes
+    only the technical account's local copy. Returns the number of messages the
+    delete affected.
+    """
+
+    async def delete_messages(
+        self, *, chat_id: int, message_ids: tuple[int, ...], revoke: bool = True
+    ) -> int:
+        ...
+
+
+@dataclass(frozen=True)
+class DeleteMessagesRequest:
+    """Input to :func:`delete_messages`.
+
+    ``telegram_chat_id`` is the resolved numeric chat id and ``message_ids`` the
+    target message ids (at least one, all positive). ``revoke`` defaults to
+    ``True`` (delete for everyone). ``dry_run`` resolves + authorizes (and runs
+    the session-limit check) but does not delete. ``force`` is carried through
+    for surface consistency with the project's ``--force`` convention; message
+    delete has no protected-chat registry today, so it currently has no gating
+    effect. ``chat_name`` is carried through for logging only.
+    """
+
+    telegram_chat_id: int
+    message_ids: tuple[int, ...]
+    revoke: bool = True
+    dry_run: bool = False
+    force: bool = False
+    chat_name: str | None = None
+
+
+@dataclass(frozen=True)
+class DeleteMessagesResult:
+    """Result of a delete operation.
+
+    ``message_ids`` echoes the requested ids; ``deleted`` is how many the
+    backend reported affected (``0`` on a dry run). ``dry_run`` is ``True`` when
+    nothing was actually deleted.
+    """
+
+    telegram_chat_id: int
+    message_ids: list[int]
+    revoke: bool
+    deleted: int
+    dry_run: bool
+    chat_name: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "telegram_chat_id": self.telegram_chat_id,
+            "message_ids": list(self.message_ids),
+            "revoke": self.revoke,
+            "deleted": self.deleted,
+            "dry_run": self.dry_run,
+            "chat_name": self.chat_name,
+        }
+
+
+async def delete_messages(
+    backend: DeleteBackend,
+    *,
+    request: DeleteMessagesRequest,
+    authorizer: Authorizer | None = None,
+    sent_registry: SentMessageRegistry | None = None,
+    only_session_messages: bool = False,
+) -> DeleteMessagesResult:
+    """Delete ``request.message_ids`` from the resolved chat.
+
+    Validation:
+
+    * at least one ``message_id`` is required;
+    * every ``message_id`` must be a positive integer.
+
+    Deleting is a DELETE op: when an ``authorizer`` is supplied it must grant
+    ``DELETE`` on the target chat or :class:`AccessDenied` is raised before any
+    Telegram call.
+
+    When ``only_session_messages`` is true (the safe default driven by
+    ``telegram.access.delete_only_session_messages``) every requested id must
+    have been recorded in ``sent_registry`` by this process; any unrecorded id
+    raises :class:`MessageDeleteForbidden` before the backend is touched. A
+    missing registry under this mode treats every id as unrecorded.
+
+    ``dry_run`` runs the access + session-limit checks but returns without
+    calling the backend (``deleted=0``).
+    """
+    message_ids = tuple(request.message_ids)
+    if not message_ids:
+        raise ValueError("at least one message_id is required")
+    if any(mid <= 0 for mid in message_ids):
+        raise ValueError("every message_id must be a positive integer")
+
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.DELETE)
+
+    if only_session_messages:
+        unknown = [
+            mid
+            for mid in message_ids
+            if sent_registry is None
+            or not sent_registry.contains(request.telegram_chat_id, mid)
+        ]
+        if unknown:
+            raise MessageDeleteForbidden(unknown, chat_id=request.telegram_chat_id)
+
+    if request.dry_run:
+        return DeleteMessagesResult(
+            telegram_chat_id=request.telegram_chat_id,
+            message_ids=list(message_ids),
+            revoke=request.revoke,
+            deleted=0,
+            dry_run=True,
+            chat_name=request.chat_name,
+        )
+
+    deleted = await backend.delete_messages(
+        chat_id=request.telegram_chat_id,
+        message_ids=message_ids,
+        revoke=request.revoke,
+    )
+    return DeleteMessagesResult(
+        telegram_chat_id=request.telegram_chat_id,
+        message_ids=list(message_ids),
+        revoke=request.revoke,
+        deleted=int(deleted),
+        dry_run=False,
+        chat_name=request.chat_name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +948,7 @@ async def mass_send_message(
     store: OperationStore,
     request: MassSendRequest,
     authorizer: Authorizer | None = None,
+    sent_registry: SentMessageRegistry | None = None,
 ) -> MassSendResult:
     """Send ``request.text`` to every chat in ``folder_name`` that has the
     matching ``topic_name``.
@@ -775,6 +1068,7 @@ async def mass_send_message(
                 backend=message_backend,
                 store=store,
                 request=send_req,
+                sent_registry=sent_registry,
             )
         except (MessageSendFailed, MessageSendPending, MessageSendNeedsReview) as exc:
             failed += 1
@@ -833,10 +1127,14 @@ async def mass_send_message(
 
 
 __all__ = [
+    "DeleteBackend",
+    "DeleteMessagesRequest",
+    "DeleteMessagesResult",
     "MassSendItemResult",
     "MassSendRequest",
     "MassSendResult",
     "MessageBackend",
+    "MessageDeleteForbidden",
     "MessageReadBackend",
     "MessageSendFailed",
     "MessageSendNeedsReview",
@@ -845,6 +1143,7 @@ __all__ = [
     "ScheduleError",
     "SendMessageRequest",
     "SendMessageResult",
+    "delete_messages",
     "get_recent_messages",
     "is_service_command",
     "mass_send_message",

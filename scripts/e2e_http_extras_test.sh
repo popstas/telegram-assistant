@@ -1,15 +1,23 @@
 #!/usr/bin/env bash
 # Tertiary end-to-end script: exercises the HTTP endpoints not covered by
 # scripts/e2e_test.sh — single topic create, topic close, members bulk-remove
-# (dry_run), and folders add-chat. Designed to run *after* scripts/e2e_test.sh
-# so "Client chat test 2" already exists in the "Clients" folder.
+# (dry_run), folders add-chat, and the newer message ergonomics: reply_to send,
+# messages recent ?minutes=, base64 inline attachments, file_urls
+# download-to-temp send, and the DELETE message op (session-limited). Designed
+# to run *after* scripts/e2e_test.sh so "Client chat test 2" already exists in
+# the "Clients" folder.
 #
 # Prerequisites:
 #   1. uvicorn is running on the port from data/config.yml (default 8085).
 #   2. scripts/e2e_test.sh ran successfully at least once.
+#   3. The DELETE steps assume the default
+#      telegram.access.delete_only_session_messages: true — they only delete
+#      messages this *same* server process sent moments earlier (recorded in
+#      the in-memory SentMessageRegistry), so they are self-cleaning.
 #
 # Non-destructive: bulk-remove uses dry_run=true; the new HTTP-side topic is
-# closed but not deleted.
+# closed but not deleted. The reply_to/base64/file_urls sends and their delete
+# targets are created and (where applicable) removed within the same run.
 
 set -euo pipefail
 
@@ -147,6 +155,79 @@ if [[ -n "${message_id}" && "${message_id}" != "null" ]]; then
         -d "${fwd_payload}" \
         "${BASE_URL}/telegram/messages/forward" | jq '{from_chat_id, to_chat_id, telegram_message_ids}'
 fi
+
+# --- reply_to / recent ?minutes= / base64 / file_urls / delete -------------
+# All target only the test chat. The delete target is sent by this same server
+# process moments before deletion, so the session-limited delete (default
+# delete_only_session_messages: true) accepts it and the run is self-cleaning.
+
+step "POST /telegram/messages (reply_to) — send a parent then reply to it"
+parent_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "http parent for reply"}')
+parent_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${parent_payload}" \
+    "${BASE_URL}/telegram/messages")
+echo "${parent_resp}" | jq '{telegram_message_id}'
+parent_id=$(echo "${parent_resp}" | jq -r '.telegram_message_id')
+if [[ -n "${parent_id}" && "${parent_id}" != "null" ]]; then
+    reply_payload=$(jq -nc --arg cid "${chat_id}" --argjson pid "${parent_id}" \
+        '{telegram_chat_id: ($cid|tonumber), text: "http reply", reply_to_message_id: $pid}')
+    curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+        -d "${reply_payload}" \
+        "${BASE_URL}/telegram/messages" | jq '{telegram_message_id, scheduled}'
+fi
+
+step "GET /telegram/messages/recent?minutes=60 (windowed read, limit 3)"
+curl -sS "${auth_header[@]}" \
+    "${BASE_URL}/telegram/messages/recent?chat_id=${chat_id}&limit=3&minutes=60" \
+    | jq '{telegram_chat_id, minutes, limit, count}'
+
+step "POST /telegram/messages (base64 inline attachment)"
+b64=$(printf 'e2e base64 attachment\n' | base64 | tr -d '\n')
+b64_payload=$(jq -nc --arg cid "${chat_id}" --arg b64 "${b64}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "http base64 caption",
+      base64_files: [{filename: "e2e-base64.txt", mime: "text/plain", content_b64: $b64}]}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${b64_payload}" \
+    "${BASE_URL}/telegram/messages" | jq '{telegram_message_id, scheduled}'
+
+step "POST /telegram/messages (file_urls download-to-temp) — remote URL attachment"
+# Exercises the reliable file_urls path: the server downloads the http(s) URL
+# to a temp file (size/time bounded), sends the local file, then cleans up.
+fileurl_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "http file_urls download-to-temp",
+      file_urls: ["https://www.python.org/static/img/python-logo.png"]}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${fileurl_payload}" \
+    "${BASE_URL}/telegram/messages" | jq '{telegram_message_id, scheduled}'
+
+step "POST /telegram/messages/delete — delete a message this process just sent"
+# Send a throwaway message, then delete it (revoke=true, delete for everyone).
+# Default delete_only_session_messages: true accepts it because this server
+# process recorded the id in the SentMessageRegistry on send.
+del_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "http delete target (self-cleaning)"}')
+del_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${del_payload}" \
+    "${BASE_URL}/telegram/messages")
+echo "${del_resp}" | jq '{telegram_message_id}'
+del_id=$(echo "${del_resp}" | jq -r '.telegram_message_id')
+if [[ -n "${del_id}" && "${del_id}" != "null" ]]; then
+    delete_payload=$(jq -nc --arg cid "${chat_id}" --argjson mid "${del_id}" \
+        '{telegram_chat_id: ($cid|tonumber), message_ids: [$mid], revoke: true}')
+    curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+        -d "${delete_payload}" \
+        "${BASE_URL}/telegram/messages/delete" | jq '{deleted, message_ids, dry_run}'
+fi
+
+step "POST /telegram/messages/delete (dry-run) — authorize without deleting"
+dry_delete_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), message_ids: [1], revoke: true, dry_run: true}')
+# A fresh id not in the registry is rejected by the session-limit check even in
+# dry-run mode; tolerate the 4xx and just show the response either way.
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${dry_delete_payload}" \
+    "${BASE_URL}/telegram/messages/delete" | jq . 2>/dev/null || true
 
 step "POST /telegram/notifications/mute then /unmute (round-trip for chat ${chat_id})"
 mute_payload=$(jq -nc --arg cid "${chat_id}" \

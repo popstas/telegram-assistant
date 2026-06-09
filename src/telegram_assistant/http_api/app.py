@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
@@ -11,7 +12,13 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from telegram_assistant import __version__
-from telegram_assistant.config import AppConfig, load_config
+from telegram_assistant.config import (
+    AppConfig,
+    ConfigWatcher,
+    load_config,
+    reload_config_into_state,
+    resolve_config_path,
+)
 from telegram_assistant.entities import EntityResolver
 from telegram_assistant.folders import FolderBackend
 from telegram_assistant.groups import GroupBackend
@@ -24,6 +31,7 @@ from telegram_assistant.http_api.mcp import (
     OAuthAuthorizationServer,
     build_fastmcp_server,
     build_oauth_router,
+    configure_mcp_tools,
 )
 from telegram_assistant.http_api.members import build_router as build_members_router
 from telegram_assistant.http_api.messages import build_router as build_messages_router
@@ -33,10 +41,12 @@ from telegram_assistant.http_api.notifications import (
 from telegram_assistant.http_api.topics import build_router as build_topics_router
 from telegram_assistant.members import MemberAddBackend, MemberRemoveBackend
 from telegram_assistant.messages import (
+    DeleteBackend,
     ForwardBackend,
     MessageBackend,
     MessageReadBackend,
     ReactionBackend,
+    SentMessageRegistry,
 )
 from telegram_assistant.notifications import NotificationBackend
 from telegram_assistant.observability.logging import configure_logging
@@ -56,6 +66,7 @@ MessageBackendFactory = Callable[[Request], MessageBackend | None]
 MessageReadBackendFactory = Callable[[Request], MessageReadBackend | None]
 ReactionBackendFactory = Callable[[Request], ReactionBackend | None]
 ForwardBackendFactory = Callable[[Request], ForwardBackend | None]
+DeleteBackendFactory = Callable[[Request], DeleteBackend | None]
 NotificationBackendFactory = Callable[[Request], NotificationBackend | None]
 ResolverFactory = Callable[[Request], EntityResolver | None]
 
@@ -293,6 +304,30 @@ def _default_forward_backend_factory(
     return _factory
 
 
+def _default_delete_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> DeleteBackendFactory:
+    """Build a Telethon-backed message-delete backend factory.
+
+    Mirrors :func:`_default_forward_backend_factory`: returns ``None`` until a
+    Telethon client is available so the delete endpoint can return 503.
+    """
+
+    def _factory(_request: Request) -> DeleteBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonDeleteBackend,
+        )
+
+        return TelethonDeleteBackend(client)
+
+    return _factory
+
+
 def _default_notification_backend_factory(
     session_manager: TelethonSessionManager | None,
 ) -> NotificationBackendFactory:
@@ -354,6 +389,7 @@ def create_app(
     message_read_backend_factory: MessageReadBackendFactory | None = None,
     reaction_backend_factory: ReactionBackendFactory | None = None,
     forward_backend_factory: ForwardBackendFactory | None = None,
+    delete_backend_factory: DeleteBackendFactory | None = None,
     notification_backend_factory: NotificationBackendFactory | None = None,
     resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
@@ -372,6 +408,10 @@ def create_app(
     :func:`default_database_path` so HTTP requests can replay completed
     operations from the same SQLite file the worker writes to.
     """
+    # Only production (`uvicorn ... --factory`) leaves config unset; that is the
+    # path where live config hot-reload makes sense. Tests inject an AppConfig
+    # directly and should not have a background observer swapping it out.
+    config_was_loaded_from_disk = config is None
     if config is None:
         config = load_config()
 
@@ -480,6 +520,55 @@ def create_app(
 
         lifespan = _combined_lifespan
 
+    if config_was_loaded_from_disk:
+        inner_lifespan = lifespan
+
+        @asynccontextmanager
+        async def _with_config_watcher(app: FastAPI) -> AsyncIterator[None]:
+            # Live config hot-reload: watch the resolved config file and swap
+            # `app.state.config` (plus config-derived state) on a debounced,
+            # validation-gated reload. A bad edit keeps the last-good config.
+            config_path = resolve_config_path()
+            watcher: ConfigWatcher | None = None
+            if config_path is not None:
+
+                def _on_swap(new_config: AppConfig) -> None:
+                    # Rebuild config-derived state that is constructed once
+                    # rather than per-request. The Authorizer reads
+                    # `app.state.config` lazily, so it picks up the swap
+                    # automatically; the MCP tool surface is registered once, so
+                    # re-apply `mcp.disabled_tools` explicitly here.
+                    app.state.plugin_registry = build_registry(new_config)
+                    if mcp_fastmcp_server is not None and new_config.mcp is not None:
+                        configure_mcp_tools(
+                            mcp_fastmcp_server,
+                            _mcp_app_state,
+                            new_config.mcp.disabled_tools,
+                        )
+
+                def _on_reload() -> None:
+                    reload_config_into_state(
+                        app.state,
+                        config_path,
+                        lock=app.state.config_lock,
+                        on_swap=_on_swap,
+                    )
+
+                watcher = ConfigWatcher(config_path, _on_reload)
+                watcher.start()
+                app.state.config_watcher = watcher
+            try:
+                async with AsyncExitStack() as stack:
+                    if inner_lifespan is not None:
+                        await stack.enter_async_context(inner_lifespan(app))
+                    yield
+            finally:
+                if watcher is not None:
+                    watcher.stop()
+                    app.state.config_watcher = None
+
+        lifespan = _with_config_watcher
+
     app = FastAPI(
         title="telegram-assistant",
         version=__version__,
@@ -495,7 +584,17 @@ def create_app(
         )
     mcp_app_ref["app"] = app
     app.state.config = config
+    # Guards atomic swaps of `app.state.config` performed by the hot-reload
+    # watcher (Task 1). Readers that snapshot config under this lock see a
+    # consistent object; routers reading `app.state.config` directly get either
+    # the old or the new config, never a partially-applied one.
+    app.state.config_lock = threading.Lock()
+    app.state.config_watcher = None
     app.state.plugin_registry = build_registry(config)
+    # One registry per server process, reachable from HTTP/MCP via app.state.
+    # Tracks the ids this process has sent so the session-limited delete op
+    # (Tasks 6/7) can recognise them; cleared on restart.
+    app.state.sent_message_registry = SentMessageRegistry()
     app.state.session_manager = session_manager
     app.state.database_path = database_path
     app.state.folder_backend_factory = (
@@ -543,6 +642,11 @@ def create_app(
         forward_backend_factory
         if forward_backend_factory is not None
         else _default_forward_backend_factory(session_manager)
+    )
+    app.state.delete_backend_factory = (
+        delete_backend_factory
+        if delete_backend_factory is not None
+        else _default_delete_backend_factory(session_manager)
     )
     app.state.notification_backend_factory = (
         notification_backend_factory

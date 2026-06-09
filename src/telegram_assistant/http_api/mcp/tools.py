@@ -45,7 +45,9 @@ from telegram_assistant.groups import (
 from telegram_assistant.health import collect_health
 from telegram_assistant.http_api.access import (
     build_authorizer,
+    delete_only_session_messages,
     resolve_entity_chat_id,
+    sent_message_registry,
     translate_access_error,
     translate_entity_error,
 )
@@ -77,9 +79,11 @@ from telegram_assistant.http_api.members import (
     _worker_queue_for_request as _member_worker_queue_for_request,
 )
 from telegram_assistant.http_api.messages import (
+    DeleteBody,
     ForwardBody,
     MessageSendBody,
     ReactionBody,
+    _delete_backend_or_503,
     _forward_backend_or_503,
     _message_backend_or_503,
     _reaction_backend_or_503,
@@ -146,16 +150,21 @@ from telegram_assistant.members import (
 )
 from telegram_assistant.messages import (
     AttachmentError,
+    Base64Attachment,
+    DeleteMessagesRequest,
     ForwardMessagesRequest,
     MassSendRequest,
+    MessageDeleteForbidden,
     MessageSendFailed,
     MessageSendNeedsReview,
     MessageSendPending,
     ScheduleError,
     SendMessageRequest,
     SendReactionRequest,
+    delete_messages,
     forward_messages,
     get_recent_messages,
+    make_url_downloader,
     mass_send_message,
     resolve_schedule_at,
     send_message,
@@ -435,6 +444,13 @@ def _raise_from_exception(exc: Exception) -> NoReturn:
         translated = translate_access_error(exc)
         assert translated is not None
         _raise_from_http(translated)
+    if isinstance(exc, MessageDeleteForbidden):
+        _raise_tool_error(
+            code="delete_forbidden",
+            status_code=status.HTTP_403_FORBIDDEN,
+            message=str(exc),
+            detail={"message_ids": exc.message_ids},
+        )
     if isinstance(exc, AttachmentError | ScheduleError | ValueError):
         _raise_tool_error(
             code="invalid_request",
@@ -590,6 +606,7 @@ async def _resolve_message_send(
                 operation_id=body.operation_id,
             ),
             authorizer=authorizer,
+            sent_registry=sent_message_registry(request),  # type: ignore[arg-type]
         )
         payload = result.to_dict()
         payload["mode"] = "mass"
@@ -648,6 +665,15 @@ async def _resolve_message_send(
     file_urls = tuple(body.file_urls or ())
     validate_file_urls(file_urls)
 
+    base64_files = tuple(
+        Base64Attachment(
+            filename=att.filename,
+            content_b64=att.content_b64,
+            mime=att.mime,
+        )
+        for att in (body.base64_files or ())
+    )
+
     result, op = await send_message(
         backend=backend,
         store=store,
@@ -660,9 +686,13 @@ async def _resolve_message_send(
             topic_name=topic_name_for_log,
             files=files,
             file_urls=file_urls,
+            base64_files=base64_files,
             schedule_at=resolved_schedule_at,
+            reply_to_message_id=body.reply_to_message_id,
         ),
         authorizer=authorizer,
+        sent_registry=sent_message_registry(request),  # type: ignore[arg-type]
+        downloader=make_url_downloader() if file_urls else None,
     )
     payload = result.to_dict()
     payload["operation_id"] = op.id
@@ -733,6 +763,45 @@ async def _resolve_forward(request: _McpRequest, body: ForwardBody) -> dict[str,
     return result.to_dict()
 
 
+async def _resolve_delete(request: _McpRequest, body: DeleteBody) -> dict[str, Any]:
+    backend = _delete_backend_or_503(request)  # type: ignore[arg-type]
+    if body.entity is not None:
+        telegram_chat_id = await resolve_entity_chat_id(request, body.entity)  # type: ignore[arg-type]
+        chat_name_for_log: str | None = None
+    elif body.telegram_chat_id is not None:
+        telegram_chat_id = body.telegram_chat_id
+        chat_name_for_log = None
+    else:
+        folder_backend = _message_folder_backend_or_503(request)  # type: ignore[arg-type]
+        chat = await resolve_chat_in_folder(
+            folder_backend,
+            folder_name=body.folder_name or "",
+            chat_name=body.chat_name or "",
+            folder_id=body.folder_id,
+        )
+        telegram_chat_id = chat.chat_id
+        chat_name_for_log = chat.title
+
+    authorizer = build_authorizer(
+        request, folder_backend=_message_folder_backend_optional(request)  # type: ignore[arg-type]
+    )
+    result = await delete_messages(
+        backend,
+        request=DeleteMessagesRequest(
+            telegram_chat_id=telegram_chat_id,
+            message_ids=tuple(body.message_ids),
+            revoke=body.revoke,
+            dry_run=body.dry_run,
+            force=body.force,
+            chat_name=chat_name_for_log,
+        ),
+        authorizer=authorizer,
+        sent_registry=sent_message_registry(request),  # type: ignore[arg-type]
+        only_session_messages=delete_only_session_messages(request),  # type: ignore[arg-type]
+    )
+    return result.to_dict()
+
+
 def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) -> None:
     """Register all telegram_-prefixed tools on ``server``."""
 
@@ -765,8 +834,13 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         chat_id: int | None = None,
         entity: str | None = None,
         limit: int = 5,
+        minutes: int | None = None,
     ) -> dict[str, Any]:
-        """Return recent messages from a chat."""
+        """Return recent messages from a chat.
+
+        ``minutes`` optionally restricts the result to messages newer than
+        ``now - minutes`` (composed with ``limit``).
+        """
         request = _request(provider)
         try:
             if (chat_id is None) == (entity is None):
@@ -785,11 +859,13 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 backend=backend,
                 chat_id=resolved_chat_id,  # type: ignore[arg-type]
                 limit=limit,
+                minutes=minutes,
                 authorizer=authorizer,
             )
             return {
                 "telegram_chat_id": resolved_chat_id,
                 "limit": limit,
+                "minutes": minutes,
                 "count": len(messages),
                 "messages": [message.to_dict() for message in messages],
             }
@@ -804,35 +880,38 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
     async def telegram_messages_send(
         text: str = "",
         telegram_chat_id: int | None = None,
-        chat_name: str | None = None,
         entity: str | int | None = None,
-        folder_name: str | None = None,
-        folder_id: int | None = None,
         telegram_topic_id: int | None = None,
         topic_name: str | None = None,
         operation_id: str | None = None,
-        files: list[str] | None = None,
         file_urls: list[str] | None = None,
+        base64_files: list[dict[str, Any]] | None = None,
         schedule_at: datetime | None = None,
         delay_seconds: int | None = None,
+        reply_to_message_id: int | None = None,
     ) -> dict[str, Any]:
-        """Send a message or run the folder/topic mass-send mode."""
+        """Send a message to a chat (targeted by ``entity`` or ``telegram_chat_id``).
+
+        ``base64_files`` are inline attachments ``[{filename, mime, content_b64}]``
+        decoded to a temp file and sent (max 1 MB each); ``file_urls`` carry
+        http(s) URLs downloaded server-side before the send. Chat targeting goes
+        through the entity resolver; folder/chat-name and server-local ``files``
+        are not part of the MCP surface.
+        """
         request = _request(provider)
         try:
             body = MessageSendBody(
                 text=text,
                 telegram_chat_id=telegram_chat_id,
-                chat_name=chat_name,
                 entity=entity,
-                folder_name=folder_name,
-                folder_id=folder_id,
                 telegram_topic_id=telegram_topic_id,
                 topic_name=topic_name,
                 operation_id=operation_id,
-                files=files,
                 file_urls=file_urls,
+                base64_files=base64_files,
                 schedule_at=schedule_at,
                 delay_seconds=delay_seconds,
+                reply_to_message_id=reply_to_message_id,
             )
             return await _resolve_message_send(request, body)
         except Exception as exc:
@@ -893,6 +972,44 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 folder_id=folder_id,
             )
             return await _resolve_reaction(request, body)
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_messages_delete",
+        annotations=WRITE_DESTRUCTIVE,
+        structured_output=True,
+    )
+    async def telegram_messages_delete(
+        message_ids: list[int],
+        telegram_chat_id: int | None = None,
+        entity: str | int | None = None,
+        chat_name: str | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
+        revoke: bool = True,
+        dry_run: bool = False,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Delete messages from a chat (DELETE-gated).
+
+        Honors ``telegram.access.delete_only_session_messages`` (default true):
+        when active, only messages this server process sent can be deleted.
+        """
+        request = _request(provider)
+        try:
+            body = DeleteBody(
+                message_ids=message_ids,
+                telegram_chat_id=telegram_chat_id,
+                entity=entity,
+                chat_name=chat_name,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                revoke=revoke,
+                dry_run=dry_run,
+                force=force,
+            )
+            return await _resolve_delete(request, body)
         except Exception as exc:
             _raise_from_exception(exc)
 

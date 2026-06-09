@@ -5,6 +5,23 @@
 
 ### Features
 
+- Verify acceptance criteria for access/delete/MCP batch
+- Docs + inventory sync for access/delete/MCP batch
+- Extend live e2e scripts with delete/reply_to/recent-minutes/base64/file_urls steps
+- Conditional health check + prompt for message in skill flow
+- Tests for quieter /health Telethon logging
+- Slim MCP send args + mcp.disabled_tools filtering
+- Base64 inline file attachments for message send
+- Reliable file_urls upload via download-to-temp
+- Messages recent --minutes time-window filter
+- Reply_to on message send across CLI/HTTP/MCP
+- Session-limit delete flag + delete surfaces (CLI/HTTP/MCP)
+- Delete-message domain operation gated on delete permission
+- SentMessageRegistry tracking process-sent message ids
+- Access management CLI commands (list/check/add)
+- Backward-compatible multi-chat/multi-permission access rules
+- Independent-capability authorizer + delete permission
+- Config hot-reload via watchdog
 - Verify mcp acceptance criteria
 - Document optional mcp server
 - Add mcp oauth integration tests
@@ -15,6 +32,11 @@
 
 ### Bug Fixes
 
+- reload: Make Docker hot-reload work and stop reload cycle
+- health: Silence per-probe Telethon app logs on /health
+- Record mass-send message ids in SentMessageRegistry
+- Preserve real base64 attachment filename in Telegram
+- review: Correct access config template + harden base64/logging tests
 - health: Skip default folder probe
 - health: Preserve Telegram auth status
 - health: Allow slower Telegram probes
@@ -25,11 +47,15 @@
 
 ### Documentation
 
+- plans: Revise feature-batch plan from revdiff review
+- plans: Add access/delete/MCP feature-batch plan
+- todo: Add MCP follow-up tasks
 - todo: Fix completed MCP plan link
 - Move plans
 
 ### Task
 
+- Drop completed items, add /health log-reduction task
 - Refresh docker TODO queue
 - Expand MCP server task with FastMCP SDK + full OAuth AS decisions
 - Clear completed items from TODO (shipped in v0.4.0)

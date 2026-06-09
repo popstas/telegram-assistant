@@ -20,6 +20,47 @@ from telegram_assistant.http_api.mcp.tools import (
     register_telegram_tools,
 )
 
+
+def _tool_is_disabled(name: str, disabled_tools: list[str]) -> bool:
+    """Return True when ``name`` matches a disabled entry (exact or prefix).
+
+    An entry ending in ``*`` matches by prefix (``telegram_groups_*`` disables
+    every ``telegram_groups_…`` tool); otherwise it must equal the tool name.
+    """
+
+    for entry in disabled_tools:
+        if entry.endswith("*"):
+            if name.startswith(entry[:-1]):
+                return True
+        elif name == entry:
+            return True
+    return False
+
+
+def configure_mcp_tools(
+    server: FastMCP[Any],
+    app_state_provider: AppStateProvider,
+    disabled_tools: list[str],
+) -> None:
+    """Register the full telegram tool catalog, then prune disabled tools.
+
+    Re-registering is a no-op for tools already present and re-adds any
+    previously removed tool whose prefix/name is no longer disabled, so this is
+    safe to call again on config hot-reload to re-apply ``mcp.disabled_tools``.
+    """
+
+    manager = server._tool_manager  # noqa: SLF001
+    previous_warn = manager.warn_on_duplicate_tools
+    manager.warn_on_duplicate_tools = False
+    try:
+        register_telegram_tools(server, app_state_provider)
+    finally:
+        manager.warn_on_duplicate_tools = previous_warn
+    for tool in list(manager.list_tools()):
+        if _tool_is_disabled(tool.name, disabled_tools):
+            server.remove_tool(tool.name)
+
+
 _LOCAL_BIND_HOSTS = {"127.0.0.1", "localhost", "::1"}
 _LOCAL_ALLOWED_HOSTS = ["127.0.0.1:*", "localhost:*", "[::1]:*"]
 _LOCAL_ALLOWED_ORIGINS = [
@@ -112,5 +153,5 @@ def build_fastmcp_server(
         transport_security=_mcp_transport_security(config),
     )
     if app_state_provider is not None:
-        register_telegram_tools(server, app_state_provider)
+        configure_mcp_tools(server, app_state_provider, config.mcp.disabled_tools)
     return server

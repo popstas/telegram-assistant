@@ -19,8 +19,14 @@
 #   - POST /telegram/topics/bulk-create (Topic 1/2/3 in the new group)
 #   - POST /telegram/groups/{chat_id}/members/bulk-add (adds @popstas)
 #   - POST /telegram/messages          (mass send to folder + topic)
+#   - POST /telegram/messages          (reply_to: parent + threaded reply)
+#   - GET  /telegram/messages/recent   (?minutes= windowed read)
+#   - POST /telegram/messages/delete   (delete a message this process just
+#                                       sent — session-limited, self-cleaning)
 #
-# Re-runnable: every mutating call is idempotent, so re-running is safe.
+# Re-runnable: every mutating call is idempotent, so re-running is safe. The
+# delete step relies on the default delete_only_session_messages: true and only
+# removes a throwaway message this same server process sent moments earlier.
 
 set -euo pipefail
 
@@ -97,6 +103,43 @@ mass_payload=$(jq -nc --arg folder "${FOLDER}" \
 curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
     -d "${mass_payload}" \
     "${BASE_URL}/telegram/messages" | jq .
+
+step "reply_to: send a parent into chat ${chat_id}, then reply to it"
+parent_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "e2e parent for reply"}')
+parent_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${parent_payload}" \
+    "${BASE_URL}/telegram/messages")
+echo "${parent_resp}" | jq '{telegram_message_id}'
+parent_id=$(echo "${parent_resp}" | jq -r '.telegram_message_id // empty')
+if [[ -n "${parent_id}" ]]; then
+    reply_payload=$(jq -nc --arg cid "${chat_id}" --argjson pid "${parent_id}" \
+        '{telegram_chat_id: ($cid|tonumber), text: "e2e reply", reply_to_message_id: $pid}')
+    curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+        -d "${reply_payload}" \
+        "${BASE_URL}/telegram/messages" | jq '{telegram_message_id, scheduled}'
+fi
+
+step "messages recent ?minutes=60 for chat ${chat_id} (limit 3)"
+curl -sS "${auth_header[@]}" \
+    "${BASE_URL}/telegram/messages/recent?chat_id=${chat_id}&limit=3&minutes=60" \
+    | jq '{telegram_chat_id, minutes, limit, count}'
+
+step "delete: send a throwaway message into chat ${chat_id}, then delete it"
+del_payload=$(jq -nc --arg cid "${chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "e2e delete target (self-cleaning)"}')
+del_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${del_payload}" \
+    "${BASE_URL}/telegram/messages")
+echo "${del_resp}" | jq '{telegram_message_id}'
+del_id=$(echo "${del_resp}" | jq -r '.telegram_message_id // empty')
+if [[ -n "${del_id}" ]]; then
+    delete_payload=$(jq -nc --arg cid "${chat_id}" --argjson mid "${del_id}" \
+        '{telegram_chat_id: ($cid|tonumber), message_ids: [$mid], revoke: true}')
+    curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+        -d "${delete_payload}" \
+        "${BASE_URL}/telegram/messages/delete" | jq '{deleted, message_ids, dry_run}'
+fi
 
 echo
 echo "e2e flow completed — review the responses above and the chats on Telegram"

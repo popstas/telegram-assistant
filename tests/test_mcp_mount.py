@@ -31,7 +31,7 @@ class FakeGoogleOidcProvider:
 class FakeSessionManager:
     _client = None
 
-    async def state(self) -> SessionState:
+    async def state(self, *, quiet: bool = False) -> SessionState:
         return SessionState(
             authorized=False,
             account_label="telegram-assistant-main",
@@ -47,8 +47,13 @@ def _enabled_mcp_yaml(
     required_scopes: tuple[str, ...] = ("mcp", "telegram:read"),
     access_token_ttl_seconds: int = 600,
     admin: str = "",
+    disabled_tools: tuple[str, ...] = (),
 ) -> str:
     scopes_yaml = "\n".join(f'    - "{scope}"' for scope in required_scopes)
+    disabled_yaml = ""
+    if disabled_tools:
+        entries = "\n".join(f'    - "{name}"' for name in disabled_tools)
+        disabled_yaml = f"  disabled_tools:\n{entries}\n"
     return (
         minimal_config_yaml
         + f"""
@@ -69,7 +74,7 @@ mcp:
   access_token_ttl_seconds: {access_token_ttl_seconds}
   refresh_token_ttl_seconds: 1200
   signing_secret: "local-token-signing-secret-with-32-chars"
-"""
+{disabled_yaml}"""
     )
 
 
@@ -187,6 +192,26 @@ def _initialize_payload(request_id: int = 1) -> dict[str, object]:
     }
 
 
+def _list_tools(client: TestClient, token: str) -> dict[str, dict[str, object]]:
+    client.post(
+        "/mcp",
+        json=_initialize_payload(),
+        headers=_mcp_headers(token),
+    )
+    client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+        headers=_mcp_headers(token),
+    )
+    tools = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        headers=_mcp_headers(token),
+    )
+    assert tools.status_code == 200
+    return {tool["name"]: tool for tool in tools.json()["result"]["tools"]}
+
+
 EXPECTED_TOOL_NAMES = {
     "telegram_folders_add_chat",
     "telegram_folders_inspect",
@@ -195,6 +220,7 @@ EXPECTED_TOOL_NAMES = {
     "telegram_health",
     "telegram_members_add",
     "telegram_members_remove",
+    "telegram_messages_delete",
     "telegram_messages_forward",
     "telegram_messages_react",
     "telegram_messages_recent",
@@ -391,3 +417,47 @@ def test_mcp_enabled_keeps_health_open_and_telegram_bearer_auth_unchanged(
         )
         assert accepted.status_code == 200
         assert accepted.json() == {"status": "authenticated"}
+
+
+def test_messages_send_tool_drops_legacy_targeting_args(
+    minimal_config_yaml: str,
+) -> None:
+    with _client(minimal_config_yaml) as client:
+        token = _mint_token(client)
+        listed = _list_tools(client, token)
+
+    send_schema = listed["telegram_messages_send"]["inputSchema"]
+    properties = set(send_schema["properties"])
+    for removed in ("chat_name", "folder_name", "folder_id", "files"):
+        assert removed not in properties
+    for kept in ("text", "telegram_chat_id", "entity", "file_urls", "base64_files",
+                 "reply_to_message_id"):
+        assert kept in properties
+
+
+def test_disabled_tools_prune_prefixes_and_exact_names(
+    minimal_config_yaml: str,
+) -> None:
+    config_yaml = _enabled_mcp_yaml(
+        minimal_config_yaml,
+        disabled_tools=("telegram_groups_*", "telegram_topics_*", "telegram_health"),
+    )
+    with _client_for_config(config_yaml) as client:
+        token = _mint_token(client)
+        listed = _list_tools(client, token)
+
+    names = set(listed)
+    assert "telegram_health" not in names
+    assert not any(name.startswith("telegram_groups_") for name in names)
+    assert not any(name.startswith("telegram_topics_") for name in names)
+    # Unrelated tools remain available.
+    assert "telegram_messages_send" in names
+    assert "telegram_messages_delete" in names
+
+
+def test_empty_disabled_tools_exposes_full_set(minimal_config_yaml: str) -> None:
+    with _client(minimal_config_yaml) as client:
+        token = _mint_token(client)
+        listed = _list_tools(client, token)
+
+    assert set(listed) == EXPECTED_TOOL_NAMES

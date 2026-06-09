@@ -9,7 +9,10 @@ from telegram_assistant.http_api.mcp.oauth import (
     TokenValidationError,
     build_oauth_router,
 )
-from telegram_assistant.http_api.mcp.server import build_fastmcp_server
+from telegram_assistant.http_api.mcp.server import (
+    build_fastmcp_server,
+    configure_mcp_tools,
+)
 
 __all__ = [
     "GoogleIdentity",
@@ -19,5 +22,6 @@ __all__ = [
     "TokenClaims",
     "TokenValidationError",
     "build_fastmcp_server",
+    "configure_mcp_tools",
     "build_oauth_router",
 ]

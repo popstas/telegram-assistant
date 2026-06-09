@@ -4,6 +4,14 @@
 # for the CLI subcommands defined in the plan:
 #   * health, folders inspect, topics create + close, messages send,
 #     members bulk-remove (--dry-run), operations status.
+#   * newer message ergonomics: messages recent --minutes, messages send
+#     --reply-to, and messages delete (session-limit ON blocks an unrecorded
+#     id under the default delete_only_session_messages: true; a temp config
+#     opting out + --no-revoke lets a delete through). The delete steps are
+#     self-cleaning — each run sends fresh throwaway messages.
+#   * access allowlist now uses the independent-capability model: a folder rule
+#     must grant permissions: [read, write] for a read to be allowed (write no
+#     longer implies read).
 #
 # Run order:
 #   1. scripts/e2e_test.sh (creates "Client chat test 2" + Topic 1/2/3
@@ -127,6 +135,70 @@ step "CLI: messages recent --entity '${chat_id}' (numeric resolver)"
 telegram-assistant messages recent --entity "${chat_id}" --limit 1 \
     | jq '{telegram_chat_id, count}'
 
+step "CLI: messages recent --chat-id ${chat_id} --minutes 60 (windowed read)"
+telegram-assistant messages recent \
+    --chat-id "${chat_id}" --minutes 60 --limit 3 \
+    | jq '{telegram_chat_id, minutes, count}'
+
+# --- reply_to send ---------------------------------------------------------
+
+step "CLI: messages send (reply_to) — send a parent then reply to it"
+parent_json=$(telegram-assistant messages send \
+    --chat-id "${chat_id}" \
+    --text "cli parent for reply")
+echo "${parent_json}" | jq '{telegram_message_id}'
+parent_id=$(echo "${parent_json}" | jq -r '.telegram_message_id')
+if [[ -n "${parent_id}" && "${parent_id}" != "null" ]]; then
+    telegram-assistant messages send \
+        --chat-id "${chat_id}" \
+        --text "cli reply" \
+        --reply-to "${parent_id}" | jq '{telegram_message_id, scheduled}'
+fi
+
+# --- delete message (session-limited on/off) -------------------------------
+# Each CLI invocation is its own process with an empty SentMessageRegistry, so
+# with the default delete_only_session_messages: true an arbitrary id is
+# rejected (demonstrates the "on" guard). Opting out via a temp config
+# (delete_only_session_messages: false) plus --no-revoke (delete only this
+# account's own copy) lets a delete go through. Self-cleaning: a fresh throwaway
+# message is sent each run and removed.
+
+step "CLI: messages delete (session-limit ON) — fresh process must be blocked"
+blocked_json=$(telegram-assistant messages send \
+    --chat-id "${chat_id}" \
+    --text "cli delete target (should be blocked under session limit)")
+blocked_id=$(echo "${blocked_json}" | jq -r '.telegram_message_id')
+if telegram-assistant messages delete \
+        --chat-id "${chat_id}" \
+        --message-id "${blocked_id}" --no-revoke >/dev/null 2>&1; then
+    echo "expected session-limit to block delete of an unrecorded id, but it succeeded" >&2
+    exit 1
+fi
+echo "ok: delete blocked under delete_only_session_messages: true (id ${blocked_id})"
+
+step "CLI: messages delete (session-limit OFF) — temp config opts out, --no-revoke"
+del_config=$(mktemp --suffix=.yml)
+trap 'rm -f "${remove_tmp:-}" "${acl_config:-}" "${del_config:-}"' EXIT
+: "${SOURCE_CONFIG:=data/config.yml}"
+python3 - "${del_config}" "${SOURCE_CONFIG}" <<'PY'
+import sys
+from pathlib import Path
+
+import yaml
+
+out, src = sys.argv[1], sys.argv[2]
+data = yaml.safe_load(Path(src).read_text(encoding="utf-8"))
+access = data["telegram"].setdefault("access", {})
+access["delete_only_session_messages"] = False
+Path(out).write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+print(f"wrote delete-opt-out config to {out}")
+PY
+telegram-assistant messages delete \
+    --chat-id "${chat_id}" \
+    --message-id "${blocked_id}" \
+    --no-revoke \
+    --config "${del_config}" | jq '{deleted, message_ids, dry_run}'
+
 # --- media / scheduled send, reactions, forward, folder round-trip ---------
 # All of these target only the test chat created above; they are
 # conservative and re-runnable. The scheduled send lands in the test chat
@@ -194,8 +266,11 @@ telegram-assistant folders add-chat \
 
 step "CLI: access allowlist — derive a folder-scoped policy"
 acl_config=$(mktemp --suffix=.yml)
-trap 'rm -f "${remove_tmp}" "${acl_config}"' EXIT
+trap 'rm -f "${remove_tmp:-}" "${acl_config:-}" "${del_config:-}"' EXIT
 : "${SOURCE_CONFIG:=data/config.yml}"
+# Permissions are now INDEPENDENT (write no longer implies read), so the
+# folder rule must list both read and write for the permitted-read step below
+# to be granted. Uses the multi-permission list form added in this batch.
 python3 - "${FOLDER}" "${acl_config}" "${SOURCE_CONFIG}" <<'PY'
 import sys
 from pathlib import Path
@@ -205,7 +280,7 @@ import yaml
 folder, out, src = sys.argv[1], sys.argv[2], sys.argv[3]
 data = yaml.safe_load(Path(src).read_text(encoding="utf-8"))
 data["telegram"]["access"] = {
-    "rules": [{"folder": folder, "permission": "write"}]
+    "rules": [{"folder": folder, "permissions": ["read", "write"]}]
 }
 Path(out).write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 print(f"wrote allowlist config to {out}")

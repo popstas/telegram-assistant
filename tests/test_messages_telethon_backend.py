@@ -13,7 +13,10 @@ from typing import Any
 
 import pytest
 
-from telegram_assistant.messages.telethon_backend import TelethonMessageBackend
+from telegram_assistant.messages.telethon_backend import (
+    TelethonDeleteBackend,
+    TelethonMessageBackend,
+)
 from telegram_assistant.worker.queue import FloodWaitError
 
 
@@ -90,6 +93,42 @@ async def test_text_send_forwards_topic_and_schedule() -> None:
 
 
 @pytest.mark.asyncio
+async def test_text_send_reply_to_message_id_sets_reply_to() -> None:
+    client = _RecordingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(chat_id=42, text="re", reply_to_message_id=99)
+
+    assert client.message_calls[0]["kwargs"]["reply_to"] == 99
+
+
+@pytest.mark.asyncio
+async def test_reply_to_message_id_wins_over_topic_id() -> None:
+    """A forum reply targets the message; replying inside a topic keeps it
+    threaded, so an explicit reply id takes precedence over the topic root."""
+    client = _RecordingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=42, text="re", topic_id=7, reply_to_message_id=99
+    )
+
+    assert client.message_calls[0]["kwargs"]["reply_to"] == 99
+
+
+@pytest.mark.asyncio
+async def test_file_send_reply_to_message_id_sets_reply_to() -> None:
+    client = _RecordingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=10, text="cap", files=("/tmp/a.png",), reply_to_message_id=12
+    )
+
+    assert client.file_calls[0]["kwargs"]["reply_to"] == 12
+
+
+@pytest.mark.asyncio
 async def test_single_file_returns_single_id_with_caption() -> None:
     client = _RecordingClient()
     backend = TelethonMessageBackend(client)
@@ -160,3 +199,59 @@ async def test_flood_wait_is_translated_on_file_send() -> None:
     backend = TelethonMessageBackend(_Flooding())
     with pytest.raises(FloodWaitError):
         await backend.send_message(chat_id=1, text="x", files=("/tmp/a.png",))
+
+
+# ---------------------------------------------------------------------------
+# TelethonDeleteBackend
+# ---------------------------------------------------------------------------
+
+
+class _DeletingClient:
+    """Telethon client double recording get_input_entity / delete_messages."""
+
+    def __init__(self) -> None:
+        self.delete_calls: list[dict[str, Any]] = []
+
+    async def get_input_entity(self, chat_id: int) -> Any:
+        return f"peer:{chat_id}"
+
+    async def delete_messages(
+        self, entity: Any, message_ids: Any, *, revoke: bool = True
+    ) -> Any:
+        self.delete_calls.append(
+            {"entity": entity, "message_ids": list(message_ids), "revoke": revoke}
+        )
+        return []
+
+
+@pytest.mark.asyncio
+async def test_delete_backend_revoke_default_true() -> None:
+    client = _DeletingClient()
+    backend = TelethonDeleteBackend(client)
+    count = await backend.delete_messages(chat_id=-100, message_ids=(11, 12))
+    assert count == 2
+    call = client.delete_calls[0]
+    assert call["entity"] == "peer:-100"
+    assert call["message_ids"] == [11, 12]
+    assert call["revoke"] is True
+
+
+@pytest.mark.asyncio
+async def test_delete_backend_no_revoke() -> None:
+    client = _DeletingClient()
+    backend = TelethonDeleteBackend(client)
+    await backend.delete_messages(chat_id=5, message_ids=(7,), revoke=False)
+    assert client.delete_calls[0]["revoke"] is False
+
+
+@pytest.mark.asyncio
+async def test_delete_backend_flood_wait_is_translated() -> None:
+    class _Flooding(_DeletingClient):
+        async def delete_messages(
+            self, entity: Any, message_ids: Any, *, revoke: bool = True
+        ) -> Any:
+            raise _TelethonFloodWaitError(15)
+
+    backend = TelethonDeleteBackend(_Flooding())
+    with pytest.raises(FloodWaitError):
+        await backend.delete_messages(chat_id=1, message_ids=(1,))

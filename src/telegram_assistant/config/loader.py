@@ -31,19 +31,21 @@ telegram:
     enable_topics: true
     create_invite_link: true
     topics_layout: list             # "list" (default) or "tabs"
-  # Read/write access policy. Omitting `access` entirely keeps the default
+  # Read/write/delete access policy. Omitting `access` entirely keeps the default
   # allow-all behavior. Adding it switches to deny-by-default: only chats
-  # granted by a matching rule may be touched. Rules combine as a union and the
-  # highest level wins; `write` implies `read`. Each rule sets exactly one of
-  # `chat` / `folder` / `all`.
+  # granted by a matching rule may be touched. Matching rules union their
+  # capabilities, and capabilities are INDEPENDENT — `write` does NOT imply
+  # `read`, so a chat that should be both readable and writable must list both.
+  # Each rule sets exactly one of `chat` / `chats` / `folder` / `all`, plus
+  # `permission` (single) or `permissions` (list of read/write/delete).
   # access:
   #   rules:
   #     - all: true                 # read every chat (wildcard baseline)
   #       permission: read
-  #     - folder: "Clients"         # manage members/topics + send in this folder
-  #       permission: write
-  #     - chat: "@client_chat"      # write to one specific chat by @username
-  #       permission: write
+  #     - folder: "Clients"         # read + write members/topics + send here
+  #       permissions: [read, write]
+  #     - chat: "@client_chat"      # read + write + delete one specific chat
+  #       permissions: [read, write, delete]
 
 http:
   host: "127.0.0.1"
@@ -124,6 +126,22 @@ def _write_default_template(target: Path) -> None:
         target.write_text(DEFAULT_CONFIG_TEMPLATE, encoding="utf-8")
     except OSError as exc:
         raise ConfigError(f"Could not create template at {target}: {exc}") from exc
+
+
+def resolve_config_path(path: str | Path | None = None) -> Path | None:
+    """Return the config path that :func:`load_config` would read, or ``None``.
+
+    Mirrors :func:`load_config`'s lookup order without loading or writing
+    anything, so callers (e.g. the hot-reload watcher) can learn which file is
+    the live config. Returns ``None`` when no config file currently exists.
+    """
+    if path is not None:
+        return Path(path)
+    if CWD_CONFIG_PATH.exists():
+        return CWD_CONFIG_PATH
+    if USER_CONFIG_PATH.exists():
+        return USER_CONFIG_PATH
+    return None
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:

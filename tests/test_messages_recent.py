@@ -92,14 +92,18 @@ async def test_get_recent_allowed_by_read_rule() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_recent_allowed_by_write_rule_write_implies_read() -> None:
+async def test_get_recent_denied_by_write_only_rule() -> None:
+    # Independent capabilities: a write-only rule no longer implies read, so
+    # `messages recent` (which requires READ) is denied. Operators must grant
+    # read explicitly (migration note in Task 16).
     backend = FakeReadBackend(_messages(1))
     config = AccessConfig(rules=[AccessRule(chat="@team", permission="write")])
     authorizer = Authorizer(config, resolver=FakeResolver({"@team": 42}))
-    out = await get_recent_messages(
-        backend=backend, chat_id=42, authorizer=authorizer
-    )
-    assert len(out) == 1
+    with pytest.raises(AccessDenied):
+        await get_recent_messages(
+            backend=backend, chat_id=42, authorizer=authorizer
+        )
+    assert backend.calls == []
 
 
 @pytest.mark.asyncio
@@ -121,6 +125,105 @@ async def test_get_recent_no_authorizer_is_allow_all() -> None:
     backend = FakeReadBackend(_messages(3))
     out = await get_recent_messages(backend=backend, chat_id=12345, authorizer=None)
     assert len(out) == 3
+
+
+# ---------------------------------------------------------------------------
+# Task 9 — `--minutes` time-window filter
+# ---------------------------------------------------------------------------
+
+
+import datetime as _dt  # noqa: E402
+
+
+def _msg_at(id: int, when: _dt.datetime) -> RecentMessage:
+    return RecentMessage(
+        id=id,
+        sender=f"user{id}",
+        date=when.isoformat(),
+        reply_to=None,
+        text=f"msg {id}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_recent_minutes_excludes_old_messages() -> None:
+    now = _dt.datetime(2026, 6, 6, 12, 0, 0, tzinfo=_dt.UTC)
+    backend = FakeReadBackend(
+        [
+            _msg_at(3, now - _dt.timedelta(minutes=2)),  # inside 10m window
+            _msg_at(2, now - _dt.timedelta(minutes=8)),  # inside
+            _msg_at(1, now - _dt.timedelta(minutes=30)),  # outside
+        ]
+    )
+    out = await get_recent_messages(
+        backend=backend, chat_id=42, limit=5, minutes=10, now=now
+    )
+    assert [m.id for m in out] == [3, 2]
+
+
+@pytest.mark.asyncio
+async def test_get_recent_minutes_boundary_is_inclusive() -> None:
+    now = _dt.datetime(2026, 6, 6, 12, 0, 0, tzinfo=_dt.UTC)
+    backend = FakeReadBackend(
+        [
+            _msg_at(2, now - _dt.timedelta(minutes=10)),  # exactly on the cutoff
+            _msg_at(1, now - _dt.timedelta(minutes=10, seconds=1)),  # just outside
+        ]
+    )
+    out = await get_recent_messages(
+        backend=backend, chat_id=42, limit=5, minutes=10, now=now
+    )
+    assert [m.id for m in out] == [2]
+
+
+@pytest.mark.asyncio
+async def test_get_recent_minutes_composes_with_limit() -> None:
+    # The backend caps to `limit` newest first; the window then narrows that
+    # subset, so a message inside the window but past the limit is not returned.
+    now = _dt.datetime(2026, 6, 6, 12, 0, 0, tzinfo=_dt.UTC)
+    backend = FakeReadBackend(
+        [
+            _msg_at(4, now - _dt.timedelta(minutes=1)),
+            _msg_at(3, now - _dt.timedelta(minutes=2)),
+            _msg_at(2, now - _dt.timedelta(minutes=3)),  # dropped by limit=2
+            _msg_at(1, now - _dt.timedelta(minutes=4)),  # dropped by limit=2
+        ]
+    )
+    out = await get_recent_messages(
+        backend=backend, chat_id=42, limit=2, minutes=60, now=now
+    )
+    assert backend.calls == [{"chat_id": 42, "limit": 2}]
+    assert [m.id for m in out] == [4, 3]
+
+
+@pytest.mark.asyncio
+async def test_get_recent_minutes_excludes_messages_without_date() -> None:
+    now = _dt.datetime(2026, 6, 6, 12, 0, 0, tzinfo=_dt.UTC)
+    backend = FakeReadBackend(
+        [
+            _msg_at(2, now - _dt.timedelta(minutes=1)),
+            RecentMessage(id=1, sender="x", date=None, reply_to=None, text="no date"),
+        ]
+    )
+    out = await get_recent_messages(
+        backend=backend, chat_id=42, limit=5, minutes=10, now=now
+    )
+    assert [m.id for m in out] == [2]
+
+
+@pytest.mark.asyncio
+async def test_get_recent_minutes_none_returns_all() -> None:
+    backend = FakeReadBackend(_messages(3))
+    out = await get_recent_messages(backend=backend, chat_id=42, minutes=None)
+    assert len(out) == 3
+
+
+@pytest.mark.asyncio
+async def test_get_recent_rejects_nonpositive_minutes() -> None:
+    backend = FakeReadBackend(_messages(3))
+    with pytest.raises(ValueError):
+        await get_recent_messages(backend=backend, chat_id=42, minutes=0)
+    assert backend.calls == []
 
 
 class _FakeMsg:

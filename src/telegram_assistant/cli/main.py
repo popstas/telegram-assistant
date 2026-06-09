@@ -2525,6 +2525,11 @@ def messages_send(
         help="Defer delivery by a relative duration like 10m, 2h, 1d "
         "(mutually exclusive with --schedule-at).",
     ),
+    reply_to: int | None = typer.Option(
+        None,
+        "--reply-to",
+        help="Thread the send as a reply to an existing message id (targeted send).",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -2553,6 +2558,7 @@ def messages_send(
         ScheduleError,
         SendMessageRequest,
         is_service_command,
+        make_url_downloader,
         mass_send_message,
         parse_delay,
         parse_schedule_at,
@@ -2597,14 +2603,17 @@ def messages_send(
     has_attachments = bool(files or file_urls)
     has_schedule_input = schedule_at is not None or delay is not None
 
-    # Media and scheduling are targeted-only; mass mode iterates many chats and
-    # has no single attachment/schedule semantics.
-    if is_mass and (has_attachments or has_schedule_input):
+    # Media, scheduling, and reply threading are targeted-only; mass mode
+    # iterates many chats and has no single attachment/schedule/reply semantics.
+    if is_mass and (has_attachments or has_schedule_input or reply_to is not None):
         typer.echo(
-            "--file/--file-url/--schedule-at/--delay are only supported for "
-            "targeted sends, not mass mode",
+            "--file/--file-url/--schedule-at/--delay/--reply-to are only supported "
+            "for targeted sends, not mass mode",
             err=True,
         )
+        raise typer.Exit(code=2)
+    if reply_to is not None and reply_to <= 0:
+        typer.echo("--reply-to must be a positive integer", err=True)
         raise typer.Exit(code=2)
 
     # Resolve scheduling (rejects conflicting modes and past absolute times) and
@@ -2858,6 +2867,7 @@ def messages_send(
                     else None
                 ),
                 "scheduled": resolved_schedule_at is not None,
+                "reply_to_message_id": reply_to,
             }
             if chat_name is not None:
                 resolved_payload["folder_name"] = resolved_folder_name
@@ -2953,12 +2963,14 @@ def messages_send(
                 files=files,
                 file_urls=file_urls,
                 schedule_at=resolved_schedule_at,
+                reply_to_message_id=reply_to,
             )
             result_single, op = await send_message(
                 backend=message_backend,
                 store=store,
                 request=req_single,
                 authorizer=authorizer,
+                downloader=make_url_downloader() if file_urls else None,
             )
             payload = result_single.to_dict()
             payload["operation_id"] = op.id
@@ -3060,6 +3072,11 @@ def messages_recent(
         "--limit",
         help="Maximum number of recent messages to return (default 5).",
     ),
+    minutes: int | None = typer.Option(
+        None,
+        "--minutes",
+        help="Only return messages newer than now - MINUTES (composed with --limit).",
+    ),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -3084,6 +3101,9 @@ def messages_recent(
         raise typer.Exit(code=2)
     if limit <= 0:
         typer.echo("--limit must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+    if minutes is not None and minutes <= 0:
+        typer.echo("--minutes must be a positive integer", err=True)
         raise typer.Exit(code=2)
 
     config, manager, open_backends = _build_message_read_backends(config_path)
@@ -3120,11 +3140,13 @@ def messages_recent(
                 backend=read_backend,
                 chat_id=resolved_chat_id,
                 limit=limit,
+                minutes=minutes,
                 authorizer=authorizer,
             )
             return {
                 "telegram_chat_id": resolved_chat_id,
                 "limit": limit,
+                "minutes": minutes,
                 "count": len(messages),
                 "messages": [m.to_dict() for m in messages],
             }
@@ -3640,6 +3662,212 @@ def messages_forward(
     except Exception as exc:
         _raise_for_access_or_entity_error(exc)
         typer.echo(f"messages forward failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _build_delete_backends(config_path: Path | None):
+    """Open the Telethon-backed delete + folder backends.
+
+    ``_open`` returns ``(delete_backend, folder_backend)``. The folder backend
+    resolves ``--chat-name`` and feeds the authorizer's folder rules. Tests
+    monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonDeleteBackend,
+        )
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonDeleteBackend(client),
+            TelethonFolderBackend(client),
+        )
+
+    return config, manager, _open
+
+
+@messages_app.command("delete")
+def messages_delete(
+    message_id: list[int] = typer.Option(  # noqa: B008
+        None,
+        "--message-id",
+        help="Numeric id of a message to delete (repeatable).",
+    ),
+    chat_id: int | None = typer.Option(
+        None, "--chat-id", help="Numeric Telegram chat id."
+    ),
+    chat_name: str | None = typer.Option(
+        None, "--chat-name", help="Chat title (resolved within --folder-name)."
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None, "--folder-id", help="Optional folder id cross-check."
+    ),
+    revoke: bool = typer.Option(
+        True,
+        "--revoke/--no-revoke",
+        help="Delete for everyone (default) or only the technical account's copy.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate + authorize the request and report the plan without deleting.",
+    ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        help="Carried for surface consistency; message delete has no protected-chat "
+        "registry today, so it currently has no gating effect.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Delete messages from a chat (DELETE-gated).
+
+    Honors ``telegram.access.delete_only_session_messages`` (default true): when
+    active, only messages this process sent can be deleted. A fresh CLI process
+    has an empty sent registry, so deleting arbitrary messages requires setting
+    ``delete_only_session_messages: false`` in config.
+    """
+    from telegram_assistant.messages import (
+        DeleteMessagesRequest,
+        MessageDeleteForbidden,
+        SentMessageRegistry,
+        delete_messages,
+    )
+
+    message_ids = tuple(message_id or ())
+    if not message_ids:
+        typer.echo("at least one --message-id is required", err=True)
+        raise typer.Exit(code=2)
+    if any(mid <= 0 for mid in message_ids):
+        typer.echo("every --message-id must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_delete_backends(config_path)
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    access = config.telegram.access
+    only_session = (
+        access.delete_only_session_messages if access is not None else True
+    )
+    # A fresh CLI process has no send history; an empty registry means the
+    # session-limit (when enabled) blocks every id.
+    registry = SentMessageRegistry()
+
+    async def _resolve_target(folder_backend):
+        from telegram_assistant.folders import resolve_chat_in_folder
+
+        resolver = None
+        if config.telegram.access is not None or entity is not None:
+            from telegram_assistant.entities import TelethonEntityResolver
+
+            resolver = TelethonEntityResolver(await manager.get_client())
+
+        if entity is not None:
+            assert resolver is not None
+            resolved_entity = await resolver.resolve(entity)
+            resolved_chat_id = resolved_entity.chat_id
+            chat_name_for_log = resolved_entity.title
+        elif chat_id is not None:
+            resolved_chat_id = chat_id
+            chat_name_for_log = None
+        else:
+            resolved = await resolve_chat_in_folder(
+                folder_backend,
+                folder_name=resolved_folder_name or "",
+                chat_name=chat_name or "",
+                folder_id=effective_folder_id,
+            )
+            resolved_chat_id = resolved.chat_id
+            chat_name_for_log = resolved.title
+
+        authorizer = _cli_authorizer(
+            config, resolver=resolver, folder_backend=folder_backend
+        )
+        return resolved_chat_id, chat_name_for_log, authorizer
+
+    async def _run() -> dict[str, object]:
+        try:
+            backend, folder_backend = await open_backends()
+            tid, name, authorizer = await _resolve_target(folder_backend)
+            result = await delete_messages(
+                backend,
+                request=DeleteMessagesRequest(
+                    telegram_chat_id=tid,
+                    message_ids=message_ids,
+                    revoke=revoke,
+                    dry_run=dry_run,
+                    force=force,
+                    chat_name=name,
+                ),
+                authorizer=authorizer,
+                sent_registry=registry,
+                only_session_messages=only_session,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    from telegram_assistant.folders import FolderError
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except MessageDeleteForbidden as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=3) from exc
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"messages delete failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
@@ -4715,6 +4943,301 @@ def operations_retry(
             sort_keys=True,
         )
     )
+
+
+# --- access -----------------------------------------------------------------
+
+access_app = typer.Typer(
+    help="Inspect and manage the access policy (telegram.access).",
+    no_args_is_help=True,
+)
+app.add_typer(access_app, name="access")
+
+
+def _build_access_resolver(config_path: Path | None):
+    """Open the Telethon-backed resolver + folder backend for access checks.
+
+    Mirrors :func:`_build_message_read_backends`: lazy Telethon imports keep
+    ``access check --help`` cheap. Tests monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.entities import TelethonEntityResolver
+        from telegram_assistant.folders import TelethonFolderBackend
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return TelethonEntityResolver(client), TelethonFolderBackend(client)
+
+    return config, manager, _open
+
+
+def _access_rule_target(rule) -> dict[str, object]:
+    """Summarise the target kind of an :class:`AccessRule` for display."""
+    if rule.all:
+        return {"kind": "all"}
+    if rule.folder is not None:
+        return {"kind": "folder", "folder": rule.folder}
+    return {"kind": "chat", "chats": [str(ref) for ref in rule.chat_refs]}
+
+
+@access_app.command("list")
+def access_list(
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Print the effective access rules from the loaded config.
+
+    With ``telegram.access`` unset the policy is allow-all; otherwise each rule
+    is listed with its target kind and the (independent) capabilities it grants.
+    """
+    config = _load_config_or_exit(config_path)
+    access = config.telegram.access
+    if access is None:
+        payload: dict[str, object] = {
+            "policy": "allow_all",
+            "rules": [],
+            "note": (
+                "telegram.access is not set; every chat is allowed "
+                "(read/write/delete)."
+            ),
+        }
+        typer.echo(json.dumps(payload, sort_keys=True))
+        return
+
+    rules_out = [
+        {
+            "target": _access_rule_target(rule),
+            "permissions": list(rule.effective_permissions),
+        }
+        for rule in access.rules
+    ]
+    payload = {
+        "policy": "deny_by_default",
+        "rules": rules_out,
+        "rule_count": len(rules_out),
+    }
+    typer.echo(json.dumps(payload, sort_keys=True))
+
+
+@access_app.command("check")
+def access_check(
+    entity: str = typer.Option(
+        ...,
+        "--entity",
+        help="Entity reference (numeric id, @username, link, phone, or exact "
+        "title) resolved via the shared resolver.",
+    ),
+    permission: str = typer.Option(
+        "read",
+        "--permission",
+        help="Capability to check: read | write | delete.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Resolve a chat and report whether the policy grants a permission.
+
+    Exits 0 when granted, ``ACCESS_DENIED_EXIT_CODE`` (3) when denied, and 2
+    when the entity cannot be resolved (or the permission is invalid).
+    """
+    from telegram_assistant.access.service import _PERMISSION_TO_LEVEL
+
+    perm = permission.strip().lower()
+    if perm not in _PERMISSION_TO_LEVEL:
+        typer.echo(
+            f"invalid --permission {permission!r}: expected read|write|delete",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    level = _PERMISSION_TO_LEVEL[perm]
+
+    config, manager, open_backends = _build_access_resolver(config_path)
+
+    async def _run():
+        try:
+            resolver, folder_backend = await open_backends()
+            resolved = await resolver.resolve(entity)
+            authorizer = _cli_authorizer(
+                config, resolver=resolver, folder_backend=folder_backend
+            )
+            caps, matched = await authorizer.describe(resolved.chat_id)
+            return resolved, caps, matched, level in caps
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        resolved, caps, matched, granted = asyncio.run(_run())
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"access check failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    payload = {
+        "entity": entity,
+        "telegram_chat_id": resolved.chat_id,
+        "permission": perm,
+        "granted": granted,
+        "granted_permissions": sorted(c.name.lower() for c in caps),
+        "matched_rule": matched,
+    }
+    typer.echo(json.dumps(payload, sort_keys=True))
+    if not granted:
+        raise typer.Exit(code=ACCESS_DENIED_EXIT_CODE)
+
+
+@access_app.command("add")
+def access_add(
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Grant on a single chat (numeric id, @username, link, phone, "
+        "or exact title).",
+    ),
+    folder: str | None = typer.Option(
+        None,
+        "--folder",
+        help="Grant on every chat in this Telegram chat-folder.",
+    ),
+    all_chats: bool = typer.Option(
+        False,
+        "--all",
+        help="Grant on every chat (wildcard baseline).",
+    ),
+    permission: str = typer.Option(
+        "write",
+        "--permission",
+        help="Comma-separated capabilities to grant: read,write,delete.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Print the resulting rule without writing the config.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Append an access rule to the config file.
+
+    Exactly one target (``--entity`` / ``--folder`` / ``--all``) must be given.
+    The rule is validated (same model validator as the loader) before writing;
+    the hot-reload watcher then applies it live. ``--dry-run`` prints the rule
+    without touching the file. Note: adding the first rule to a config with no
+    ``telegram.access`` block switches the policy from allow-all to
+    deny-by-default.
+    """
+    import yaml
+
+    from telegram_assistant.config import (
+        load_config_from_text,
+        resolve_config_path,
+    )
+    from telegram_assistant.config.models import AccessRule
+
+    target_count = sum(
+        [entity is not None, folder is not None, bool(all_chats)]
+    )
+    if target_count != 1:
+        typer.echo(
+            "exactly one of --entity, --folder, or --all must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    perms = [p.strip().lower() for p in permission.split(",") if p.strip()]
+    if not perms:
+        typer.echo(
+            "--permission must list at least one of read,write,delete", err=True
+        )
+        raise typer.Exit(code=2)
+
+    rule_data: dict[str, object] = {"permissions": perms}
+    if entity is not None:
+        ref: str | int = entity
+        stripped = entity[1:] if entity.startswith("-") else entity
+        if stripped.isdigit():
+            ref = int(entity)
+        rule_data["chat"] = ref
+    elif folder is not None:
+        rule_data["folder"] = folder
+    else:
+        rule_data["all"] = True
+
+    # Validate via the shared model validator (rejects bad target / permission).
+    try:
+        AccessRule.model_validate(rule_data)
+    except Exception as exc:
+        typer.echo(f"invalid access rule: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    if dry_run:
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "access.add",
+            "rule": rule_data,
+        }
+        typer.echo(json.dumps(payload, sort_keys=True))
+        return
+
+    target_path = Path(config_path) if config_path is not None else resolve_config_path()
+    if target_path is None or not target_path.exists():
+        typer.echo("no config file found to update", err=True)
+        raise typer.Exit(code=2)
+
+    raw = yaml.safe_load(target_path.read_text(encoding="utf-8")) or {}
+    if not isinstance(raw, dict):
+        typer.echo(f"config at {target_path} is not a YAML mapping", err=True)
+        raise typer.Exit(code=2)
+    telegram = raw.setdefault("telegram", {})
+    access = telegram.get("access")
+    if access is None:
+        access = {"rules": []}
+        telegram["access"] = access
+    access.setdefault("rules", [])
+    access["rules"].append(rule_data)
+
+    new_text = yaml.safe_dump(raw, sort_keys=False, allow_unicode=True)
+    # Re-validate the whole resulting config before persisting.
+    try:
+        load_config_from_text(new_text, source=str(target_path))
+    except ConfigError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    target_path.write_text(new_text, encoding="utf-8")
+    payload = {
+        "status": "ok",
+        "command": "access.add",
+        "rule": rule_data,
+        "config_path": str(target_path),
+        "rule_count": len(access["rules"]),
+    }
+    typer.echo(json.dumps(payload, sort_keys=True))
 
 
 if __name__ == "__main__":  # pragma: no cover

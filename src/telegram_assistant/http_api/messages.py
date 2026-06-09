@@ -20,16 +20,22 @@ from telegram_assistant.folders import (
 )
 from telegram_assistant.http_api.access import (
     build_authorizer,
+    delete_only_session_messages,
     resolve_entity_chat_id,
+    sent_message_registry,
     translate_access_error,
 )
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.messages import (
     AttachmentError,
+    Base64Attachment,
+    DeleteBackend,
+    DeleteMessagesRequest,
     ForwardBackend,
     ForwardMessagesRequest,
     MassSendRequest,
     MessageBackend,
+    MessageDeleteForbidden,
     MessageReadBackend,
     MessageSendFailed,
     MessageSendNeedsReview,
@@ -38,8 +44,10 @@ from telegram_assistant.messages import (
     ScheduleError,
     SendMessageRequest,
     SendReactionRequest,
+    delete_messages,
     forward_messages,
     get_recent_messages,
+    make_url_downloader,
     mass_send_message,
     resolve_schedule_at,
     send_message,
@@ -63,6 +71,20 @@ def _translate_flood_wait(exc: FloodWaitError) -> HTTPException:
     )
 
 
+class Base64AttachmentBody(BaseModel):
+    """One inline base64 attachment ``{filename, mime, content_b64}``.
+
+    ``filename`` is required (names the file and supplies the extension);
+    ``content_b64`` is the standard base64 of the file bytes; ``mime`` is
+    optional and validated against the allowed top-level types when present.
+    Decoded content is bounded by the send path's base64 size limit (1 MB).
+    """
+
+    filename: str
+    content_b64: str
+    mime: str | None = None
+
+
 class MessageSendBody(BaseModel):
     # ``text`` doubles as the caption and may be empty when attachments are
     # present (media-only send), so it is optional with an empty-string default.
@@ -82,8 +104,12 @@ class MessageSendBody(BaseModel):
     # not uploaded over HTTP.
     files: list[str] | None = None
     file_urls: list[str] | None = None
+    # Inline base64 attachments (decoded to a temp file, sent, cleaned up).
+    base64_files: list[Base64AttachmentBody] | None = None
     schedule_at: datetime | None = None
     delay_seconds: int | None = None
+    # Thread the send as a reply to an existing message id (targeted only).
+    reply_to_message_id: int | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> MessageSendBody:
@@ -94,7 +120,7 @@ class MessageSendBody(BaseModel):
         has_topic_name = self.topic_name is not None
         has_topic_id = self.telegram_topic_id is not None
 
-        has_attachments = bool(self.files or self.file_urls)
+        has_attachments = bool(self.files or self.file_urls or self.base64_files)
         if not (self.text and self.text.strip()) and not has_attachments:
             raise ValueError(
                 "must provide non-empty text or at least one files/file_urls "
@@ -102,6 +128,8 @@ class MessageSendBody(BaseModel):
             )
         if self.schedule_at is not None and self.delay_seconds is not None:
             raise ValueError("provide only one of schedule_at or delay_seconds")
+        if self.reply_to_message_id is not None and self.reply_to_message_id <= 0:
+            raise ValueError("reply_to_message_id must be a positive integer")
 
         # ``entity`` is a direct chat reference, equivalent to telegram_chat_id
         # for shape purposes (no folder lookup needed).
@@ -128,10 +156,12 @@ class MessageSendBody(BaseModel):
                 has_attachments
                 or self.schedule_at is not None
                 or self.delay_seconds is not None
+                or self.reply_to_message_id is not None
             ):
                 raise ValueError(
-                    "files/file_urls/schedule_at/delay_seconds are only supported "
-                    "for targeted sends, not mass mode"
+                    "files/file_urls/base64_files/schedule_at/delay_seconds/"
+                    "reply_to_message_id are only supported for targeted sends, "
+                    "not mass mode"
                 )
             return self
 
@@ -221,6 +251,49 @@ class ForwardBody(BaseModel):
         return self
 
 
+class DeleteBody(BaseModel):
+    """Delete one or more messages from a target chat (DELETE-gated).
+
+    The target is one of ``telegram_chat_id`` / ``entity`` / ``chat_name`` +
+    ``folder_name`` (same shape as a targeted send). ``message_ids`` must hold at
+    least one positive id. ``revoke`` defaults to ``True`` (delete for everyone).
+    ``dry_run`` resolves + authorizes (and runs the session-limit check) without
+    deleting; ``force`` is carried for surface consistency with the project's
+    ``--force`` convention.
+    """
+
+    message_ids: list[int]
+    revoke: bool = True
+    dry_run: bool = False
+    force: bool = False
+    telegram_chat_id: int | None = None
+    entity: str | int | None = None
+    chat_name: str | None = None
+    folder_name: str | None = None
+    folder_id: int | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> DeleteBody:
+        if not self.message_ids:
+            raise ValueError("message_ids must contain at least one id")
+        if any(mid <= 0 for mid in self.message_ids):
+            raise ValueError("every message_id must be a positive integer")
+        refs = sum(
+            [
+                self.telegram_chat_id is not None,
+                self.entity is not None,
+                self.chat_name is not None,
+            ]
+        )
+        if refs != 1:
+            raise ValueError(
+                "provide exactly one of telegram_chat_id, entity, or chat_name"
+            )
+        if self.chat_name is not None and self.folder_name is None:
+            raise ValueError("chat_name requires folder_name")
+        return self
+
+
 def _message_backend_or_503(request: Request) -> MessageBackend:
     factory = getattr(request.app.state, "message_backend_factory", None)
     if factory is None:
@@ -265,6 +338,22 @@ def _forward_backend_or_503(request: Request) -> ForwardBackend:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram forward backend is not available",
+        )
+    return backend
+
+
+def _delete_backend_or_503(request: Request) -> DeleteBackend:
+    factory = getattr(request.app.state, "delete_backend_factory", None)
+    if factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram delete backend is not configured (session may be unauthorized)",
+        )
+    backend = factory(request)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram delete backend is not available",
         )
     return backend
 
@@ -386,6 +475,7 @@ def build_router() -> APIRouter:
                         operation_id=body.operation_id,
                     ),
                     authorizer=authorizer,
+                    sent_registry=sent_message_registry(request),
                 )
             except FolderError as exc:
                 raise _translate_folder_error(exc) from exc
@@ -486,6 +576,15 @@ def build_router() -> APIRouter:
                 status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
             ) from exc
 
+        base64_files = tuple(
+            Base64Attachment(
+                filename=att.filename,
+                content_b64=att.content_b64,
+                mime=att.mime,
+            )
+            for att in (body.base64_files or ())
+        )
+
         domain_request = SendMessageRequest(
             telegram_chat_id=telegram_chat_id,
             text=body.text,
@@ -495,7 +594,9 @@ def build_router() -> APIRouter:
             topic_name=topic_name_for_log,
             files=files,
             file_urls=file_urls,
+            base64_files=base64_files,
             schedule_at=resolved_schedule_at,
+            reply_to_message_id=body.reply_to_message_id,
         )
 
         try:
@@ -504,6 +605,16 @@ def build_router() -> APIRouter:
                 store=store,
                 request=domain_request,
                 authorizer=authorizer,
+                sent_registry=sent_message_registry(request),
+                downloader=(
+                    make_url_downloader(
+                        fetcher=getattr(
+                            request.app.state, "attachment_fetcher", None
+                        )
+                    )
+                    if file_urls
+                    else None
+                ),
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc
@@ -625,18 +736,88 @@ def build_router() -> APIRouter:
 
         return result.to_dict()
 
+    @router.post("/messages/delete")
+    async def delete(body: DeleteBody, request: Request) -> dict[str, Any]:
+        """Delete messages from a chat (DELETE-gated).
+
+        Honors ``telegram.access.delete_only_session_messages`` (default true):
+        when active, only messages this server process sent can be deleted.
+        """
+        backend = _delete_backend_or_503(request)
+
+        if body.entity is not None:
+            telegram_chat_id = await resolve_entity_chat_id(request, body.entity)
+            chat_name_for_log: str | None = None
+        elif body.telegram_chat_id is not None:
+            telegram_chat_id = body.telegram_chat_id
+            chat_name_for_log = None
+        else:
+            folder_backend = _folder_backend_or_503(request)
+            try:
+                chat = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=body.folder_name or "",
+                    chat_name=body.chat_name or "",
+                    folder_id=body.folder_id,
+                )
+            except FolderError as exc:
+                raise _translate_folder_error(exc) from exc
+            telegram_chat_id = chat.chat_id
+            chat_name_for_log = chat.title
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        try:
+            result = await delete_messages(
+                backend,
+                request=DeleteMessagesRequest(
+                    telegram_chat_id=telegram_chat_id,
+                    message_ids=tuple(body.message_ids),
+                    revoke=body.revoke,
+                    dry_run=body.dry_run,
+                    force=body.force,
+                    chat_name=chat_name_for_log,
+                ),
+                authorizer=authorizer,
+                sent_registry=sent_message_registry(request),
+                only_session_messages=delete_only_session_messages(request),
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except MessageDeleteForbidden as exc:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "error": "delete_forbidden",
+                    "message": str(exc),
+                    "message_ids": exc.message_ids,
+                },
+            ) from exc
+        except FloodWaitError as exc:
+            raise _translate_flood_wait(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        return result.to_dict()
+
     @router.get("/messages/recent")
     async def recent(
         request: Request,
         chat_id: int | None = None,
         entity: str | None = None,
         limit: int = 5,
+        minutes: int | None = None,
     ) -> dict[str, Any]:
         """Return up to ``limit`` recent messages (READ-gated).
 
         Accepts either a numeric ``chat_id`` or a flexible ``entity`` reference
         (resolved via the shared resolver). The op requires READ on the resolved
-        chat; an unpermitted chat returns 403.
+        chat; an unpermitted chat returns 403. ``minutes`` optionally restricts
+        the result to messages newer than ``now - minutes`` (composed with
+        ``limit``).
         """
         if (chat_id is None) == (entity is None):
             raise HTTPException(
@@ -647,6 +828,11 @@ def build_router() -> APIRouter:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="limit must be a positive integer",
+            )
+        if minutes is not None and minutes <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="minutes must be a positive integer",
             )
 
         backend = _read_backend_or_503(request)
@@ -663,6 +849,7 @@ def build_router() -> APIRouter:
                 backend=backend,
                 chat_id=resolved_chat_id,
                 limit=limit,
+                minutes=minutes,
                 authorizer=authorizer,
             )
         except AccessDenied as exc:
@@ -675,6 +862,7 @@ def build_router() -> APIRouter:
         return {
             "telegram_chat_id": resolved_chat_id,
             "limit": limit,
+            "minutes": minutes,
             "count": len(messages),
             "messages": [m.to_dict() for m in messages],
         }

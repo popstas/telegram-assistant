@@ -1,9 +1,21 @@
 """Message-send domain shared by HTTP, CLI, and the worker."""
 
 from telegram_assistant.messages.attachments import (
+    ALLOWED_BASE64_MIME_TOP_TYPES,
+    DEFAULT_MAX_BASE64_BYTES,
     AttachmentError,
+    Base64Attachment,
+    decode_base64_attachment,
+    materialize_base64_attachments,
     validate_file_urls,
     validate_local_files,
+)
+from telegram_assistant.messages.downloads import (
+    Downloader,
+    DownloadError,
+    Fetcher,
+    download_url_to_temp,
+    make_url_downloader,
 )
 from telegram_assistant.messages.forwarding import (
     ForwardBackend,
@@ -17,11 +29,16 @@ from telegram_assistant.messages.reactions import (
     SendReactionResult,
     set_message_reaction,
 )
+from telegram_assistant.messages.sent_registry import SentMessageRegistry
 from telegram_assistant.messages.service import (
+    DeleteBackend,
+    DeleteMessagesRequest,
+    DeleteMessagesResult,
     MassSendItemResult,
     MassSendRequest,
     MassSendResult,
     MessageBackend,
+    MessageDeleteForbidden,
     MessageReadBackend,
     MessageSendFailed,
     MessageSendNeedsReview,
@@ -30,6 +47,7 @@ from telegram_assistant.messages.service import (
     ScheduleError,
     SendMessageRequest,
     SendMessageResult,
+    delete_messages,
     get_recent_messages,
     is_service_command,
     mass_send_message,
@@ -41,7 +59,18 @@ from telegram_assistant.messages.service import (
 )
 
 __all__ = [
+    "ALLOWED_BASE64_MIME_TOP_TYPES",
+    "DEFAULT_MAX_BASE64_BYTES",
     "AttachmentError",
+    "Base64Attachment",
+    "decode_base64_attachment",
+    "materialize_base64_attachments",
+    "DeleteBackend",
+    "DownloadError",
+    "Downloader",
+    "Fetcher",
+    "DeleteMessagesRequest",
+    "DeleteMessagesResult",
     "ForwardBackend",
     "ForwardMessagesRequest",
     "ForwardMessagesResult",
@@ -49,6 +78,7 @@ __all__ = [
     "MassSendRequest",
     "MassSendResult",
     "MessageBackend",
+    "MessageDeleteForbidden",
     "MessageReadBackend",
     "MessageSendFailed",
     "MessageSendNeedsReview",
@@ -56,11 +86,15 @@ __all__ = [
     "ReactionBackend",
     "RecentMessage",
     "ScheduleError",
+    "SentMessageRegistry",
     "SendMessageRequest",
     "SendMessageResult",
     "SendReactionRequest",
     "SendReactionResult",
+    "delete_messages",
+    "download_url_to_temp",
     "forward_messages",
+    "make_url_downloader",
     "get_recent_messages",
     "is_service_command",
     "mass_send_message",

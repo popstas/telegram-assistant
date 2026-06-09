@@ -20,7 +20,8 @@ This section is the contract that applies to every action.
   subcommand of it (`groups create`, `topics bulk-create`, `members bulk-add`,
   `messages send`, `folders inspect`, `operations status`, ...).
 - The runtime config lives at `data/config.yml`. The agent reads it for
-  defaults but never edits it. Notable keys:
+  defaults and never edits it by hand — the only write path is the
+  `access add` command (and only after a confirmed `--dry-run`). Notable keys:
   - `telegram.default_chat_folder.folder_name` — used as `--folder-name` when
     the human request does not name a folder explicitly.
   - `mcp` — optional Streamable-HTTP MCP/OAuth config. This skill still uses
@@ -42,18 +43,23 @@ This section is the contract that applies to every action.
 
 ## Liveness check: `health`
 
-Before any state-changing command in a fresh agent session run:
+Run `health` **only when there is a reason to** — do not probe proactively when
+nothing is wrong:
 
 ```bash
 telegram-assistant health
 ```
 
+- Do **not** run `health` before a change just to be safe. Go straight to the
+  command flow. Run `health` only when something actually looks wrong:
+  a command fails, a dry-run reports an auth/DB/folder problem, the session
+  looks unauthorised, or the human explicitly asks «проверь health».
 - If `health` reports a problem (auth missing, DB unreachable, default folder
   missing, etc.), stop and report it. Do not attempt to "fix" it by running
   other commands.
 - `health` is read-only; no confirmation is needed.
-- Within the same session, `health` does not need to be repeated before every
-  command, but it must have succeeded at least once before any change.
+- Once `health` has succeeded in a session, do not repeat it for later
+  commands unless a new failure surfaces.
 
 ## Confirmation policy
 
@@ -68,8 +74,9 @@ Commands fall into three buckets:
    `notifications unmute`, `folders add-chat`, `folders remove-chat`,
    `operations retry`. Always:
    prepare command → run with `--dry-run` →
-   show the plan and dry-run output → wait for explicit human confirmation
-   → run the same command without `--dry-run`.
+   show the plan and dry-run output → ask for explicit human confirmation
+   **via the `AskUserQuestion` tool** → run the same command without
+   `--dry-run`.
 3. **State-changing, bulk or destructive** — `topics bulk-create`,
    `members bulk-add`, `members bulk-remove`, `messages send` in fan-out mode
    (folder + topic name). Same flow as bucket 2, plus the plan must show how
@@ -78,8 +85,14 @@ Commands fall into three buckets:
 
 Confirmation rules:
 
-- A confirmation is "explicit" when the human writes «да», «выполни»,
-  «подтверждаю», «ок», presses a confirmation button, or similar. Silence,
+- The agent **must** request every confirmation through the
+  `AskUserQuestion` tool — never as plain inline text. Present the dry-run
+  plan, then call `AskUserQuestion` with a clear yes/no choice (e.g.
+  «Выполнить» / «Отмена»). Run the real command only after the human picks
+  the affirmative option.
+- A confirmation is "explicit" when the human selects the affirmative
+  `AskUserQuestion` option (or writes «да», «выполни», «подтверждаю», «ок»,
+  presses a confirmation button, or similar). Silence,
   «давай посмотрим», «может быть» are not confirmations.
 - A confirmation applies only to the exact command shown in the plan. If
   parameters change (different chat, different list of users, different
@@ -133,9 +146,11 @@ not skip steps, even if the request looks obvious.
    (alias `planfix_task_id`), folder. Treat anything missing as missing —
    never invent values.
 4. If a required parameter is missing or ambiguous, ask a short clarifying
-   question (one question, no preamble).
-5. Run `telegram-assistant health` if it has not yet succeeded in
-   the current session.
+   question (one question, no preamble). For `messages send`, if the message
+   text is missing, ask the human for it (AskUserQuestion) — never invent the message.
+5. Do **not** run `telegram-assistant health` proactively. Skip it when nothing
+   is wrong and go to the next step; run it only if a later command or dry-run
+   surfaces an auth/DB/folder problem, or the human asks for it.
 6. For bulk-style commands, prepare a temporary CSV/JSON in `/tmp` as
    described above.
 7. For state-changing commands that support `--dry-run`, run with
@@ -149,8 +164,10 @@ not skip steps, even if the request looks obvious.
    matched users), the full command that would run, and the relevant parts
    of the dry-run output (`status = dry_run`, planned actions, validation
    errors if any).
-9. Wait for an explicit confirmation. Do not move on after silence or vague
-   replies.
+9. Ask for an explicit confirmation **via the `AskUserQuestion` tool**
+   (a yes/no choice on the exact command shown). Do not move on after
+   silence or vague replies, and do not accept a confirmation collected
+   any other way.
 10. Run the real command — the same command as in step 7, with `--dry-run`
     removed.
 11. Return a short result: done / already done / skipped / Telegram error /
@@ -194,6 +211,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
 | `messages` | `forward` | Forward one or more messages (`--message-id`, repeatable) from a source to a target chat (READ-gated source, WRITE-gated target). | `telegram-assistant messages forward ...` |
+| `messages` | `delete` | Delete one or more messages (`--message-id`, repeatable) from a chat (DELETE-gated; `--revoke`/`--no-revoke`, `--dry-run`, `--force`). Honors `telegram.access.delete_only_session_messages` (default true). | `telegram-assistant messages delete ...` |
 | `notifications` | `mute` | Mute a chat/contact's notifications, forever or for `--duration` hours. | `telegram-assistant notifications mute ...` |
 | `notifications` | `unmute` | Restore normal notifications for a chat/contact. | `telegram-assistant notifications unmute ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
@@ -201,6 +219,9 @@ agent stops and asks for clarification — it does not invent a new path.
 | `folders` | `remove-chat` | Remove a chat from a folder (idempotent no-op if absent). | `telegram-assistant folders remove-chat ...` |
 | `operations` | `status` | Read-only: show queue status for a previously created operation. | `telegram-assistant operations status ...` |
 | `operations` | `retry` | Reset a failed or `needs_review` operation so the worker can re-run it. | `telegram-assistant operations retry ...` |
+| `access` | `list` | Read-only: print the effective access policy (allow-all, or the deny-by-default rules and the capabilities each grants). | `telegram-assistant access list` |
+| `access` | `check` | Resolve a chat and report whether the policy grants `read`/`write`/`delete` (exit 0 granted, 3 denied, 2 unresolved). | `telegram-assistant access check --entity <ref> --permission read\|write\|delete` |
+| `access` | `add` | Append one access rule (`--entity`/`--folder`/`--all` + `--permission read,write,delete`) to `data/config.yml`; hot-reload applies it live. Supports `--dry-run`. | `telegram-assistant access add ...` |
 
 ### Per-pair extraction and flag rules
 
@@ -227,10 +248,13 @@ reference the CLI exits with code 2 (`EntityNotFoundError` /
 `AmbiguousEntityError`) — surface the message and ask, do not guess.
 
 If the project configures `telegram.access` in `data/config.yml`, every
-chat-scoped command is gated (read vs write). When the policy does not
+chat-scoped command is gated (read / write / delete — capabilities are
+independent, so `write` does not imply `read`). When the policy does not
 permit a chat or destination folder the CLI exits with code 3 and prints
 `access denied ...`. The agent surfaces that verbatim and stops — it never
-edits `data/config.yml` to widen access on its own.
+widens access on its own initiative. Granting access is only done via an
+explicit human request through `access add` (confirmed after `--dry-run`),
+never silently to get a blocked command through.
 
 #### `auth` / `login`
 
@@ -411,14 +435,16 @@ edits `data/config.yml` to widen access on its own.
   optional attachments (`--file` for a local file path, `--file-url`
   for an http(s) URL — both repeatable), optional scheduling
   (`--schedule-at` ISO-8601 datetime, or `--delay` relative duration
-  like `10m`, `2h`, `1d`).
+  like `10m`, `2h`, `1d`), and optional `--reply-to <message_id>` to
+  thread the send as a reply (targeted-only; in a forum it wins over the
+  topic root, keeping the reply inside the topic).
 - Required flags: exactly one targeting shape — targeted
   (`--chat-id`/`--chat-name` + optional `--topic-id`/`--topic-name`)
   or mass (`--mass` or no chat ref, plus `--topic-name` and
   `--folder-name`). `--text` is required unless at least one
   `--file`/`--file-url` is supplied (in which case `--text` is the
-  caption). Attachments and scheduling are targeted-only — never combine
-  them with `--mass`.
+  caption). Attachments, scheduling, and `--reply-to` are targeted-only —
+  never combine them with `--mass`.
 - From config: `--folder-name` default for both targeted resolution and
   mass mode.
 - Temp file: no — message text goes via `--text`, attachments via
@@ -429,35 +455,38 @@ edits `data/config.yml` to widen access on its own.
 - Automation: pass service commands (`/task 123456`) verbatim. Pass at
   most one of `--schedule-at` / `--delay`. Map «отправь через 2 часа» →
   `--delay 2h`, «запланируй на 2026-06-07T09:00» → `--schedule-at`. The
-  dry-run JSON echoes `files`, `file_urls`, `schedule_at`, and
-  `scheduled` so the plan can show attachments and the resolved send
-  time.
+  dry-run JSON echoes `files`, `file_urls`, `schedule_at`, `scheduled`,
+  and `reply_to_message_id` so the plan can show attachments, the resolved
+  send time, and any reply target.
 - Confirmation: required after dry-run. Mass mode plans must list every
   resolved chat row and call out `would_skip` rows with their reason
   (`topic_not_found`, `topic_ambiguous`, `list_topics_failed: ...`).
 - Typical errors: `messages send requires non-empty --text`
   (when no attachments), `--mass cannot be combined with --chat-id or
-  --chat-name`, `--file/--file-url/--schedule-at/--delay are only
-  supported for targeted sends`, `provide only one of --schedule-at or
+  --chat-name`, `--file/--file-url/--schedule-at/--delay/--reply-to are
+  only supported for targeted sends`, `provide only one of --schedule-at or
   --delay`, past-schedule rejection (exit code 2), missing/empty
   attachment file, non-http(s) `--file-url`, `MessageSendNeedsReview`.
 
 #### `messages` / `recent`
 
 - Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
-  optional `--limit` (count of recent messages).
+  optional `--limit` (count of recent messages), optional `--minutes`
+  (only messages newer than `now - minutes`).
 - Required flags: exactly one chat reference.
 - From config: `--folder-name` default when resolving `--chat-name`.
 - Temp file: no.
 - Automation: read-only — run immediately when the human asks «покажи
   последние сообщения чата X» / «что писали в X». No `--dry-run`.
   `--limit` defaults to 5; pass it through only when the human names a
-  count.
+  count. Add `--minutes N` when the human scopes by time («что писали
+  за последний час» → `--minutes 60`); it composes with `--limit`.
 - Confirmation: not required (read-only). Still READ-gated by the
   `telegram.access` policy — if the chat is not permitted the CLI exits
   non-zero with `access denied`; surface that and stop.
 - Typical errors: `exactly one of --chat-id, --chat-name, or --entity
-  must be supplied`, `access denied ...` (exit code 3), entity
+  must be supplied`, `--minutes must be a positive integer`,
+  `access denied ...` (exit code 3), entity
   not-found / ambiguous (exit code 2).
 
 #### `messages` / `react`
@@ -499,6 +528,31 @@ edits `data/config.yml` to widen access on its own.
   --from-entity must be supplied`, `exactly one target must be supplied`,
   `access denied ...` (exit code 3), entity
   not-found / ambiguous (exit code 2).
+
+#### `messages` / `delete`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`), one or
+  more `--message-id` (repeat the flag per message), optional
+  `--revoke`/`--no-revoke`, optional `--force`.
+- Required flags: exactly one chat reference and at least one `--message-id`.
+- From config: `--folder-name` default when resolving `--chat-name`. The
+  `telegram.access.delete_only_session_messages` flag (default `true`) limits
+  deletes to messages this server process sent.
+- Temp file: no.
+- Automation: none — DELETE-gated destructive change. Run `--dry-run` first
+  (resolves + authorizes + runs the session-limit check without deleting),
+  show the plan, wait for confirmation, then run without `--dry-run`. Default
+  `--revoke` (delete for everyone); add `--no-revoke` only when the human asks
+  to delete just for themselves. Map «удали сообщение N в чате X» →
+  `--entity X --message-id N`.
+- Confirmation: required (bucket 2/3 — destructive). The plan must list every
+  message id that would be deleted and whether revoke is on.
+- Typical errors: `at least one --message-id is required`, `every --message-id
+  must be a positive integer`, `exactly one of --chat-id, --chat-name, or
+  --entity must be supplied`, `message delete forbidden ...` (id not sent by
+  this process while `delete_only_session_messages` is on), `access denied ...`
+  (exit code 3 — chat lacks the `delete` capability), entity not-found /
+  ambiguous (exit code 2).
 
 #### `notifications` / `mute`
 
@@ -591,6 +645,50 @@ edits `data/config.yml` to widen access on its own.
 - Typical errors: `operation <id> not found`, `operation <id> is
   completed; nothing to retry`.
 
+#### `access` / `list`
+
+- Extract: nothing.
+- Required flags: none.
+- From config: reads the loaded `telegram.access` policy.
+- Temp file: no.
+- Automation: read-only — run immediately when the human asks «покажи
+  права доступа» / «какие чаты разрешены». No `--dry-run`.
+- Confirmation: not required (read-only).
+- Typical errors: none beyond config-load failures — surface verbatim.
+
+#### `access` / `check`
+
+- Extract: chat reference (`--entity`), `--permission` (one of
+  `read`/`write`/`delete`).
+- Required flags: `--entity` and `--permission`.
+- From config: reads the loaded `telegram.access` policy.
+- Temp file: no.
+- Automation: read-only diagnostic — run immediately when the human asks
+  «есть ли доступ на запись в чат X» and report the verdict and matched rule.
+  No `--dry-run`.
+- Confirmation: not required (read-only).
+- Typical errors: exit `0` granted, exit `3` denied (`access denied ...`),
+  exit `2` when the entity cannot be resolved — surface the message and stop.
+
+#### `access` / `add`
+
+- Extract: exactly one target (`--entity` / `--folder` / `--all`) and
+  `--permission` (comma-separated subset of `read,write,delete`).
+- Required flags: one target and `--permission`.
+- From config: writes into `data/config.yml` (the one place the agent may edit
+  it, and only for `access add`); hot-reload applies the rule within ~2s.
+- Temp file: no.
+- Automation: none — this widens access. Run `--dry-run` first to show the
+  resulting rule, wait for explicit confirmation, then run without `--dry-run`.
+  Warn the human that adding the first rule to a config with no
+  `telegram.access` block switches the policy from allow-all to
+  deny-by-default.
+- Confirmation: required (bucket 2 — it changes policy).
+- Typical errors: `exactly one of --entity, --folder, or --all must be
+  supplied`, `--permission must list at least one of read,write,delete`,
+  validation errors from the access-rule model (surface verbatim), entity
+  not-found / ambiguous (exit code 2).
+
 ## Scenarios
 
 Every scenario below uses anonymized identifiers only. The agent
@@ -610,7 +708,7 @@ Request: «Создай группу для клиента Клиент / про
    `--member @member_username`. Folder defaults to the configured
    `Planfix clients`. Add `--topics-layout tabs` only if the human asks
    for tabs; otherwise the configured `topics_layout` default applies.
-3. Run `telegram-assistant health` if not yet done.
+3. Skip `health` unless a problem surfaces (don't probe when nothing is wrong).
 4. Dry-run:
 
    ```bash
@@ -641,7 +739,7 @@ Request: «Переключи топики чата -1003911170598 на tabs.»
 2. Extracted: `--chat-id -1003911170598`, `--layout tabs`. If the human
    does not name a layout, fall back to
    `telegram.defaults.topics_layout` and surface that choice in the plan.
-3. Run `telegram-assistant health` if not yet done.
+3. Skip `health` unless a problem surfaces (don't probe when nothing is wrong).
 4. Dry-run:
 
    ```bash
@@ -1010,9 +1108,9 @@ Reuse the short templates from "Clarification templates" below.
   admins / reserve members or `@planfix_bot`) — never add `--force`
   on the agent's own initiative.
 - The human asks for an action that is not in the resource/action
-  table (writing a new bot, calling Telethon directly, editing
-  `data/config.yml`, etc.). Decline and ask whether the CLI flow
-  covers what they need.
+  table (writing a new bot, calling Telethon directly, hand-editing
+  `data/config.yml` outside the `access add` command, etc.). Decline and
+  ask whether the CLI flow covers what they need.
 - The request implies the agent should run `auth` itself, or collect
   a phone, code or 2FA password from the chat.
 
