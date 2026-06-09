@@ -475,6 +475,7 @@ def build_router() -> APIRouter:
                         operation_id=body.operation_id,
                     ),
                     authorizer=authorizer,
+                    sent_registry=sent_message_registry(request),
                 )
             except FolderError as exc:
                 raise _translate_folder_error(exc) from exc

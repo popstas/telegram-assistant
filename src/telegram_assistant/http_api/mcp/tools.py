@@ -606,6 +606,7 @@ async def _resolve_message_send(
                 operation_id=body.operation_id,
             ),
             authorizer=authorizer,
+            sent_registry=sent_message_registry(request),  # type: ignore[arg-type]
         )
         payload = result.to_dict()
         payload["mode"] = "mass"
