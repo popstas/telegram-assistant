@@ -47,6 +47,7 @@
 
 ### Documentation
 
+- skill: Require AskUserQuestion for confirmations and message input
 - plans: Revise feature-batch plan from revdiff review
 - plans: Add access/delete/MCP feature-batch plan
 - todo: Add MCP follow-up tasks
