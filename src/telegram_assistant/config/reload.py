@@ -21,7 +21,14 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from watchdog.events import FileSystemEvent, FileSystemEventHandler
+from watchdog.events import (
+    EVENT_TYPE_CREATED,
+    EVENT_TYPE_DELETED,
+    EVENT_TYPE_MODIFIED,
+    EVENT_TYPE_MOVED,
+    FileSystemEvent,
+    FileSystemEventHandler,
+)
 from watchdog.observers import Observer
 
 from telegram_assistant.config.loader import ConfigError, load_config
@@ -31,6 +38,19 @@ from telegram_assistant.observability.logging import get_logger
 logger = get_logger(__name__)
 
 DEFAULT_DEBOUNCE_SECONDS = 2.0
+
+# Only content-changing events should trigger a reload. Read-access events
+# (``opened`` / ``closed_no_write``) must be ignored: the reload itself opens
+# and reads the config file, which emits those events, and reacting to them
+# would re-arm the debounce and reload forever in a ~debounce-period cycle.
+_CHANGE_EVENT_TYPES = frozenset(
+    {
+        EVENT_TYPE_MODIFIED,
+        EVENT_TYPE_CREATED,
+        EVENT_TYPE_MOVED,
+        EVENT_TYPE_DELETED,
+    }
+)
 
 
 class _ConfigFileEventHandler(FileSystemEventHandler):
@@ -57,6 +77,11 @@ class _ConfigFileEventHandler(FileSystemEventHandler):
 
     def on_any_event(self, event: FileSystemEvent) -> None:
         if event.is_directory:
+            return
+        # Ignore read-access events (opened/closed_no_write); reacting to them
+        # would loop because the reload itself reads the file. Only act on
+        # content changes.
+        if event.event_type not in _CHANGE_EVENT_TYPES:
             return
         if self._matches(event):
             self._on_event()
@@ -92,6 +117,20 @@ class ConfigWatcher:
     def started(self) -> bool:
         return self._started
 
+    @property
+    def watched_directory(self) -> Path:
+        """The real directory the observer watches.
+
+        Resolves symlinks in the config path's parent. This matters in Docker:
+        the image symlinks ``/app/data -> /data`` and the app's config path is
+        the *relative* ``data/config.yml``, so the parent is ``data`` ->
+        ``/app/data`` (a symlink). An inotify watch scheduled on the symlink
+        path receives no events; watching the resolved real directory
+        (``/data``) does. We resolve here so the watch always lands on the real
+        inode regardless of how the path was given.
+        """
+        return self._path.parent.resolve()
+
     def trigger(self) -> None:
         """(Re)start the debounce timer; coalesces rapid edits into one reload."""
         with self._lock:
@@ -114,7 +153,7 @@ class ConfigWatcher:
         """Begin watching. No-op (with a warning) when the file path is absent."""
         if self._started:
             return
-        directory = self._path.parent
+        directory = self.watched_directory
         if not directory.exists():
             logger.warning(
                 "config hot-reload disabled: directory does not exist",
@@ -127,7 +166,11 @@ class ConfigWatcher:
         observer.start()
         self._observer = observer
         self._started = True
-        logger.info("config hot-reload watching", path=str(self._path))
+        logger.info(
+            "config hot-reload watching",
+            path=str(self._path),
+            watch_dir=str(directory),
+        )
 
     def stop(self) -> None:
         """Stop the observer and cancel any pending debounce timer."""

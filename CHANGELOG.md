@@ -32,6 +32,8 @@
 
 ### Bug Fixes
 
+- reload: Resolve symlinked config dir so hot-reload works in Docker
+- health: Silence per-probe Telethon app logs on /health
 - Record mass-send message ids in SentMessageRegistry
 - Preserve real base64 attachment filename in Telegram
 - review: Correct access config template + harden base64/logging tests
