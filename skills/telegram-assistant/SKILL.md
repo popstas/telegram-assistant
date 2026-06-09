@@ -74,8 +74,9 @@ Commands fall into three buckets:
    `notifications unmute`, `folders add-chat`, `folders remove-chat`,
    `operations retry`. Always:
    prepare command → run with `--dry-run` →
-   show the plan and dry-run output → wait for explicit human confirmation
-   → run the same command without `--dry-run`.
+   show the plan and dry-run output → ask for explicit human confirmation
+   **via the `AskUserQuestion` tool** → run the same command without
+   `--dry-run`.
 3. **State-changing, bulk or destructive** — `topics bulk-create`,
    `members bulk-add`, `members bulk-remove`, `messages send` in fan-out mode
    (folder + topic name). Same flow as bucket 2, plus the plan must show how
@@ -84,8 +85,14 @@ Commands fall into three buckets:
 
 Confirmation rules:
 
-- A confirmation is "explicit" when the human writes «да», «выполни»,
-  «подтверждаю», «ок», presses a confirmation button, or similar. Silence,
+- The agent **must** request every confirmation through the
+  `AskUserQuestion` tool — never as plain inline text. Present the dry-run
+  plan, then call `AskUserQuestion` with a clear yes/no choice (e.g.
+  «Выполнить» / «Отмена»). Run the real command only after the human picks
+  the affirmative option.
+- A confirmation is "explicit" when the human selects the affirmative
+  `AskUserQuestion` option (or writes «да», «выполни», «подтверждаю», «ок»,
+  presses a confirmation button, or similar). Silence,
   «давай посмотрим», «может быть» are not confirmations.
 - A confirmation applies only to the exact command shown in the plan. If
   parameters change (different chat, different list of users, different
@@ -140,7 +147,7 @@ not skip steps, even if the request looks obvious.
    never invent values.
 4. If a required parameter is missing or ambiguous, ask a short clarifying
    question (one question, no preamble). For `messages send`, if the message
-   text is missing, ask the human for it (AskUser) — never invent the message.
+   text is missing, ask the human for it (AskUserQuestion) — never invent the message.
 5. Do **not** run `telegram-assistant health` proactively. Skip it when nothing
    is wrong and go to the next step; run it only if a later command or dry-run
    surfaces an auth/DB/folder problem, or the human asks for it.
@@ -157,8 +164,10 @@ not skip steps, even if the request looks obvious.
    matched users), the full command that would run, and the relevant parts
    of the dry-run output (`status = dry_run`, planned actions, validation
    errors if any).
-9. Wait for an explicit confirmation. Do not move on after silence or vague
-   replies.
+9. Ask for an explicit confirmation **via the `AskUserQuestion` tool**
+   (a yes/no choice on the exact command shown). Do not move on after
+   silence or vague replies, and do not accept a confirmation collected
+   any other way.
 10. Run the real command — the same command as in step 7, with `--dry-run`
     removed.
 11. Return a short result: done / already done / skipped / Telegram error /
