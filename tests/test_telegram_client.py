@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any
 
@@ -169,6 +170,41 @@ async def test_get_client_logs_connect_events(
     messages = [record.getMessage() for record in caplog.records]
     assert any("telethon connect start" in message for message in messages)
     assert any("telethon connect success" in message for message in messages)
+
+
+async def test_get_client_quiet_demotes_connect_events_to_debug(
+    minimal_config_yaml: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """quiet=True (the /health probe path) keeps connect logs off INFO."""
+    manager, _clients = _make_manager(minimal_config_yaml)
+
+    logger_name = "telegram_assistant.telegram_client.session"
+    with caplog.at_level("INFO", logger=logger_name):
+        await manager.get_client(quiet=True)
+    info_messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert not any("telethon connect" in m for m in info_messages)
+
+    caplog.clear()
+    manager_dbg, _ = _make_manager(minimal_config_yaml)
+    with caplog.at_level("DEBUG", logger=logger_name):
+        await manager_dbg.get_client(quiet=True)
+    debug_messages = [r.getMessage() for r in caplog.records]
+    assert any("telethon connect start" in m for m in debug_messages)
+    assert any("telethon connect success" in m for m in debug_messages)
+
+
+async def test_state_quiet_demotes_probe_logs_to_debug(
+    minimal_config_yaml: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """quiet=True keeps state-probe logs (start/auth/get_me) off INFO."""
+    manager, _clients = _make_manager(minimal_config_yaml, already_authorized=True)
+
+    logger_name = "telegram_assistant.telegram_client.session"
+    with caplog.at_level("INFO", logger=logger_name):
+        await manager.state(quiet=True)
+    info_messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.INFO]
+    assert not any("telethon state" in m for m in info_messages)
+    assert not any("telethon get_me" in m for m in info_messages)
 
 
 async def test_get_client_drops_cached_client_when_connect_is_cancelled(

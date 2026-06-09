@@ -32,6 +32,8 @@
 
 ### Bug Fixes
 
+- Record mass-send message ids in SentMessageRegistry
+- Preserve real base64 attachment filename in Telegram
 - review: Correct access config template + harden base64/logging tests
 - health: Skip default folder probe
 - health: Preserve Telegram auth status

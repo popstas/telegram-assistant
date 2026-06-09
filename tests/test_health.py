@@ -82,7 +82,7 @@ class _FakeManager:
             else [_FakeFolder(folder_id=2, title="Planfix clients")]
         )
 
-    async def state(self) -> Any:
+    async def state(self, *, quiet: bool = False) -> Any:
         self.state_calls += 1
         if self._raise:
             raise RuntimeError("telegram unreachable")
@@ -95,7 +95,7 @@ class _FakeManager:
             me=_FakeMe() if self._authorized else None,
         )
 
-    async def get_client(self) -> Any:
+    async def get_client(self, *, quiet: bool = False) -> Any:
         return _FakeFolderClient(self._folders)
 
 
@@ -205,9 +205,9 @@ async def test_collect_health_times_out_slow_session_probe(
     minimal_config_yaml: str, tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     class _SlowManager(_FakeManager):
-        async def state(self) -> Any:
+        async def state(self, *, quiet: bool = False) -> Any:
             await asyncio.sleep(10)
-            return await super().state()
+            return await super().state(quiet=quiet)
 
     config = load_config_from_text(minimal_config_yaml)
     with caplog.at_level("WARNING", logger="telegram_assistant.health"):
@@ -228,7 +228,7 @@ async def test_collect_health_does_not_probe_default_folder(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:
     class _FailingFolderManager(_FakeManager):
-        async def get_client(self) -> Any:
+        async def get_client(self, *, quiet: bool = False) -> Any:
             raise AssertionError("default folder should not be probed")
 
     config = load_config_from_text(minimal_config_yaml)

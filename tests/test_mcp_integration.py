@@ -40,7 +40,7 @@ class FakeGoogleOidcProvider:
 class FakeSessionManager:
     _client = None
 
-    async def state(self) -> SessionState:
+    async def state(self, *, quiet: bool = False) -> SessionState:
         return SessionState(
             authorized=False,
             account_label="telegram-assistant-main",

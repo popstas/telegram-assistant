@@ -55,7 +55,7 @@ async def probe_telegram_session(manager: TelethonSessionManager | None) -> str:
     if manager is None:
         return SESSION_UNAUTHORIZED
     try:
-        state = await manager.state()
+        state = await manager.state(quiet=True)
     except Exception:
         return SESSION_UNAUTHORIZED
     return SESSION_AUTHORIZED if state.authorized else SESSION_UNAUTHORIZED
@@ -90,7 +90,7 @@ async def probe_default_folder(
     if manager is None:
         return FOLDER_MISSING
     try:
-        state = await manager.state()
+        state = await manager.state(quiet=True)
     except Exception:
         return FOLDER_MISSING
     if not state.authorized:
@@ -113,7 +113,7 @@ async def _resolve_folder_status(
     session is authorized.
     """
     try:
-        client = await manager.get_client()
+        client = await manager.get_client(quiet=True)
     except Exception:
         return FOLDER_MISSING
     try:
@@ -138,11 +138,13 @@ async def _probe_session_only(
 ) -> tuple[str, str]:
     """Return Telegram account health without probing folders."""
     if manager is None:
-        logger.info("telegram health probe skipped reason=no_session_manager")
+        logger.debug("telegram health probe skipped reason=no_session_manager")
         return SESSION_UNAUTHORIZED, FOLDER_NOT_CHECKED
-    logger.info("telegram health probe start")
+    logger.debug("telegram health probe start")
     try:
-        state = await asyncio.wait_for(manager.state(), timeout=timeout_seconds)
+        state = await asyncio.wait_for(
+            manager.state(quiet=True), timeout=timeout_seconds
+        )
     except TimeoutError:
         logger.warning(
             "telegram health session state timeout timeout_seconds=%s",
@@ -156,7 +158,7 @@ async def _probe_session_only(
             exc,
         )
         return SESSION_UNAUTHORIZED, FOLDER_NOT_CHECKED
-    logger.info(
+    logger.debug(
         "telegram health session state result authorized=%s",
         bool(state.authorized),
     )

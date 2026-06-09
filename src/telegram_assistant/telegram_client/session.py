@@ -95,14 +95,19 @@ class TelethonSessionManager:
     def account_label(self) -> str:
         return self._config.main_account_label
 
-    async def get_client(self) -> _TelethonLike:
+    async def get_client(self, *, quiet: bool = False) -> _TelethonLike:
         """Return a connected client, creating one on first use.
 
         If ``connect()`` raises, the cached client is dropped so a later call
         retries from scratch (and so HTTP backend factories that gate on
         ``_client is None`` correctly observe the disconnected state instead
         of handing out a client that never finished connecting).
+
+        ``quiet=True`` demotes the routine "connect start/success" lines to
+        DEBUG so the repeating ``/health`` probe does not spam INFO logs;
+        warnings/errors are always logged. Defaults to INFO for normal callers.
         """
+        connect_log = logger.debug if quiet else logger.info
         session_path = str(Path(self._config.session_path).expanduser())
         client_created = False
         if self._client is None:
@@ -120,7 +125,7 @@ class TelethonSessionManager:
             )
             client_created = True
         started = time.perf_counter()
-        logger.info(
+        connect_log(
             "telethon connect start account_label=%s session_path=%s client_created=%s",
             self.account_label,
             session_path,
@@ -151,7 +156,7 @@ class TelethonSessionManager:
             self._client = None
             raise
         duration_ms = int((time.perf_counter() - started) * 1000)
-        logger.info(
+        connect_log(
             "telethon connect success account_label=%s session_path=%s duration_ms=%s",
             self.account_label,
             session_path,
@@ -171,19 +176,26 @@ class TelethonSessionManager:
     def session_path_exists(self) -> bool:
         return Path(self._config.session_path).expanduser().exists()
 
-    async def state(self) -> SessionState:
-        """Probe the client and return a snapshot of its authorization state."""
-        logger.info("telethon state start account_label=%s", self.account_label)
-        client = await self.get_client()
+    async def state(self, *, quiet: bool = False) -> SessionState:
+        """Probe the client and return a snapshot of its authorization state.
+
+        ``quiet=True`` demotes the routine probe lines (and the underlying
+        connect logs) to DEBUG so the repeating ``/health`` probe stays quiet
+        at INFO. Defaults to INFO for the CLI ``health`` command and other
+        callers.
+        """
+        state_log = logger.debug if quiet else logger.info
+        state_log("telethon state start account_label=%s", self.account_label)
+        client = await self.get_client(quiet=quiet)
         authorized = await client.is_user_authorized()
-        logger.info(
+        state_log(
             "telethon state authorization account_label=%s authorized=%s",
             self.account_label,
             bool(authorized),
         )
         me = await client.get_me() if authorized else None
         if me is not None:
-            logger.info(
+            state_log(
                 "telethon get_me success account_label=%s user_id=%s username=%s",
                 self.account_label,
                 getattr(me, "id", None),
