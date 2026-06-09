@@ -53,6 +53,22 @@ class Plugin(Protocol):
         are appended to ``skipped`` and never raise (the chat already exists).
         """
 
+    async def after_topic_create(
+        self,
+        *,
+        backend: Any,
+        chat_id: int,
+        topic_id: int,
+        external_ref: int | str | None,
+        skipped: list[dict[str, Any]],
+    ) -> bool:
+        """Run post-create side effects for a new topic (service message, cleanup).
+
+        Mirrors :meth:`after_group_create` but scoped to a forum topic. Returns
+        ``True`` if a service message was sent. Best-effort: failures are
+        appended to ``skipped`` and never raise (the topic already exists).
+        """
+
 
 class PluginRegistry:
     """Aggregates active plugins behind one façade used by domain services."""
@@ -107,6 +123,32 @@ class PluginRegistry:
                 chat_id=chat_id,
                 external_ref=external_ref,
                 members_added=members_added,
+                skipped=skipped,
+            ):
+                sent = True
+        return sent
+
+    async def after_topic_create(
+        self,
+        *,
+        backend: Any,
+        chat_id: int,
+        topic_id: int,
+        external_ref: int | str | None,
+        skipped: list[dict[str, Any]],
+    ) -> bool:
+        sent = False
+        for p in self._plugins:
+            # The hook is optional; skip plugins that don't implement it so a
+            # partial plugin (or a test fake) never breaks topic creation.
+            hook = getattr(p, "after_topic_create", None)
+            if hook is None:
+                continue
+            if await hook(
+                backend=backend,
+                chat_id=chat_id,
+                topic_id=topic_id,
+                external_ref=external_ref,
                 skipped=skipped,
             ):
                 sent = True

@@ -321,6 +321,98 @@ class _PagingTopicsClient:
         return type("Result", (), {"topics": page})()
 
 
+class _IterMessagesClient:
+    """Client double recording ``iter_messages`` kwargs and yielding messages."""
+
+    def __init__(self, messages: list[Any]) -> None:
+        self._messages = messages
+        self.iter_calls: list[dict[str, Any]] = []
+        self.deleted: list[tuple[Any, list[int]]] = []
+
+    async def get_input_entity(self, chat_id: int) -> _Peer:
+        return _Peer(chat_id)
+
+    def iter_messages(self, channel: Any, **kwargs: Any) -> Any:
+        self.iter_calls.append({"channel": channel, **kwargs})
+
+        async def _gen() -> Any:
+            for m in self._messages:
+                yield m
+
+        return _gen()
+
+    async def delete_messages(self, channel: Any, ids: list[int]) -> None:
+        self.deleted.append((channel, list(ids)))
+
+
+def _msg(msg_id: int, *, username: str | None, reply_to: int | None, text: str) -> Any:
+    sender = type("S", (), {"username": username})() if username is not None else None
+    return type(
+        "M",
+        (),
+        {"id": msg_id, "sender": sender, "reply_to_msg_id": reply_to, "message": text},
+    )()
+
+
+@pytest.mark.asyncio
+async def test_get_recent_messages_scopes_to_topic_and_maps_fields() -> None:
+    messages = [
+        _msg(201, username="planfix_bot", reply_to=200, text="ok"),
+        _msg(200, username=None, reply_to=555, text="/task 9"),
+        _msg(198, username="planfix_bot", reply_to=None, text="welcome"),
+    ]
+    client = _IterMessagesClient(messages)
+    backend = TelethonTopicBackend(client)
+
+    out = await backend.get_recent_messages(chat_id=-100, limit=20, topic_id=555)
+
+    # The scan is scoped to the topic thread via ``reply_to``.
+    assert client.iter_calls[0]["limit"] == 20
+    assert client.iter_calls[0]["reply_to"] == 555
+    assert out[0] == {
+        "id": 201,
+        "sender_username": "planfix_bot",
+        "reply_to_msg_id": 200,
+        "text": "ok",
+    }
+    # A message with no sender maps to ``sender_username = None``.
+    assert out[1]["sender_username"] is None
+
+
+@pytest.mark.asyncio
+async def test_get_recent_messages_unscoped_without_topic_id() -> None:
+    client = _IterMessagesClient([])
+    backend = TelethonTopicBackend(client)
+
+    await backend.get_recent_messages(chat_id=-100, limit=5)
+
+    assert "reply_to" not in client.iter_calls[0]
+    assert client.iter_calls[0]["limit"] == 5
+
+
+@pytest.mark.asyncio
+async def test_delete_messages_forwards_ids_and_skips_empty() -> None:
+    client = _IterMessagesClient([])
+    backend = TelethonTopicBackend(client)
+
+    await backend.delete_messages(chat_id=-100, message_ids=[198, 200, 201])
+    assert client.deleted == [(_PeerEq(-100), [198, 200, 201])]
+
+    await backend.delete_messages(chat_id=-100, message_ids=[])
+    # No second delete call for an empty id list.
+    assert len(client.deleted) == 1
+
+
+class _PeerEq:
+    """Compares equal to a ``_Peer`` with the same chat_id (delete target)."""
+
+    def __init__(self, chat_id: int) -> None:
+        self.chat_id = chat_id
+
+    def __eq__(self, other: Any) -> bool:
+        return getattr(other, "chat_id", None) == self.chat_id
+
+
 @pytest.mark.asyncio
 async def test_list_topics_paginates_beyond_first_page(
     monkeypatch: pytest.MonkeyPatch,

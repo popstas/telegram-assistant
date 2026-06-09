@@ -11,9 +11,12 @@ Idempotency keys (per the plan's Technical Details):
 
 First-message logic, in order:
 
-* a plugin-provided service message (e.g. ``/task {external_ref}``) when one applies
-* otherwise ``message`` if provided
-* otherwise duplicate the topic name
+* ``message`` if provided, otherwise the duplicated topic name — this is the
+  *surviving* first message
+* when a plugin provides a service message (e.g. ``/task {external_ref}``), the
+  plugin posts it as a *second* message via ``after_topic_create`` and, if
+  configured, cleans it up — so the surviving first message above is what stays
+  visible in the topic
 """
 
 from __future__ import annotations
@@ -24,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from telegram_assistant.access.service import AccessLevel, Authorizer
+from telegram_assistant.observability.logging import get_logger
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
     OperationItemRecord,
@@ -37,6 +41,8 @@ from telegram_assistant.worker.queue import (
     FloodWaitError,
     WorkerQueue,
 )
+
+logger = get_logger(__name__)
 
 
 class TopicError(RuntimeError):
@@ -186,6 +192,16 @@ class TopicBackend(Protocol):
     async def close_topic(self, *, chat_id: int, topic_id: int) -> None:
         ...
 
+    async def get_recent_messages(
+        self, *, chat_id: int, limit: int, topic_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        ...
+
+    async def delete_messages(
+        self, *, chat_id: int, message_ids: Sequence[int]
+    ) -> None:
+        ...
+
     async def list_topics(self, *, chat_id: int) -> list[TopicSummary]:
         ...
 
@@ -194,21 +210,24 @@ def _first_message(
     *,
     request: TopicCreateRequest,
     plugins: PluginRegistry,
-) -> tuple[str, str]:
-    """Decide which first message to send and return ``(kind, text)``.
+) -> tuple[str, str, bool]:
+    """Decide the *surviving* first message and return ``(kind, text, task_pending)``.
 
-    Returns one of three branches:
+    The surviving first message is the explicit ``message`` if provided, else
+    the duplicated topic name. ``task_pending`` is ``True`` when a plugin
+    provides a service message (e.g. ``/task``) for this topic — in that case
+    the plugin posts (and optionally cleans up) that service message as a
+    *second* message via ``after_topic_create``, leaving the surviving message
+    visible.
 
-    * ``("task", <plugin message>)`` when a plugin provides a service message
-    * ``("message", <message>)`` when an explicit ``message`` is provided
-    * ``("topic_name", <topic_name>)`` otherwise
+    * ``("message", <message>, task_pending)`` when an explicit ``message`` is provided
+    * ``("topic_name", <topic_name>, task_pending)`` otherwise
     """
     task = plugins.topic_first_message(external_ref=request.external_ref)
-    if task is not None:
-        return "task", task
+    task_pending = task is not None
     if request.message is not None and request.message.strip():
-        return "message", request.message
-    return "topic_name", request.topic_name
+        return "message", request.message, task_pending
+    return "topic_name", request.topic_name, task_pending
 
 
 async def _execute_create(
@@ -221,9 +240,11 @@ async def _execute_create(
         chat_id=request.telegram_chat_id, name=request.topic_name
     )
 
-    kind, text = _first_message(request=request, plugins=plugins)
+    kind, text, task_pending = _first_message(request=request, plugins=plugins)
     message_id: int | None = None
     try:
+        # The surviving first message (topic name or explicit message). When a
+        # plugin posts a `/task` message afterwards, this is what stays visible.
         message_id = await backend.send_message(
             chat_id=request.telegram_chat_id,
             text=text,
@@ -239,6 +260,26 @@ async def _execute_create(
         # The caller can resend manually. We record the attempt without a
         # message id so the result still reflects which branch ran.
         message_id = None
+
+    if task_pending:
+        # Delegate the plugin service message (e.g. `/task <ref>`) and its
+        # cleanup to the active plugins. Best-effort: the plugin swallows its
+        # own failures into `skipped`, mirroring `after_group_create`.
+        skipped: list[dict[str, Any]] = []
+        await plugins.after_topic_create(
+            backend=backend,
+            chat_id=request.telegram_chat_id,
+            topic_id=topic_id,
+            external_ref=request.external_ref,
+            skipped=skipped,
+        )
+        if skipped:
+            logger.debug(
+                "topic post-create skipped",
+                chat_id=request.telegram_chat_id,
+                topic_id=topic_id,
+                items=skipped,
+            )
 
     return TopicCreateResult(
         telegram_chat_id=request.telegram_chat_id,
@@ -543,9 +584,10 @@ async def bulk_create_topics(
     ``bulk_item_key(parent_op.id, topic_create_key(...))`` so a restart
     resumes exactly where the previous run left off.
 
-    Per-item first-message logic mirrors :func:`create_topic`: a plugin-provided
-    service message (e.g. ``/task <id>``) when one applies, else the explicit
-    ``message``, else the topic name itself.
+    Per-item first-message logic mirrors :func:`create_topic`: the surviving
+    first message is the explicit ``message`` else the topic name; when a plugin
+    applies it posts (and optionally cleans up) its ``/task <id>`` service
+    message as a second message via ``after_topic_create``.
     """
     if plugins is None:
         plugins = PluginRegistry()

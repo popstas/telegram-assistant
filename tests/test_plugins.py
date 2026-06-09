@@ -69,6 +69,43 @@ class FakeGroupBackend:
         pass
 
 
+class FakeTopicBackend:
+    """Topic backend recording sends, message scans, and deletions.
+
+    Hands out sequential message ids so the surviving first message and the
+    plugin ``/task`` message are distinguishable.
+    """
+
+    def __init__(
+        self,
+        *,
+        recent_messages: list[dict[str, Any]] | None = None,
+        next_id: int = 200,
+    ) -> None:
+        self._recent = recent_messages or []
+        self._next_id = next_id
+        self.messages: list[tuple[int, str, int | None]] = []
+        self.deleted: list[int] = []
+        self.recent_calls: list[tuple[int, int, int | None]] = []
+
+    async def send_message(
+        self, *, chat_id: int, text: str, topic_id: int | None = None
+    ) -> int:
+        self.messages.append((chat_id, text, topic_id))
+        mid = self._next_id
+        self._next_id += 1
+        return mid
+
+    async def get_recent_messages(
+        self, *, chat_id: int, limit: int, topic_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        self.recent_calls.append((chat_id, limit, topic_id))
+        return list(self._recent)
+
+    async def delete_messages(self, *, chat_id: int, message_ids: Any) -> None:
+        self.deleted.extend(int(m) for m in message_ids)
+
+
 @pytest.fixture()
 def store(tmp_path: Path) -> OperationStore:
     return OperationStore(tmp_path / "state.db")
@@ -212,6 +249,113 @@ async def test_create_group_plugin_on_sends_task_and_cleans_up(
     assert backend.messages == [(-100123, "/task 9")]
     # welcome (40), command (42), reply (43) all deleted.
     assert set(backend.deleted) == {40, 42, 43}
+
+
+# ---------------------------------------------------------------------------
+# Planfix topic hook: post /task as a second message + scoped cleanup
+# ---------------------------------------------------------------------------
+
+
+async def test_planfix_after_topic_create_posts_task_and_cleans_up() -> None:
+    p = _planfix(cleanup_messages=True, task_reply_wait_seconds=0)
+    # The /task message is the first send → id 200. The bot replies to 200.
+    recent = [
+        {"id": 198, "sender_username": "planfix_bot", "reply_to_msg_id": None, "text": "welcome"},
+        {"id": 200, "sender_username": "me", "reply_to_msg_id": 555, "text": "/task 9"},
+        {"id": 201, "sender_username": "planfix_bot", "reply_to_msg_id": 200, "text": "ok"},
+    ]
+    backend = FakeTopicBackend(recent_messages=recent, next_id=200)
+    skipped: list[dict[str, Any]] = []
+
+    sent = await p.after_topic_create(
+        backend=backend, chat_id=-100, topic_id=555, external_ref=9, skipped=skipped
+    )
+
+    assert sent is True
+    # `/task` posted into the topic (topic_id threaded through).
+    assert backend.messages == [(-100, "/task 9", 555)]
+    # Cleanup scan is scoped to the topic.
+    assert backend.recent_calls and backend.recent_calls[0][2] == 555
+    # welcome (198), command (200), reply (201) deleted; the topic-name message
+    # is the core's responsibility and never reaches this hook.
+    assert set(backend.deleted) == {198, 200, 201}
+    assert skipped == []
+
+
+async def test_planfix_after_topic_create_no_cleanup_when_disabled() -> None:
+    p = _planfix(cleanup_messages=False)
+    backend = FakeTopicBackend(next_id=200)
+    skipped: list[dict[str, Any]] = []
+
+    sent = await p.after_topic_create(
+        backend=backend, chat_id=-100, topic_id=555, external_ref=9, skipped=skipped
+    )
+
+    assert sent is True
+    assert backend.messages == [(-100, "/task 9", 555)]
+    assert backend.deleted == []
+    assert backend.recent_calls == []  # cleanup never polled
+
+
+async def test_planfix_after_topic_create_skips_without_ref() -> None:
+    p = _planfix(cleanup_messages=True)
+    backend = FakeTopicBackend()
+
+    sent = await p.after_topic_create(
+        backend=backend, chat_id=-100, topic_id=555, external_ref=None, skipped=[]
+    )
+
+    assert sent is False
+    assert backend.messages == []
+    assert backend.deleted == []
+
+
+async def test_planfix_after_topic_create_missing_reply_still_deletes_task() -> None:
+    p = _planfix(cleanup_messages=True, task_reply_wait_seconds=0)
+    recent = [
+        {"id": 198, "sender_username": "planfix_bot", "reply_to_msg_id": None, "text": "welcome"},
+        {"id": 200, "sender_username": "me", "reply_to_msg_id": 555, "text": "/task 9"},
+    ]
+    backend = FakeTopicBackend(recent_messages=recent, next_id=200)
+    skipped: list[dict[str, Any]] = []
+
+    sent = await p.after_topic_create(
+        backend=backend, chat_id=-100, topic_id=555, external_ref=9, skipped=skipped
+    )
+
+    assert sent is True
+    # The bot reply never arrived, but the welcome (198) and our command (200)
+    # are still deleted; the missing reply is recorded.
+    assert set(backend.deleted) == {198, 200}
+    assert any(s["step"] == "cleanup_bot_reply" for s in skipped)
+
+
+async def test_registry_after_topic_create_skips_plugin_without_hook() -> None:
+    class BarePlugin:
+        name = "bare"
+
+        def title_postfix(self) -> str:
+            return ""
+
+        def protected_accounts(self) -> set[str]:
+            return set()
+
+        def topic_first_message(self, *, external_ref: Any) -> str | None:
+            return None
+
+        def group_first_message(self, *, external_ref: Any, members_added: Any) -> str | None:
+            return None
+
+        async def after_group_create(self, **_kwargs: Any) -> bool:
+            return False
+
+        # Intentionally no `after_topic_create`.
+
+    reg = PluginRegistry([BarePlugin()])
+    sent = await reg.after_topic_create(
+        backend=object(), chat_id=1, topic_id=2, external_ref=3, skipped=[]
+    )
+    assert sent is False
 
 
 # ---------------------------------------------------------------------------

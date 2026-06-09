@@ -955,7 +955,9 @@ def topics_create(
             external_ref=effective_ref,
             message=message,
         )
-        kind, text = _first_message(request=request_preview, plugins=plugins)
+        kind, text, task_pending = _first_message(
+            request=request_preview, plugins=plugins
+        )
         warnings: list[str] = []
         if list_error is not None:
             warnings.append(
@@ -971,6 +973,11 @@ def topics_create(
             f"create topic {topic_name!r} in chat {resolved_chat_id}",
             f"send first message ({kind}): {text!r}",
         ]
+        if task_pending:
+            task_preview = plugins.topic_first_message(external_ref=effective_ref)
+            planned_actions.append(
+                f"send plugin service message: {task_preview!r}"
+            )
         resolved_payload: dict[str, object] = {
             "telegram_chat_id": resolved_chat_id,
             "topic_name": topic_name,

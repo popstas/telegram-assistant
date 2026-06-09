@@ -70,6 +70,7 @@ class FakeTopicBackend:
         self._fail_for = fail_for or {}
         self.created: list[tuple[int, str]] = []
         self.messages: list[tuple[int, str, int | None]] = []
+        self.deleted: list[int] = []
 
     async def create_topic(self, *, chat_id: int, name: str) -> int:
         if name in self._fail_for:
@@ -84,6 +85,16 @@ class FakeTopicBackend:
     ) -> int:
         self.messages.append((chat_id, text, topic_id))
         return self._message_id
+
+    async def get_recent_messages(
+        self, *, chat_id: int, limit: int, topic_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        return []
+
+    async def delete_messages(
+        self, *, chat_id: int, message_ids: Any
+    ) -> None:
+        self.deleted.extend(int(m) for m in message_ids)
 
 
 class FakeFolderBackend:
@@ -161,8 +172,10 @@ async def test_bulk_create_happy_path_creates_all_topics(
     assert result.needs_review == 0
     assert result.skipped == 0
     assert [it.status for it in result.items] == ["created", "created", "created"]
-    # First-message logic is reused per item:
-    assert result.items[0].first_message_kind == "task"
+    # First-message logic is reused per item. The surviving first message is the
+    # topic name (item 0, 2) or the explicit message (item 1); `/task` for item 0
+    # is a cleaned-up second message handled by the plugin.
+    assert result.items[0].first_message_kind == "topic_name"
     assert result.items[1].first_message_kind == "message"
     assert result.items[2].first_message_kind == "topic_name"
     # Topic ids assigned sequentially
@@ -385,10 +398,12 @@ async def test_bulk_create_first_message_flood_wait_propagates(
     # The flood_wait + margin (4 + 2) shows up exactly once: the queue paused
     # the whole item and retried it cleanly, including the create_topic step.
     assert sleeps == [6.0]
-    # create_topic ran twice (the queue retries the whole handler from scratch),
-    # send_message ran twice too (first raised, second succeeded).
+    # create_topic ran twice (the queue retries the whole handler from scratch).
+    # send_message ran three times: attempt 1 raised on the surviving first
+    # message; on retry the surviving message (call 2) and the plugin `/task`
+    # second message (call 3) both succeeded.
     assert backend.create_calls == 2
-    assert backend.send_calls == 2
+    assert backend.send_calls == 3
     assert result.created == 1
     assert op.status is OperationStatus.COMPLETED
 
@@ -674,7 +689,7 @@ def test_cli_topics_bulk_create_from_csv(
     assert statuses == ["created", "created", "created"]
     # CSV parsing preserves message-when-supplied
     kinds = [it["first_message_kind"] for it in payload["items"]]
-    assert kinds == ["task", "message", "task"]
+    assert kinds == ["topic_name", "message", "topic_name"]
 
 
 def test_cli_topics_bulk_create_from_json(

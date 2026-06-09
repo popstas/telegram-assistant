@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 import secrets
+from collections.abc import Sequence
 from typing import Any
 
 from telegram_assistant.telegram_client.errors import translate_flood_wait
@@ -96,6 +97,48 @@ class TelethonTopicBackend:
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
         return int(getattr(sent, "id", 0))
+
+    async def get_recent_messages(
+        self, *, chat_id: int, limit: int, topic_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        # When ``topic_id`` is set, scope the scan to that forum topic thread so
+        # cleanup never touches messages from sibling topics. Telethon's
+        # ``reply_to`` filter on ``iter_messages`` selects a single topic thread.
+        try:
+            channel = await self._client.get_input_entity(chat_id)
+            kwargs: dict[str, Any] = {"limit": limit}
+            if topic_id is not None:
+                kwargs["reply_to"] = topic_id
+            out: list[dict[str, Any]] = []
+            async for msg in self._client.iter_messages(channel, **kwargs):
+                sender = getattr(msg, "sender", None)
+                username = (
+                    getattr(sender, "username", None) if sender is not None else None
+                )
+                reply_to = getattr(msg, "reply_to_msg_id", None)
+                out.append(
+                    {
+                        "id": int(getattr(msg, "id", 0)),
+                        "sender_username": username,
+                        "reply_to_msg_id": int(reply_to) if reply_to else None,
+                        "text": getattr(msg, "message", "") or "",
+                    }
+                )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        return out
+
+    async def delete_messages(
+        self, *, chat_id: int, message_ids: Sequence[int]
+    ) -> None:
+        ids = [int(m) for m in message_ids]
+        if not ids:
+            return
+        try:
+            channel = await self._client.get_input_entity(chat_id)
+            await self._client.delete_messages(channel, ids)
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
 
     async def close_topic(self, *, chat_id: int, topic_id: int) -> None:
         try:

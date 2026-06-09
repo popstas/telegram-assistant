@@ -345,8 +345,11 @@ def test_cli_topics_create_dry_run_with_chat_id(
         ),
     )
     assert payload["resolved"]["telegram_chat_id"] == -100
-    assert payload["resolved"]["first_message_kind"] == "task"
-    assert payload["resolved"]["first_message_text"] == "/task 55"
+    # Surviving first message is the topic name; the plugin `/task` message is
+    # planned as a separate action.
+    assert payload["resolved"]["first_message_kind"] == "topic_name"
+    assert payload["resolved"]["first_message_text"] == "Demo"
+    assert any("/task 55" in action for action in payload["planned_actions"])
     assert payload["resolved"]["existing_topic_ids"] == []
     assert backend.created == []
     assert _operation_count(store) == 0

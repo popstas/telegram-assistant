@@ -52,13 +52,18 @@ class FakeTopicBackend:
         message_id: int = 12345,
         fail_create: bool = False,
         fail_send: bool = False,
+        recent_messages: list[dict[str, Any]] | None = None,
     ) -> None:
         self._topic_id = topic_id
-        self._message_id = message_id
+        # Hand out sequential ids so the surviving first message and the plugin
+        # `/task` message are distinguishable in assertions.
+        self._next_id = message_id
         self._fail_create = fail_create
         self._fail_send = fail_send
+        self._recent = list(recent_messages or [])
         self.created: list[tuple[int, str]] = []
         self.messages: list[tuple[int, str, int | None]] = []
+        self.deleted: list[int] = []
 
     async def create_topic(self, *, chat_id: int, name: str) -> int:
         if self._fail_create:
@@ -72,7 +77,19 @@ class FakeTopicBackend:
         if self._fail_send:
             raise RuntimeError("rate limited")
         self.messages.append((chat_id, text, topic_id))
-        return self._message_id
+        mid = self._next_id
+        self._next_id += 1
+        return mid
+
+    async def get_recent_messages(
+        self, *, chat_id: int, limit: int, topic_id: int | None = None
+    ) -> list[dict[str, Any]]:
+        return list(self._recent)
+
+    async def delete_messages(
+        self, *, chat_id: int, message_ids: Any
+    ) -> None:
+        self.deleted.extend(int(m) for m in message_ids)
 
 
 class FakeFolderBackend:
@@ -108,7 +125,7 @@ def store(tmp_path: Path) -> OperationStore:
     return OperationStore(tmp_path / "state.db")
 
 
-async def test_create_topic_task_id_branch_sends_task_command(
+async def test_create_topic_task_id_branch_sends_name_then_task_command(
     store: OperationStore,
 ) -> None:
     backend = FakeTopicBackend()
@@ -124,9 +141,16 @@ async def test_create_topic_task_id_branch_sends_task_command(
 
     assert op.status is OperationStatus.COMPLETED
     assert result.telegram_topic_id == 555
-    assert result.first_message_kind == "task"
-    assert result.first_message_text == "/task 42"
-    assert backend.messages == [(-100, "/task 42", 555)]
+    # The surviving first message is the topic name; the plugin posts `/task`
+    # as a second message (cleanup is off in this plugin config).
+    assert result.first_message_kind == "topic_name"
+    assert result.first_message_text == "Client request"
+    assert result.telegram_message_id == 12345
+    assert backend.messages == [
+        (-100, "Client request", 555),
+        (-100, "/task 42", 555),
+    ]
+    assert backend.deleted == []
     assert result.replayed is False
 
 
@@ -250,8 +274,10 @@ async def test_create_topic_first_message_failure_is_non_fatal(
     )
     assert op.status is OperationStatus.COMPLETED
     assert result.telegram_topic_id == 555
-    assert result.first_message_kind == "task"
-    assert result.first_message_text == "/task 33"
+    # The surviving first message is the topic name; its send failed, so the
+    # message id is None. The plugin `/task` send fails too (best-effort).
+    assert result.first_message_kind == "topic_name"
+    assert result.first_message_text == "Created but silent"
     assert result.telegram_message_id is None
 
 
@@ -345,7 +371,9 @@ def test_http_create_topic_happy_path(minimal_config_yaml: str) -> None:
     body = resp.json()
     assert body["telegram_chat_id"] == -100
     assert body["telegram_topic_id"] == 555
-    assert body["first_message_kind"] == "task"
+    # Surviving first message is the topic name; `/task` is a cleaned-up second
+    # message handled by the plugin.
+    assert body["first_message_kind"] == "topic_name"
     assert body["operation_status"] == "completed"
 
 
@@ -509,7 +537,7 @@ def test_cli_topics_create_with_chat_id(
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["telegram_chat_id"] == -100
     assert payload["telegram_topic_id"] == 555
-    assert payload["first_message_kind"] == "task"
+    assert payload["first_message_kind"] == "topic_name"
 
 
 def test_cli_topics_create_with_chat_name_resolves_via_folder(
