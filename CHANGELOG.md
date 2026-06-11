@@ -19,6 +19,10 @@
 - Add rename idempotency keys for groups and topics
 - planfix: Clean up /task in topics, keep topic name **BREAKING**
 
+### Bug Fixes
+
+- review: Cover rename pending/failed HTTP arms + MCP arg guards
+
 ### Documentation
 
 - plan: Rename groups and topics across all surfaces
