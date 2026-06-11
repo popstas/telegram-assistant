@@ -122,12 +122,12 @@
 - [x] run full `pytest` - must pass before next task
 
 ### Task 11: Verify acceptance criteria
-- [ ] verify rename works on all four code surfaces (CLI, HTTP, MCP) + skill/docs updated
-- [ ] verify idempotency: identical rename replays; different title is a fresh op; FLOOD_WAIT → needs_review + `operations retry` works
-- [ ] verify access gate: WRITE required; allow-all when `telegram.access` omitted
-- [ ] verify `--dry-run` mutates nothing on CLI
-- [ ] run full `pytest` + `ruff check src tests` - all green
-- [ ] verify test coverage of new modules meets project standard
+- [x] verify rename works on all four code surfaces (CLI, HTTP, MCP) + skill/docs updated
+- [x] verify idempotency: identical rename replays; different title is a fresh op; FLOOD_WAIT → needs_review + `operations retry` works
+- [x] verify access gate: WRITE required; allow-all when `telegram.access` omitted
+- [x] verify `--dry-run` mutates nothing on CLI
+- [x] run full `pytest` + `ruff check src tests` - all green
+- [x] verify test coverage of new modules meets project standard
 
 ### Task 12: [Final] Documentation + changelog
 - [ ] confirm README + SKILL.md reflect final command/tool names and args
