@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add topic rename HTTP endpoints
 - Add group rename HTTP endpoint
 - Add topics rename CLI command
 - Add groups rename CLI command

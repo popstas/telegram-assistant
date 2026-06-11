@@ -217,6 +217,7 @@ EXPECTED_TOOL_NAMES = {
     "telegram_folders_inspect",
     "telegram_folders_remove_chat",
     "telegram_groups_create",
+    "telegram_groups_rename",
     "telegram_health",
     "telegram_members_add",
     "telegram_members_remove",
@@ -233,6 +234,7 @@ EXPECTED_TOOL_NAMES = {
     "telegram_topics_close",
     "telegram_topics_create",
     "telegram_topics_layout",
+    "telegram_topics_rename",
 }
 
 

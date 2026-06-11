@@ -100,12 +100,12 @@
 - [x] run tests - must pass before next task
 
 ### Task 8: MCP `telegram_groups_rename` + `telegram_topics_rename`
-- [ ] register `telegram_groups_rename` and `telegram_topics_rename` tools in `http_api/mcp/tools.py`, delegating to the same domain services with WRITE enforcement (mirror `telegram_topics_close`)
-- [ ] keep MCP arg surface minimal (entity/chat ref + new_title + optional topic id/name + reason), consistent with the trimmed `telegram_messages_send`
-- [ ] add both names to `EXPECTED_TOOL_NAMES` in `tests/test_mcp_mount.py`
-- [ ] verify the tools honor `mcp.disabled_tools` prefix pruning (covered by existing mount filter)
-- [ ] write/extend MCP tests: tools present in mount, callable happy path with fake backend, WRITE-denied path
-- [ ] run tests - must pass before next task
+- [x] register `telegram_groups_rename` and `telegram_topics_rename` tools in `http_api/mcp/tools.py`, delegating to the same domain services with WRITE enforcement (mirror `telegram_topics_close`)
+- [x] keep MCP arg surface minimal (entity/chat ref + new_title + optional topic id/name + reason), consistent with the trimmed `telegram_messages_send`
+- [x] add both names to `EXPECTED_TOOL_NAMES` in `tests/test_mcp_mount.py`
+- [x] verify the tools honor `mcp.disabled_tools` prefix pruning (covered by existing mount filter — `telegram_groups_*`/`telegram_topics_*` prune test still green)
+- [x] write/extend MCP tests: tools present in mount, callable happy path with fake backend, WRITE-denied path
+- [x] run tests - must pass before next task
 
 ### Task 9: Skill + README sync
 - [ ] add `groups rename` and `topics rename` to `skills/telegram-assistant/SKILL.md` (commands + usage examples) and the MCP tool catalog
