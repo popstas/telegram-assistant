@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 from telegram_assistant.config import load_config_from_text
 from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.http_api import create_app
-from telegram_assistant.persistence import OperationStore
+from telegram_assistant.persistence import OperationStore, idempotency
 from telegram_assistant.topics import TopicSummary
 from telegram_assistant.worker.queue import FloodWaitError
 
@@ -386,6 +386,65 @@ def test_http_rename_by_name_denied_before_resolution() -> None:
         headers=AUTH,
     )
     assert resp.status_code == 403, resp.text
+    assert backend.renamed == []
+
+
+def test_http_rename_previous_failed_returns_409() -> None:
+    """A pre-seeded failed op under the target-title key surfaces
+    ``previous_attempt_failed`` (409) without touching the backend."""
+    store = _make_store()
+    key = idempotency.topic_rename_key(
+        telegram_chat_id=-100, telegram_topic_id=42, new_title="X"
+    )
+    begin = store.begin_operation(
+        operation_type=idempotency.TOPIC_RENAME,
+        idempotency_key=key,
+        request_payload={
+            "telegram_chat_id": -100,
+            "telegram_topic_id": 42,
+            "new_title": "X",
+        },
+    )
+    store.fail_operation(begin.operation.id, "nope")
+
+    backend = FakeTopicBackend(topics=[TopicSummary(topic_id=42, title="Old")])
+    client = _client(None, backend=backend, store=store)
+    resp = client.post(
+        "/telegram/topics/42/rename",
+        json={"telegram_chat_id": -100, "new_title": "X"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["error"] == "previous_attempt_failed"
+    assert backend.renamed == []
+
+
+def test_http_rename_pending_returns_409() -> None:
+    """A still-pending op under the target-title key surfaces ``pending``
+    (409) without touching the backend."""
+    store = _make_store()
+    key = idempotency.topic_rename_key(
+        telegram_chat_id=-100, telegram_topic_id=42, new_title="X"
+    )
+    store.begin_operation(
+        operation_type=idempotency.TOPIC_RENAME,
+        idempotency_key=key,
+        request_payload={
+            "telegram_chat_id": -100,
+            "telegram_topic_id": 42,
+            "new_title": "X",
+        },
+    )
+
+    backend = FakeTopicBackend(topics=[TopicSummary(topic_id=42, title="Old")])
+    client = _client(None, backend=backend, store=store)
+    resp = client.post(
+        "/telegram/topics/42/rename",
+        json={"telegram_chat_id": -100, "new_title": "X"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["error"] == "pending"
     assert backend.renamed == []
 
 

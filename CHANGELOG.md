@@ -5,6 +5,7 @@
 
 ### Features
 
+- Finalize rename docs and regenerate changelog
 - Verify rename acceptance criteria across all surfaces
 - Add group/topic rename round-trips to live e2e scripts
 - Document groups/topics rename in skill and README

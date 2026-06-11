@@ -623,6 +623,77 @@ def test_mcp_topics_rename_requires_write_access(
     assert backend.renamed == []
 
 
+def test_mcp_topics_rename_rejects_both_topic_id_and_name(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    with _client(minimal_config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_rename",
+            {
+                "telegram_chat_id": -100123,
+                "topic_id": 42,
+                "topic_name": "Kickoff",
+                "new_title": "Renamed",
+            },
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "invalid_request"' in text
+    assert "exactly one of topic_id or topic_name" in text
+    assert backend.renamed == []
+
+
+def test_mcp_topics_rename_rejects_neither_topic_id_nor_name(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    with _client(minimal_config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_rename",
+            {"telegram_chat_id": -100123, "new_title": "Renamed"},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "invalid_request"' in text
+    assert "exactly one of topic_id or topic_name" in text
+    assert backend.renamed == []
+
+
+def test_mcp_topics_rename_rejects_non_positive_topic_id(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    with _client(minimal_config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_rename",
+            {"telegram_chat_id": -100123, "topic_id": 0, "new_title": "Renamed"},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "invalid_request"' in text
+    assert "topic_id must be a positive integer" in text
+    assert backend.renamed == []
+
+
 def test_mcp_members_add_accepts_generic_chat_resolution_args(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:

@@ -898,18 +898,14 @@ def groups_rename(
         if chat_name is not None:
             resolved_payload["chat_name"] = chat_name
             resolved_payload["folder_name"] = resolved_folder_name
-        planned_actions = [
-            f"rename chat {resolved_chat_id} to {new_title!r}"
-        ]
+        would = f"rename chat {resolved_chat_id} to {new_title!r}"
         payload = {
             "status": "dry_run",
             "dry_run": True,
             "command": "groups.rename",
-            "would": (
-                f"rename chat {resolved_chat_id} to {new_title!r}"
-            ),
+            "would": would,
             "resolved": resolved_payload,
-            "planned_actions": planned_actions,
+            "planned_actions": [would],
             "warnings": [],
         }
         typer.echo(json.dumps(payload, sort_keys=True, default=str))
@@ -2019,20 +2015,17 @@ def topics_rename(
         if chat_name is not None:
             resolved_payload["chat_name"] = chat_name
             resolved_payload["folder_name"] = resolved_folder_name
-        planned_actions = [
+        would = (
             f"rename topic {effective_topic_id} in chat {resolved_chat_id} "
             f"to {new_title!r}"
-        ]
+        )
         payload = {
             "status": "dry_run",
             "dry_run": True,
             "command": "topics.rename",
-            "would": (
-                f"rename topic {effective_topic_id} in chat {resolved_chat_id} "
-                f"to {new_title!r}"
-            ),
+            "would": would,
             "resolved": resolved_payload,
-            "planned_actions": planned_actions,
+            "planned_actions": [would],
             "warnings": [],
         }
         typer.echo(json.dumps(payload, sort_keys=True, default=str))

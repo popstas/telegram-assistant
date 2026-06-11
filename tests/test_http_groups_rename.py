@@ -21,7 +21,7 @@ from telegram_assistant.entities import (
     ResolvedEntity,
 )
 from telegram_assistant.http_api import create_app
-from telegram_assistant.persistence import OperationStore
+from telegram_assistant.persistence import OperationStore, idempotency
 from telegram_assistant.worker.queue import FloodWaitError
 
 AUTH = {"Authorization": "Bearer secret_token"}
@@ -278,6 +278,53 @@ def test_http_rename_entity_ambiguous_409() -> None:
     detail = resp.json()["detail"]
     assert detail["error"] == "ambiguous_entity"
     assert detail["matches"] == [1, 2]
+
+
+def test_http_rename_previous_failed_returns_409() -> None:
+    """A pre-seeded failed op under the target-title key surfaces
+    ``previous_attempt_failed`` (409) without touching the backend."""
+    store = _make_store()
+    key = idempotency.group_rename_key(telegram_chat_id=-99, new_title="X")
+    begin = store.begin_operation(
+        operation_type=idempotency.GROUP_RENAME,
+        idempotency_key=key,
+        request_payload={"telegram_chat_id": -99, "new_title": "X"},
+    )
+    store.fail_operation(begin.operation.id, "nope")
+
+    backend = FakeRenameBackend()
+    client = _client(None, backend=backend, store=store)
+    resp = client.post(
+        "/telegram/groups/rename",
+        json={"chat_id": -99, "new_title": "X"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["error"] == "previous_attempt_failed"
+    assert backend.set_calls == []
+
+
+def test_http_rename_pending_returns_409() -> None:
+    """A still-pending op under the target-title key surfaces ``pending``
+    (409) without touching the backend."""
+    store = _make_store()
+    key = idempotency.group_rename_key(telegram_chat_id=-99, new_title="X")
+    store.begin_operation(
+        operation_type=idempotency.GROUP_RENAME,
+        idempotency_key=key,
+        request_payload={"telegram_chat_id": -99, "new_title": "X"},
+    )
+
+    backend = FakeRenameBackend()
+    client = _client(None, backend=backend, store=store)
+    resp = client.post(
+        "/telegram/groups/rename",
+        json={"chat_id": -99, "new_title": "X"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 409, resp.text
+    assert resp.json()["detail"]["error"] == "pending"
+    assert backend.set_calls == []
 
 
 def test_http_rename_flood_wait_returns_502() -> None:
