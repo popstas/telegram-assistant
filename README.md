@@ -39,12 +39,14 @@ Top-level:
 - `groups create` — create a Telegram supergroup for a Planfix client. Accepts `--topics-layout list|tabs` to pick the forum layout for this group (defaults to `telegram.defaults.topics_layout`).
 - `groups set-layout` — set the topics layout (`list` vs `tabs`) for an existing forum chat.
 - `groups get-layout` — read the current topics layout (`list` or `tabs`) for a forum chat.
+- `groups rename` — rename an existing supergroup (change its title; WRITE-gated, idempotent by target title).
 
 `topics` — manage forum topics:
 
 - `topics create` — create a single forum topic in an existing supergroup.
 - `topics bulk-create` — bulk-create topics from a CSV or JSON file.
 - `topics close` — close an existing forum topic (the topic and its history are kept).
+- `topics rename` — rename an existing forum topic (`--topic-id` or `--topic-name`; WRITE-gated, idempotent by target title).
 
 `members` — manage group membership:
 
@@ -162,10 +164,12 @@ MCP tool catalog:
 | `telegram_messages_delete` | `telegram_chat_id`/`entity`, `message_ids`, `revoke`, `dry_run`, `force`; gated on DELETE, honors `delete_only_session_messages` |
 | `telegram_messages_react` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `emoji` or `clear` |
 | `telegram_groups_create` | `title`, `about`, `admins`, `members`, `folder_name`/`folder_id`, `external_ref`, `topics_layout`, reserve/skip flags |
+| `telegram_groups_rename` | `new_title`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`/`folder_id`, optional `reason`; WRITE-gated, idempotent by target title |
 | `telegram_topics_layout` | `chat_id`, optional `layout` (`list`/`tabs`) |
 | `telegram_topics_create` | `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `external_ref`, `message` |
 | `telegram_topics_bulk_create` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `items`, `mode`, `continue_on_error`, `operation_id` |
 | `telegram_topics_close` | `topic_id` or `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, optional `delete_messages`, `operation_id` |
+| `telegram_topics_rename` | `new_title`, `topic_id` or `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`/`folder_id`, optional `reason`; WRITE-gated, idempotent by target title |
 | `telegram_members_add` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `items`, `mode`, `continue_on_error`, `operation_id` |
 | `telegram_members_remove` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `items`, `mode`, `continue_on_error`, `operation_id` |
 | `telegram_folders_inspect` | `folder_name`, optional `folder_id` |

@@ -108,11 +108,11 @@
 - [x] run tests - must pass before next task
 
 ### Task 9: Skill + README sync
-- [ ] add `groups rename` and `topics rename` to `skills/telegram-assistant/SKILL.md` (commands + usage examples) and the MCP tool catalog
-- [ ] re-sync the skill to `~/.claude/skills/telegram-assistant/SKILL.md` (same content)
-- [ ] update `README.md`: Commands/usage sections + MCP tool catalog with the two new tools
-- [ ] ensure `tests/test_skill_inventory.py` passes (CLI catalog ↔ skill parity)
-- [ ] run tests - must pass before next task
+- [x] add `groups rename` and `topics rename` to `skills/telegram-assistant/SKILL.md` (commands + usage examples) and the MCP tool catalog
+- [x] re-sync the skill to `~/.claude/skills/telegram-assistant/SKILL.md` (same content)
+- [x] update `README.md`: Commands/usage sections + MCP tool catalog with the two new tools
+- [x] ensure `tests/test_skill_inventory.py` passes (CLI catalog ↔ skill parity)
+- [x] run tests - must pass before next task
 
 ### Task 10: Extend live e2e scripts
 - [ ] add a group rename round-trip to the appropriate `scripts/e2e_*.sh` (rename `Client chat test` → assert new title via folders/inspect or groups read → rename back to original)
