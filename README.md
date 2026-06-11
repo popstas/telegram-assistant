@@ -36,7 +36,7 @@ Top-level:
 
 `groups` — manage Telegram supergroups:
 
-- `groups create` — create a Telegram supergroup for a Planfix client. Accepts `--topics-layout list|tabs` to pick the forum layout for this group (defaults to `telegram.defaults.topics_layout`). Accepts repeatable `--contact "<phone>|<name>"` for members only reachable by phone: the phone is normalised (dirty formats like `89222222222`, `+7-922-222-22-22`, and `t.me/+phone` links all collapse to `+<digits>`), the user is imported into the technical account's Telegram contacts (making them resolvable), then added as a regular member; a phone with no Telegram account is recorded and skipped.
+- `groups create` — create a Telegram supergroup for a Planfix client. Accepts `--topics-layout list|tabs` to pick the forum layout for this group (defaults to `telegram.defaults.topics_layout`). `--manager` is an alias for `--member` (same regular-member role, concatenated). Accepts repeatable `--contact "<phone>|<name>"` for members only reachable by phone: the phone is normalised (dirty formats like `89222222222`, `+7-922-222-22-22`, and `t.me/+phone` links all collapse to `+<digits>`), the user is imported into the technical account's Telegram contacts (making them resolvable), then added as a regular member; a phone with no Telegram account is recorded and skipped.
 - `groups set-layout` — set the topics layout (`list` vs `tabs`) for an existing forum chat.
 - `groups get-layout` — read the current topics layout (`list` or `tabs`) for a forum chat.
 - `groups rename` — rename an existing supergroup (change its title; WRITE-gated, idempotent by target title).
@@ -165,7 +165,7 @@ MCP tool catalog:
 | `telegram_messages_forward` | `from_chat_id`/`from_entity`, `to_chat_id`/`to_entity`, `message_ids`, `operation_id` |
 | `telegram_messages_delete` | `telegram_chat_id`/`entity`, `message_ids`, `revoke`, `dry_run`, `force`; gated on DELETE, honors `delete_only_session_messages` |
 | `telegram_messages_react` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `emoji` or `clear` |
-| `telegram_groups_create` | `title`, `about`, `admins`, `members`, `contacts` (`[{phone, name}]` — imported to contacts then added), `folder_name`/`folder_id`, `external_ref`, `topics_layout`, reserve/skip flags |
+| `telegram_groups_create` | `title`, `about`, `admins`, `members`, `managers` (alias of `members`), `contacts` (`[{phone, name}]` — imported to contacts then added), `folder_name`/`folder_id`, `external_ref`, `topics_layout`, reserve/skip flags |
 | `telegram_groups_rename` | `new_title`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`/`folder_id`, optional `reason`; WRITE-gated, idempotent by target title |
 | `telegram_topics_layout` | `chat_id`, optional `layout` (`list`/`tabs`) |
 | `telegram_topics_create` | `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `external_ref`, `message` |

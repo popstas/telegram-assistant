@@ -321,6 +321,11 @@ def groups_create(
         "--member",
         help="User to add as a regular member (repeat for multiple).",
     ),
+    manager_refs: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--manager",
+        help="User to add as a regular member (alias of --member; repeat for multiple).",
+    ),
     contact: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--contact",
@@ -452,6 +457,7 @@ def groups_create(
         about=about,
         admins=list(admin or []),
         members=list(member or []),
+        managers=list(manager_refs or []),
         contacts=contacts_arg,
         reserve_admins=reserve_admins_arg,
         reserve_members=reserve_members_arg,
@@ -499,6 +505,7 @@ def groups_create(
         planned_members = _dedupe(
             [
                 *request.members,
+                *request.managers,
                 *reserve_members_eff,
                 *request.admins,
                 *reserve_admins_eff,
@@ -606,6 +613,7 @@ def groups_create(
             "create_invite_link": create_link_eff,
             "admins": list(request.admins),
             "members": list(request.members),
+            "managers": list(request.managers),
             "contacts": normalized_contacts,
             "reserve_admins": list(reserve_admins_eff),
             "reserve_members": list(reserve_members_eff),

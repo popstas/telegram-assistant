@@ -121,6 +121,7 @@ class GroupCreateRequest:
     about: str | None = None
     admins: Sequence[str] = ()
     members: Sequence[str] = ()
+    managers: Sequence[str] = ()
     contacts: Sequence[ContactSpec] = ()
     reserve_admins: Sequence[str] | None = None
     reserve_members: Sequence[str] | None = None
@@ -139,6 +140,7 @@ class GroupCreateRequest:
             "about": self.about,
             "admins": list(self.admins),
             "members": list(self.members),
+            "managers": list(self.managers),
             "contacts": [c.to_payload() for c in self.contacts],
             "reserve_admins": (
                 list(self.reserve_admins) if self.reserve_admins is not None else None
@@ -470,6 +472,7 @@ async def _execute_create(
             [
                 *contact_user_ids,
                 *request.members,
+                *request.managers,
                 *reserve_members,
                 *request.admins,
                 *reserve_admins,

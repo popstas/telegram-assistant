@@ -363,6 +363,36 @@ async def test_create_group_malformed_contact_phone_aborts_before_create(
     assert backend.created == []
 
 
+async def test_create_group_managers_are_added_like_members(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["@bob"],
+        managers=["@carol", "@bob"],  # @bob duplicated across both buckets
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    # Managers land in members_added as regular members; @bob added once.
+    assert "@carol" in result.members_added
+    assert result.members_added.count("@bob") == 1
+    # Not promoted to admin.
+    assert result.admins_promoted == ["@reserve_account"]
+
+
 async def test_create_group_skip_reserve_uses_only_explicit_lists(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:
@@ -1607,6 +1637,62 @@ def test_cli_groups_create_bad_contact_format_exit_2(
     )
     assert result.exit_code == 2
     assert "invalid --contact" in result.stdout + str(result.stderr or "")
+
+
+def test_cli_groups_create_manager_added_as_member(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "groups",
+            "create",
+            "--title",
+            "Acme",
+            "--planfix-task-id",
+            "42",
+            "--manager",
+            "@carol",
+            "--member",
+            "@bob",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert "@carol" in payload["members_added"]
+    assert "@bob" in payload["members_added"]
+
+
+def test_http_create_group_managers_added_as_members(
+    minimal_config_yaml: str,
+) -> None:
+    backend = FakeGroupBackend()
+    client = _http_client(minimal_config_yaml, backend)
+    resp = client.post(
+        "/telegram/groups",
+        json={
+            "title": "Acme",
+            "external_ref": 42,
+            "members": ["@bob"],
+            "managers": ["@carol"],
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "@carol" in body["members_added"]
+    assert "@bob" in body["members_added"]
 
 
 def test_http_create_group_imports_contact(minimal_config_yaml: str) -> None:

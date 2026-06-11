@@ -92,6 +92,7 @@ class GroupCreateBody(BaseModel):
     about: str | None = None
     admins: list[str] = Field(default_factory=list)
     members: list[str] = Field(default_factory=list)
+    managers: list[str] = Field(default_factory=list)
     contacts: list[ContactBody] = Field(default_factory=list)
     reserve_admins: list[str] | None = None
     reserve_members: list[str] | None = None
@@ -225,6 +226,7 @@ def build_router() -> APIRouter:
             about=body.about,
             admins=body.admins,
             members=body.members,
+            managers=body.managers,
             contacts=[
                 ContactSpec(phone=c.phone, name=c.name) for c in body.contacts
             ],

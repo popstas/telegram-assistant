@@ -287,8 +287,10 @@ never silently to get a blocked command through.
 #### `groups` / `create`
 
 - Extract: `--title` (or `--external-ref`), `--admin` and `--member`
-  lists, optional `--contact "<phone>|<name>"` entries (repeatable) for
-  users only reachable by phone, optional `--about`, optional
+  lists (`--manager` is an alias for `--member` — same regular-member
+  role, just a separate bucket), optional `--contact "<phone>|<name>"`
+  entries (repeatable) for users only reachable by phone, optional
+  `--about`, optional
   `--topics-layout` (`list` or `tabs`) when the human names how topics
   should open. `--external-ref` is the generic idempotency anchor;
   `--planfix-task-id` is a backward-compat alias that maps onto it.

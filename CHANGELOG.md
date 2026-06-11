@@ -5,6 +5,7 @@
 
 ### Features
 
+- groups: Import phone+name contacts during group create
 - Finalize rename docs and regenerate changelog
 - Verify rename acceptance criteria across all surfaces
 - Add group/topic rename round-trips to live e2e scripts
