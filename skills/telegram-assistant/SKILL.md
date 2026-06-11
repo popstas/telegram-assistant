@@ -206,6 +206,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `topics` | `create` | Add one forum topic to an existing supergroup. | `telegram-assistant topics create ...` |
 | `topics` | `bulk-create` | Add several topics to one chat from a CSV/JSON list. | `telegram-assistant topics bulk-create ...` |
 | `topics` | `close` | Close (but not delete) an existing topic. | `telegram-assistant topics close ...` |
+| `topics` | `rename` | Rename an existing forum topic (change its title). | `telegram-assistant topics rename ...` |
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |

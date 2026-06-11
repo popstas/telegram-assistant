@@ -1853,6 +1853,255 @@ def topics_close(
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
 
 
+@topics_app.command("rename")
+def topics_rename(
+    new_title: str = typer.Option(..., "--new-title", help="New topic title."),
+    topic_id: int | None = typer.Option(
+        None,
+        "--topic-id",
+        help="Numeric forum topic id to rename.",
+    ),
+    topic_name: str | None = typer.Option(
+        None,
+        "--topic-name",
+        help="Current topic title to resolve within the chat (alternative to --topic-id).",
+    ),
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id of the supergroup.",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    reason: str | None = typer.Option(
+        None,
+        "--reason",
+        help="Optional human-readable reason; passed through to logs.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without renaming the topic.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Rename an existing forum topic (change its title)."""
+    from telegram_assistant.folders import (
+        FolderError,
+    )
+    from telegram_assistant.topics import (
+        AmbiguousTopicNameError,
+        TopicNotFoundError,
+        TopicRenameFailed,
+        TopicRenameNeedsReview,
+        TopicRenamePending,
+        TopicRenameRequest,
+        rename_topic,
+        resolve_topic_id_by_name,
+    )
+
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if (topic_id is None) == (topic_name is None):
+        typer.echo(
+            "exactly one of --topic-id or --topic-name must be supplied", err=True
+        )
+        raise typer.Exit(code=2)
+    if not new_title.strip():
+        typer.echo("topic rename requires a non-empty --new-title", err=True)
+        raise typer.Exit(code=2)
+
+    config, manager, store, open_backends = _build_topic_backends(config_path)
+
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    if dry_run:
+        async def _resolve_rename() -> tuple[int, int, str | None]:
+            try:
+                topic_backend, folder_backend = await open_backends()
+                resolved_chat_id, _ = await _cli_resolve_chat_and_authorizer(
+                    manager=manager,
+                    config=config,
+                    folder_backend=folder_backend,
+                    chat_id=chat_id,
+                    chat_name=chat_name,
+                    entity=entity,
+                    folder_name=resolved_folder_name,
+                    folder_id=effective_folder_id,
+                )
+
+                summaries = list(
+                    await topic_backend.list_topics(chat_id=resolved_chat_id)
+                )
+                if topic_id is not None:
+                    effective_topic_id = topic_id
+                    matches = [t for t in summaries if t.topic_id == topic_id]
+                    title = matches[0].title if matches else None
+                    if not matches:
+                        raise TopicNotFoundError(
+                            f"topic id {topic_id} not found in chat {resolved_chat_id}"
+                        )
+                else:
+                    effective_topic_id = await resolve_topic_id_by_name(
+                        backend=topic_backend,
+                        telegram_chat_id=resolved_chat_id,
+                        topic_name=topic_name or "",
+                    )
+                    title = topic_name
+                return resolved_chat_id, effective_topic_id, title
+            finally:
+                try:
+                    await manager.disconnect()
+                except Exception:
+                    pass
+
+        try:
+            (
+                resolved_chat_id,
+                effective_topic_id,
+                resolved_topic_title,
+            ) = asyncio.run(_resolve_rename())
+        except (AmbiguousTopicNameError, TopicNotFoundError) as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except FolderError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"topics rename failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        resolved_payload: dict[str, object] = {
+            "telegram_chat_id": resolved_chat_id,
+            "telegram_topic_id": effective_topic_id,
+            "old_title": resolved_topic_title,
+            "new_title": new_title,
+            "reason": reason,
+        }
+        if chat_name is not None:
+            resolved_payload["chat_name"] = chat_name
+            resolved_payload["folder_name"] = resolved_folder_name
+        planned_actions = [
+            f"rename topic {effective_topic_id} in chat {resolved_chat_id} "
+            f"to {new_title!r}"
+        ]
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "topics.rename",
+            "would": (
+                f"rename topic {effective_topic_id} in chat {resolved_chat_id} "
+                f"to {new_title!r}"
+            ),
+            "resolved": resolved_payload,
+            "planned_actions": planned_actions,
+            "warnings": [],
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            topic_backend, folder_backend = await open_backends()
+            resolved_chat_id, authorizer = await _cli_resolve_chat_and_authorizer(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
+
+            if topic_id is not None:
+                effective_topic_id = topic_id
+            else:
+                effective_topic_id = await resolve_topic_id_by_name(
+                    backend=topic_backend,
+                    telegram_chat_id=resolved_chat_id,
+                    topic_name=topic_name or "",
+                )
+
+            request = TopicRenameRequest(
+                telegram_chat_id=resolved_chat_id,
+                telegram_topic_id=effective_topic_id,
+                new_title=new_title,
+                reason=reason,
+            )
+            result, op = await rename_topic(
+                backend=topic_backend,
+                store=store,
+                request=request,
+                authorizer=authorizer,
+            )
+            payload = result.to_dict()
+            payload["operation_id"] = op.id
+            payload["operation_status"] = op.status.value
+            return payload
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except (TopicRenamePending, TopicRenameNeedsReview, TopicRenameFailed) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except (AmbiguousTopicNameError, TopicNotFoundError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"topics rename failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
 # --- members ----------------------------------------------------------------
 
 members_app = typer.Typer(help="Manage group membership.", no_args_is_help=True)

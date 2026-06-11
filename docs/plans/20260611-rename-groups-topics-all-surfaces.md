@@ -80,11 +80,11 @@
 - [x] run tests - must pass before next task
 
 ### Task 5: `topics rename` CLI command
-- [ ] add `@topics_app.command("rename")` in `cli/main.py`: `--topic-id` OR `--topic-name` (+ chat addressing), `--new-title` (required), `--reason`, `--dry-run`, `--config-path`
-- [ ] resolve chat + topic (name→id via `list_topics`, surfacing not-found/ambiguous), build `TopicRenameRequest`, call `rename_topic`; `--dry-run` no-mutate
-- [ ] map errors to exit codes (AccessDenied=3, not-found=2, ambiguous topic handled)
-- [ ] write CLI tests: success by id, success by name, ambiguous name, not-found, dry-run, access-denied
-- [ ] run tests - must pass before next task
+- [x] add `@topics_app.command("rename")` in `cli/main.py`: `--topic-id` OR `--topic-name` (+ chat addressing), `--new-title` (required), `--reason`, `--dry-run`, `--config-path`
+- [x] resolve chat + topic (name→id via `list_topics`, surfacing not-found/ambiguous), build `TopicRenameRequest`, call `rename_topic`; `--dry-run` no-mutate
+- [x] map errors to exit codes (AccessDenied=3, not-found=2, ambiguous topic handled)
+- [x] write CLI tests: success by id, success by name, ambiguous name, not-found, dry-run, access-denied
+- [x] run tests - must pass before next task
 
 ### Task 6: Group rename HTTP endpoint
 - [ ] add `POST /telegram/groups/rename` in `http_api/groups.py`: body `{entity|chat_id|chat_name|folder_*, new_title, reason?}`; resolve chat, enforce WRITE, call `rename_group`
