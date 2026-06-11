@@ -7,6 +7,10 @@
 
 - planfix: Clean up /task in topics, keep topic name **BREAKING**
 
+### Documentation
+
+- plan: Rename groups and topics across all surfaces
+
 ### Task
 
 - Add rename groups and topics tools task; clear completed items

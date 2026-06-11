@@ -49,11 +49,11 @@
 ## Implementation Steps
 
 ### Task 1: Add rename idempotency keys
-- [ ] add `GROUP_RENAME = "group_rename"` and `TOPIC_RENAME = "topic_rename"` constants in `persistence/idempotency.py`
-- [ ] add `group_rename_key(*, telegram_chat_id, new_title)` → `group_rename:chat={id}:title={new_title.strip()}`
-- [ ] add `topic_rename_key(*, telegram_chat_id, telegram_topic_id, new_title)` → `topic_rename:chat={id}:topic={tid}:title={new_title.strip()}`
-- [ ] write tests in `tests/test_idempotency.py` (or existing idempotency test module) for both key functions: stable for same inputs, distinct for different titles
-- [ ] run tests - must pass before next task
+- [x] add `GROUP_RENAME = "group_rename"` and `TOPIC_RENAME = "topic_rename"` constants in `persistence/idempotency.py`
+- [x] add `group_rename_key(*, telegram_chat_id, new_title)` → `group_rename:chat={id}:title={new_title.strip()}`
+- [x] add `topic_rename_key(*, telegram_chat_id, telegram_topic_id, new_title)` → `topic_rename:chat={id}:topic={tid}:title={new_title.strip()}`
+- [x] write tests in `tests/test_idempotency.py` (or existing idempotency test module) for both key functions: stable for same inputs, distinct for different titles
+- [x] run tests - must pass before next task
 
 ### Task 2: Group rename domain service + Telethon backend
 - [ ] add `GroupRenameRequest{telegram_chat_id:int, new_title:str, reason:str|None}` with `to_payload()` and `GroupRenameResult{telegram_chat_id, old_title:str|None, new_title, status:"renamed", replayed:bool}` with `to_dict`/`from_dict` in `groups/service.py`

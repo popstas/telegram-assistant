@@ -117,6 +117,56 @@ def test_topic_close_key_shape() -> None:
     )
 
 
+def test_group_rename_key_shape_and_stability() -> None:
+    key = idempotency.group_rename_key(telegram_chat_id=-100123, new_title="  New Name  ")
+    assert key == "group_rename:chat=-100123:title=New Name"
+    # stable for identical inputs
+    assert key == idempotency.group_rename_key(
+        telegram_chat_id=-100123, new_title="New Name"
+    )
+    # distinct for a different title
+    assert key != idempotency.group_rename_key(
+        telegram_chat_id=-100123, new_title="Other Name"
+    )
+
+
+def test_group_rename_key_requires_inputs() -> None:
+    with pytest.raises(ValueError):
+        idempotency.group_rename_key(telegram_chat_id="", new_title="x")
+    with pytest.raises(ValueError):
+        idempotency.group_rename_key(telegram_chat_id=10, new_title="   ")
+
+
+def test_topic_rename_key_shape_and_stability() -> None:
+    key = idempotency.topic_rename_key(
+        telegram_chat_id=-100123, telegram_topic_id=5, new_title="  Renamed  "
+    )
+    assert key == "topic_rename:chat=-100123:topic=5:title=Renamed"
+    # stable for identical inputs
+    assert key == idempotency.topic_rename_key(
+        telegram_chat_id=-100123, telegram_topic_id=5, new_title="Renamed"
+    )
+    # distinct for a different title
+    assert key != idempotency.topic_rename_key(
+        telegram_chat_id=-100123, telegram_topic_id=5, new_title="Other"
+    )
+
+
+def test_topic_rename_key_requires_inputs() -> None:
+    with pytest.raises(ValueError):
+        idempotency.topic_rename_key(
+            telegram_chat_id="", telegram_topic_id=5, new_title="x"
+        )
+    with pytest.raises(ValueError):
+        idempotency.topic_rename_key(
+            telegram_chat_id=10, telegram_topic_id="", new_title="x"
+        )
+    with pytest.raises(ValueError):
+        idempotency.topic_rename_key(
+            telegram_chat_id=10, telegram_topic_id=5, new_title="  "
+        )
+
+
 def test_member_keys_shape() -> None:
     assert (
         idempotency.member_add_key(telegram_chat_id=42, user="@alice")
