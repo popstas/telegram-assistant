@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add group rename HTTP endpoint
 - Add topics rename CLI command
 - Add groups rename CLI command
 - Add topic rename domain service and Telethon backend

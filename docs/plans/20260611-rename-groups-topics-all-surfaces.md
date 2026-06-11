@@ -94,10 +94,10 @@
 - [x] run tests - must pass before next task
 
 ### Task 7: Topic rename HTTP endpoint
-- [ ] add `POST /telegram/topics/{topic_id}/rename` in `http_api/topics.py` (id path) and a name-resolving body path matching `close`'s shape; enforce WRITE, call `rename_topic`
-- [ ] return 503/403/404/409 consistently; reuse topic backend + resolver factories
-- [ ] write HTTP tests: success by id, success by name, ambiguous → 409, not-found → 404, 503 when unavailable, 403 denied
-- [ ] run tests - must pass before next task
+- [x] add `POST /telegram/topics/{topic_id}/rename` in `http_api/topics.py` (id path) and a name-resolving body path matching `close`'s shape; enforce WRITE, call `rename_topic`
+- [x] return 503/403/404/409 consistently; reuse topic backend + resolver factories
+- [x] write HTTP tests: success by id, success by name, ambiguous → 409, not-found → 404, 503 when unavailable, 403 denied
+- [x] run tests - must pass before next task
 
 ### Task 8: MCP `telegram_groups_rename` + `telegram_topics_rename`
 - [ ] register `telegram_groups_rename` and `telegram_topics_rename` tools in `http_api/mcp/tools.py`, delegating to the same domain services with WRITE enforcement (mirror `telegram_topics_close`)
