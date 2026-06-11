@@ -130,9 +130,9 @@
 - [x] verify test coverage of new modules meets project standard
 
 ### Task 12: [Final] Documentation + changelog
-- [ ] confirm README + SKILL.md reflect final command/tool names and args
-- [ ] note any new behavior in docs if a user-facing doc references the command set
-- [ ] regenerate changelog if required by the commit flow (`git-cliff` runs via pre-commit)
+- [x] confirm README + SKILL.md reflect final command/tool names and args
+- [x] note any new behavior in docs if a user-facing doc references the command set
+- [x] regenerate changelog if required by the commit flow (`git-cliff` runs via pre-commit)
 
 *Note: ralphex automatically moves completed plans to `docs/plans/completed/`.*
 

@@ -5,6 +5,7 @@
 
 ### Features
 
+- Verify rename acceptance criteria across all surfaces
 - Add group/topic rename round-trips to live e2e scripts
 - Document groups/topics rename in skill and README
 - Add MCP telegram_groups_rename and telegram_topics_rename tools
