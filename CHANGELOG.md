@@ -5,6 +5,7 @@
 
 ### Features
 
+- Document groups/topics rename in skill and README
 - Add MCP telegram_groups_rename and telegram_topics_rename tools
 - Add topic rename HTTP endpoints
 - Add group rename HTTP endpoint

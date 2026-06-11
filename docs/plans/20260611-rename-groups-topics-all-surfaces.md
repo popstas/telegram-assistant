@@ -115,11 +115,11 @@
 - [x] run tests - must pass before next task
 
 ### Task 10: Extend live e2e scripts
-- [ ] add a group rename round-trip to the appropriate `scripts/e2e_*.sh` (rename `Client chat test` → assert new title via folders/inspect or groups read → rename back to original)
-- [ ] add a topic rename round-trip (create/find topic → rename → assert via topics list → rename back), keeping scripts idempotent/re-runnable
-- [ ] guard so scripts skip cleanly (recorded as skipped) when no authorized session is present
-- [ ] run `ruff check src tests` - fix all issues
-- [ ] run full `pytest` - must pass before next task
+- [x] add a group rename round-trip to the appropriate `scripts/e2e_*.sh` (rename `Client chat test` → assert new title via folders/inspect or groups read → rename back to original)
+- [x] add a topic rename round-trip (create/find topic → rename → assert via topics list → rename back), keeping scripts idempotent/re-runnable
+- [x] guard so scripts skip cleanly (recorded as skipped) when no authorized session is present
+- [x] run `ruff check src tests` - fix all issues
+- [x] run full `pytest` - must pass before next task
 
 ### Task 11: Verify acceptance criteria
 - [ ] verify rename works on all four code surfaces (CLI, HTTP, MCP) + skill/docs updated

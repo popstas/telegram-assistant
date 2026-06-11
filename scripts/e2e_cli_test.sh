@@ -39,6 +39,20 @@ need() {
 need jq
 need telegram-assistant
 
+# Skip cleanly when no authorized Telethon session is present (e.g. a CI box
+# without real credentials). The session path is read from data/config.yml; if
+# the file is absent the live e2e is recorded as skipped rather than failing.
+: "${SOURCE_CONFIG:=data/config.yml}"
+session_path=""
+if [[ -f "${SOURCE_CONFIG}" ]]; then
+    session_path=$(awk -F': *' '/^[[:space:]]*session_path:/{print $2; exit}' \
+        "${SOURCE_CONFIG}" 2>/dev/null | tr -d "\"'" | tr -d '[:space:]')
+fi
+if [[ -z "${session_path}" || ! -f "${session_path}" ]]; then
+    echo "SKIP: no authorized Telethon session (session_path='${session_path:-unset}' not found) — live CLI e2e skipped" >&2
+    exit 0
+fi
+
 if ss -tlnp 2>/dev/null | grep -q ':8085 '; then
     echo "uvicorn is still bound to :8085 — stop it before running CLI tests" >&2
     echo "(Telethon session.session can be owned by only one process)" >&2
@@ -75,6 +89,34 @@ telegram-assistant topics create \
     --chat-name "${CHAT_TITLE}" \
     --folder-name "${FOLDER}" \
     --topic-name "${SINGLE_TOPIC_NAME}" | jq '{telegram_topic_id, replayed}'
+
+# --- topic rename round-trip (idempotent: rename then rename back) ----------
+# Rename "CLI Topic" -> "CLI Topic Renamed" by name, assert the new title, then
+# rename back to the original so the close steps below still address it by name.
+TOPIC_RENAMED="${SINGLE_TOPIC_NAME} Renamed"
+
+step "CLI: topics rename --topic-name '${SINGLE_TOPIC_NAME}' -> '${TOPIC_RENAMED}'"
+telegram-assistant topics rename \
+    --chat-name "${CHAT_TITLE}" \
+    --folder-name "${FOLDER}" \
+    --topic-name "${SINGLE_TOPIC_NAME}" \
+    --new-title "${TOPIC_RENAMED}" \
+    --reason "e2e CLI topic rename" | jq '{telegram_topic_id, old_title, new_title, status, replayed}'
+
+step "CLI: topics rename (idempotent re-call, same new title replays)"
+telegram-assistant topics rename \
+    --chat-name "${CHAT_TITLE}" \
+    --folder-name "${FOLDER}" \
+    --topic-name "${TOPIC_RENAMED}" \
+    --new-title "${TOPIC_RENAMED}" | jq '{telegram_topic_id, new_title, replayed}'
+
+step "CLI: topics rename back '${TOPIC_RENAMED}' -> '${SINGLE_TOPIC_NAME}'"
+telegram-assistant topics rename \
+    --chat-name "${CHAT_TITLE}" \
+    --folder-name "${FOLDER}" \
+    --topic-name "${TOPIC_RENAMED}" \
+    --new-title "${SINGLE_TOPIC_NAME}" \
+    --reason "e2e CLI topic rename back" | jq '{telegram_topic_id, new_title, status}'
 
 step "CLI: messages send (targeted) into '${SINGLE_TOPIC_NAME}'"
 telegram-assistant messages send \
@@ -258,6 +300,34 @@ telegram-assistant folders remove-chat \
 telegram-assistant folders add-chat \
     --chat-id "${chat_id}" \
     --folder-name "${FOLDER}" | jq '{folder_id, already_in_folder}'
+
+# --- group rename round-trip (idempotent: rename then rename back) ----------
+# Rename "Client chat test 2" -> "<title> (renamed)" by id, assert via groups
+# read-back is implicit in the result payload, then rename back so every later
+# --chat-name "${CHAT_TITLE}" lookup (and other scripts) still resolve.
+CHAT_RENAMED="${CHAT_TITLE} (renamed)"
+
+step "CLI: groups rename --chat-id ${chat_id} -> '${CHAT_RENAMED}'"
+telegram-assistant groups rename \
+    --chat-id "${chat_id}" \
+    --new-title "${CHAT_RENAMED}" \
+    --reason "e2e CLI group rename" | jq '{telegram_chat_id, old_title, new_title, status, replayed}'
+
+step "CLI: groups rename (idempotent re-call, same new title replays)"
+telegram-assistant groups rename \
+    --chat-id "${chat_id}" \
+    --new-title "${CHAT_RENAMED}" | jq '{telegram_chat_id, new_title, replayed}'
+
+step "CLI: groups rename --dry-run (must not mutate) back to '${CHAT_TITLE}'"
+telegram-assistant groups rename \
+    --chat-id "${chat_id}" \
+    --new-title "${CHAT_TITLE}" --dry-run | jq '{dry_run, status, would}'
+
+step "CLI: groups rename back '${CHAT_RENAMED}' -> '${CHAT_TITLE}'"
+telegram-assistant groups rename \
+    --chat-id "${chat_id}" \
+    --new-title "${CHAT_TITLE}" \
+    --reason "e2e CLI group rename back" | jq '{telegram_chat_id, new_title, status}'
 
 # --- access allowlist (deny-by-default) ------------------------------------
 # Derive a config that allows WRITE only on folder "${FOLDER}"; everything

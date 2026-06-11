@@ -46,6 +46,20 @@ need() {
 need curl
 need jq
 
+# Skip cleanly when no authorized Telethon session is present (the live e2e
+# requires the authorized session the uvicorn server owns; without it the
+# mutating endpoints return 503). The session path is read from data/config.yml.
+: "${SOURCE_CONFIG:=data/config.yml}"
+session_path=""
+if [[ -f "${SOURCE_CONFIG}" ]]; then
+    session_path=$(awk -F': *' '/^[[:space:]]*session_path:/{print $2; exit}' \
+        "${SOURCE_CONFIG}" 2>/dev/null | tr -d "\"'" | tr -d '[:space:]')
+fi
+if [[ -z "${session_path}" || ! -f "${session_path}" ]]; then
+    echo "SKIP: no authorized Telethon session (session_path='${session_path:-unset}' not found) — live e2e skipped" >&2
+    exit 0
+fi
+
 auth_header=(-H "Authorization: Bearer ${BEARER}")
 json_header=(-H "Content-Type: application/json")
 
