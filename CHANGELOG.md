@@ -7,6 +7,10 @@
 
 - planfix: Clean up /task in topics, keep topic name **BREAKING**
 
+### Task
+
+- Add rename groups and topics tools task; clear completed items
+
 ## v0.5.0 - 2026-06-09
 
 ### Features
