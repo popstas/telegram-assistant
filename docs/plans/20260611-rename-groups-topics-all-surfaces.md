@@ -73,11 +73,11 @@
 - [x] run tests - must pass before next task
 
 ### Task 4: `groups rename` CLI command
-- [ ] add `@groups_app.command("rename")` in `cli/main.py`: chat addressing (`--chat-id`/`--chat-name`/`--entity`/`--folder-name`/`--folder-id`), `--new-title` (required), `--reason`, `--dry-run`, `--config-path`
-- [ ] resolve chat via the shared resolver, build `GroupRenameRequest`, call `rename_group`; `--dry-run` validates + prints plan without mutating
-- [ ] map errors to exit codes per existing helper (AccessDenied=3, entity-not-found=2); print result JSON like sibling commands
-- [ ] write CLI tests in `tests/` (mirror existing `groups`/`topics close` CLI tests): success, dry-run (no backend call), access-denied exit 3, not-found exit 2
-- [ ] run tests - must pass before next task
+- [x] add `@groups_app.command("rename")` in `cli/main.py`: chat addressing (`--chat-id`/`--chat-name`/`--entity`/`--folder-name`/`--folder-id`), `--new-title` (required), `--reason`, `--dry-run`, `--config-path`
+- [x] resolve chat via the shared resolver, build `GroupRenameRequest`, call `rename_group`; `--dry-run` validates + prints plan without mutating
+- [x] map errors to exit codes per existing helper (AccessDenied=3, entity-not-found=2); print result JSON like sibling commands
+- [x] write CLI tests in `tests/` (mirror existing `groups`/`topics close` CLI tests): success, dry-run (no backend call), access-denied exit 3, not-found exit 2
+- [x] run tests - must pass before next task
 
 ### Task 5: `topics rename` CLI command
 - [ ] add `@topics_app.command("rename")` in `cli/main.py`: `--topic-id` OR `--topic-name` (+ chat addressing), `--new-title` (required), `--reason`, `--dry-run`, `--config-path`

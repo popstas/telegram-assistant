@@ -202,6 +202,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `groups` | `create` | Create a new supergroup (title or `external_ref`, alias `planfix_task_id`), optionally with members/admins and folder placement. | `telegram-assistant groups create ...` |
 | `groups` | `set-layout` | Change the topics layout (list ↔ tabs) on an existing forum supergroup. | `telegram-assistant groups set-layout ...` |
 | `groups` | `get-layout` | Read the current topics layout (`list` or `tabs`) for a forum supergroup. | `telegram-assistant groups get-layout ...` |
+| `groups` | `rename` | Rename an existing supergroup (change its title). | `telegram-assistant groups rename ...` |
 | `topics` | `create` | Add one forum topic to an existing supergroup. | `telegram-assistant topics create ...` |
 | `topics` | `bulk-create` | Add several topics to one chat from a CSV/JSON list. | `telegram-assistant topics bulk-create ...` |
 | `topics` | `close` | Close (but not delete) an existing topic. | `telegram-assistant topics close ...` |
