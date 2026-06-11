@@ -68,6 +68,8 @@ Top-level:
 
 Most chat-targeting commands accept `--entity` (a numeric id with/without `-100`, `@username`, `t.me`/invite link, phone, or exact title) as a flexible alternative to `--chat-id`/`--chat-name`.
 
+Member references in `members`/`admins` (group create) and in `members bulk-add`/`bulk-remove` may be a `@username`, a bare username, a `t.me` link, or a numeric **Telegram user id** (e.g. `1234556`). A bare number is treated as a user id, not a phone — phone numbers must include a leading `+` (e.g. `+15551234567`). Resolving a bare user id requires that the technical account's session already knows the user (cached access hash); `@username`/`t.me` links are the robust path otherwise.
+
 `folders` — inspect and manage chat folders:
 
 - `folders inspect` — inspect a chat folder and list its chats.

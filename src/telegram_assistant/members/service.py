@@ -144,6 +144,20 @@ def normalize_user_ref(raw: str) -> NormalizedMember:
     return NormalizedMember(raw=text, kind="username", value=f"@{text.lower()}")
 
 
+def coerce_user_ref(user: str) -> str | int:
+    """Return an int for a bare numeric Telegram user id, else the string as-is.
+
+    Telethon's ``get_input_entity`` treats a digit *string* as a phone number,
+    so a user id like ``"1234556"`` must be passed as ``int`` to resolve by id.
+    ``@handles``, bare usernames, ``t.me`` links and ``+phone`` numbers (which
+    keep their ``+``) pass through unchanged.
+    """
+    text = str(user).strip()
+    if _USER_ID_RE.fullmatch(text):
+        return int(text)
+    return user
+
+
 # ---------------------------------------------------------------------------
 # Domain DTOs
 # ---------------------------------------------------------------------------

@@ -24,6 +24,7 @@ from telegram_assistant.members.service import (
     NormalizedMember,
     bulk_add_members,
     bulk_remove_members,
+    coerce_user_ref,
     normalize_user_ref,
     protected_user_set,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "NormalizedMember",
     "bulk_add_members",
     "bulk_remove_members",
+    "coerce_user_ref",
     "normalize_user_ref",
     "protected_user_set",
 ]

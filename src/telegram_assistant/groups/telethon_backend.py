@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any
 
+from telegram_assistant.members.service import coerce_user_ref
 from telegram_assistant.telegram_client.errors import translate_flood_wait
 
 
@@ -74,7 +75,7 @@ class TelethonGroupBackend:
 
         try:
             channel = await self._client.get_input_entity(chat_id)
-            member = await self._client.get_input_entity(user)
+            member = await self._client.get_input_entity(coerce_user_ref(user))
             await self._client(
                 InviteToChannelRequest(channel=channel, users=[member])
             )
@@ -87,7 +88,7 @@ class TelethonGroupBackend:
 
         try:
             channel = await self._client.get_input_entity(chat_id)
-            member = await self._client.get_input_entity(user)
+            member = await self._client.get_input_entity(coerce_user_ref(user))
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
         rights = ChatAdminRights(

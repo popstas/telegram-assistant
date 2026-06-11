@@ -27,6 +27,10 @@
 
 - plan: Rename groups and topics across all surfaces
 
+### Miscellaneous
+
+- Move completed rename plan to docs/plans/completed
+
 ### Task
 
 - Add rename groups and topics tools task; clear completed items
