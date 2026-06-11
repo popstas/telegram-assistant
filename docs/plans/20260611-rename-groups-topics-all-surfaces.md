@@ -87,11 +87,11 @@
 - [x] run tests - must pass before next task
 
 ### Task 6: Group rename HTTP endpoint
-- [ ] add `POST /telegram/groups/rename` in `http_api/groups.py`: body `{entity|chat_id|chat_name|folder_*, new_title, reason?}`; resolve chat, enforce WRITE, call `rename_group`
-- [ ] return 503 when `group_backend_factory`/resolver returns `None`; 403 AccessDenied, 404 not-found, 409 ambiguous, per the access taxonomy
-- [ ] reuse the existing group backend factory (no new factory unless a dedicated rename backend is warranted; document choice inline)
-- [ ] write tests in `tests/test_http_*` style: success, 503 when backend unavailable, 403 denied, 404 not-found
-- [ ] run tests - must pass before next task
+- [x] add `POST /telegram/groups/rename` in `http_api/groups.py`: body `{entity|chat_id|chat_name|folder_*, new_title, reason?}`; resolve chat, enforce WRITE, call `rename_group`
+- [x] return 503 when `group_backend_factory`/resolver returns `None`; 403 AccessDenied, 404 not-found, 409 ambiguous, per the access taxonomy
+- [x] reuse the existing group backend factory (no new factory unless a dedicated rename backend is warranted; document choice inline)
+- [x] write tests in `tests/test_http_*` style: success, 503 when backend unavailable, 403 denied, 404 not-found
+- [x] run tests - must pass before next task
 
 ### Task 7: Topic rename HTTP endpoint
 - [ ] add `POST /telegram/topics/{topic_id}/rename` in `http_api/topics.py` (id path) and a name-resolving body path matching `close`'s shape; enforce WRITE, call `rename_topic`
