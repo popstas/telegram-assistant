@@ -287,10 +287,11 @@ never silently to get a blocked command through.
 #### `groups` / `create`
 
 - Extract: `--title` (or `--external-ref`), `--admin` and `--member`
-  lists, optional `--about`, optional `--topics-layout` (`list` or
-  `tabs`) when the human names how topics should open. `--external-ref`
-  is the generic idempotency anchor; `--planfix-task-id` is a
-  backward-compat alias that maps onto it.
+  lists, optional `--contact "<phone>|<name>"` entries (repeatable) for
+  users only reachable by phone, optional `--about`, optional
+  `--topics-layout` (`list` or `tabs`) when the human names how topics
+  should open. `--external-ref` is the generic idempotency anchor;
+  `--planfix-task-id` is a backward-compat alias that maps onto it.
 - Required flags: at least one of `--title` or `--external-ref`
   (`--planfix-task-id`).
 - From config: `--folder-name` defaults to
@@ -306,17 +307,25 @@ never silently to get a blocked command through.
   and the bot's reply after creation — surface the effective title in
   the plan so the postfix is visible.
 - Temp file: no — admins and members go on the command line as repeated
-  `--admin @employee_username` / `--member @member_username` flags.
+  `--admin @employee_username` / `--member @member_username` flags;
+  phone contacts as repeated `--contact "<phone>|<name>"`.
 - Automation: include `--external-ref` (or the `--planfix-task-id`
   alias) when the human gives one; with the Planfix plugin enabled the
   dry-run plan shows whether `@planfix_bot` is among planned members so
   the `/task <id>` service message will actually fire, the
   `effective_title` (raw title + postfix), and the resolved
-  `topics_layout`.
+  `topics_layout`. For `--contact`, the phone is normalised (dirty
+  formats like `89222222222`, `+7-922-222-22-22`, and `t.me` phone
+  links all collapse to `+<digits>`); the dry-run plan shows the
+  canonical phone. Each contact is imported into the technical account's
+  Telegram contacts (so the user becomes resolvable) and then added as a
+  regular member — a phone with no Telegram account is recorded in
+  `skipped`/`contacts_imported` and the group is still created.
 - Confirmation: required after dry-run.
 - Typical errors: `group create requires external_ref or non-empty
-  title`, folder errors from `resolve_folder`, `GroupCreateFailed`,
-  `GroupCreateNeedsReview`.
+  title`, `invalid --contact ...: expected "<phone>|<name>"`,
+  `invalid phone reference: ...` (un-normalisable phone), folder errors
+  from `resolve_folder`, `GroupCreateFailed`, `GroupCreateNeedsReview`.
 
 #### `groups` / `set-layout`
 

@@ -21,6 +21,7 @@
 
 ### Bug Fixes
 
+- members: Treat bare numeric member refs as Telegram user ids
 - review: Cover rename pending/failed HTTP arms + MCP arg guards
 
 ### Documentation

@@ -30,6 +30,7 @@ from telegram_assistant.folders import (
     resolve_chat_in_folder,
 )
 from telegram_assistant.groups import (
+    ContactSpec,
     GroupCreateFailed,
     GroupCreateNeedsReview,
     GroupCreatePending,
@@ -58,6 +59,7 @@ from telegram_assistant.http_api.access import (
 )
 from telegram_assistant.http_api.folders import AddChatRequest
 from telegram_assistant.http_api.groups import (
+    ContactBody,
     GroupCreateBody,
 )
 from telegram_assistant.http_api.groups import (
@@ -1041,6 +1043,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         about: str | None = None,
         admins: list[str] | None = None,
         members: list[str] | None = None,
+        contacts: list[dict[str, str]] | None = None,
         reserve_admins: list[str] | None = None,
         reserve_members: list[str] | None = None,
         skip_reserve: bool = False,
@@ -1051,7 +1054,13 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         folder_id: int | None = None,
         skip_folder: bool = False,
     ) -> dict[str, Any]:
-        """Create a Telegram supergroup."""
+        """Create a Telegram supergroup.
+
+        ``contacts`` is an optional list of ``{"phone", "name"}`` entries: each
+        is imported into the account's Telegram contacts (the phone is
+        normalised) and then added as a regular member — use it for users only
+        reachable by phone number.
+        """
         request = _request(provider)
         try:
             body = GroupCreateBody(
@@ -1061,6 +1070,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 about=about,
                 admins=admins or [],
                 members=members or [],
+                contacts=[ContactBody(**c) for c in (contacts or [])],
                 reserve_admins=reserve_admins,
                 reserve_members=reserve_members,
                 skip_reserve=skip_reserve,
@@ -1093,6 +1103,10 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                     about=body.about,
                     admins=body.admins,
                     members=body.members,
+                    contacts=[
+                        ContactSpec(phone=c.phone, name=c.name)
+                        for c in body.contacts
+                    ],
                     reserve_admins=body.reserve_admins,
                     reserve_members=body.reserve_members,
                     skip_reserve=body.skip_reserve,

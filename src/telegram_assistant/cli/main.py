@@ -321,6 +321,15 @@ def groups_create(
         "--member",
         help="User to add as a regular member (repeat for multiple).",
     ),
+    contact: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--contact",
+        help=(
+            'Member given by "<phone>|<name>" (repeat for multiple). The phone '
+            "is normalised (dirty formats and t.me links accepted) and the user "
+            "is imported to contacts before being added as a regular member."
+        ),
+    ),
     reserve_admin: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--reserve-admin",
@@ -393,6 +402,7 @@ def groups_create(
         create_group,
     )
     from telegram_assistant.groups.service import (
+        ContactSpec,
         _dedupe,
         _resolved_reserves,
     )
@@ -409,6 +419,19 @@ def groups_create(
             err=True,
         )
         raise typer.Exit(code=2)
+
+    # Parse `--contact "<phone>|<name>"` pairs. Both sides are required; the
+    # phone is normalised later in the domain layer.
+    contacts_arg: list[ContactSpec] = []
+    for raw in contact or []:
+        phone, sep, name = raw.partition("|")
+        if not sep or not phone.strip() or not name.strip():
+            typer.echo(
+                f'invalid --contact {raw!r}: expected "<phone>|<name>"',
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        contacts_arg.append(ContactSpec(phone=phone.strip(), name=name.strip()))
 
     # Merge configured reserves with extra ones from CLI: extras add on top.
     extra_admins = list(reserve_admin or [])
@@ -429,6 +452,7 @@ def groups_create(
         about=about,
         admins=list(admin or []),
         members=list(member or []),
+        contacts=contacts_arg,
         reserve_admins=reserve_admins_arg,
         reserve_members=reserve_members_arg,
         skip_reserve=no_reserve and not (extra_admins or extra_members),
@@ -528,12 +552,30 @@ def groups_create(
         else:
             warnings.append("--skip-folder: new group will not be placed into any folder")
 
+        # Normalise contact phones for the preview; a malformed phone aborts the
+        # dry-run the same way the real run would reject it before creation.
+        from telegram_assistant.members.service import normalize_phone
+
+        normalized_contacts: list[dict[str, str]] = []
+        for spec in request.contacts:
+            try:
+                normalized_contacts.append(
+                    {"phone": normalize_phone(spec.phone), "name": spec.name}
+                )
+            except ValueError as exc:
+                typer.echo(str(exc), err=True)
+                raise typer.Exit(code=2) from exc
+
         planned_actions: list[str] = [
             f"create supergroup title={effective_title!r} enable_topics={enable_topics_eff}",
         ]
         if enable_topics_eff:
             planned_actions.append(
                 f"set topics layout to {topics_layout_eff!r}"
+            )
+        for c in normalized_contacts:
+            planned_actions.append(
+                f"import contact {c['name']!r} {c['phone']} and add to chat"
             )
         for u in planned_members:
             planned_actions.append(f"add member {u}")
@@ -564,6 +606,7 @@ def groups_create(
             "create_invite_link": create_link_eff,
             "admins": list(request.admins),
             "members": list(request.members),
+            "contacts": normalized_contacts,
             "reserve_admins": list(reserve_admins_eff),
             "reserve_members": list(reserve_members_eff),
             "planned_members": planned_members,

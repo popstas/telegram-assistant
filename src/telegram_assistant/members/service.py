@@ -158,6 +158,38 @@ def coerce_user_ref(user: str) -> str | int:
     return user
 
 
+_TME_PHONE_RE = re.compile(r"t(?:elegram)?\.me/\+?([0-9][0-9\s\-()]*)\s*$", re.IGNORECASE)
+
+
+def normalize_phone(raw: str) -> str:
+    """Normalise a "dirty" phone reference to canonical ``+<digits>`` form.
+
+    Accepts the many shapes the same number arrives in — ``+79222222222``,
+    ``79222222222``, ``89222222222``, ``+7-922-222-22-22``, and ``t.me`` links
+    like ``https://t.me/+79222222222`` or ``https://t.me/79222222222`` — and
+    collapses them all to ``+79222222222``.
+
+    Rules: pull the number out of a ``t.me`` link if present, keep only digits,
+    rewrite a leading ``8`` on an 11-digit number to ``7`` (RU/KZ trunk prefix),
+    and require 10–15 digits. A string that yields too few/many digits raises
+    ``ValueError`` — it is malformed input, not a Telegram lookup miss.
+    """
+    if raw is None:
+        raise ValueError("phone must not be None")
+    text = str(raw).strip()
+    if not text:
+        raise ValueError("phone must not be empty")
+    link = _TME_PHONE_RE.search(text)
+    if link:
+        text = link.group(1)
+    digits = re.sub(r"\D", "", text)
+    if len(digits) == 11 and digits.startswith("8"):
+        digits = "7" + digits[1:]
+    if not 10 <= len(digits) <= 15:
+        raise ValueError(f"invalid phone reference: {raw!r}")
+    return f"+{digits}"
+
+
 # ---------------------------------------------------------------------------
 # Domain DTOs
 # ---------------------------------------------------------------------------

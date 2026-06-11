@@ -82,6 +82,34 @@ class TelethonGroupBackend:
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
 
+    async def import_contact(
+        self, *, phone: str, first_name: str, last_name: str = ""
+    ) -> int | None:
+        from telethon.tl.functions.contacts import ImportContactsRequest
+        from telethon.tl.types import InputPhoneContact
+
+        try:
+            result = await self._client(
+                ImportContactsRequest(
+                    contacts=[
+                        InputPhoneContact(
+                            client_id=0,
+                            phone=phone,
+                            first_name=first_name,
+                            last_name=last_name,
+                        )
+                    ]
+                )
+            )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        users = getattr(result, "users", None) or []
+        if not users:
+            # The phone is not registered on Telegram (or hides its number);
+            # there is no user to add.
+            return None
+        return int(users[0].id)
+
     async def promote_admin(self, *, chat_id: int, user: str) -> None:
         from telethon.tl.functions.channels import EditAdminRequest
         from telethon.tl.types import ChatAdminRights

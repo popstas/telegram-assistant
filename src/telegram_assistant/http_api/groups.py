@@ -18,6 +18,7 @@ from telegram_assistant.folders import (
     resolve_chat_in_folder,
 )
 from telegram_assistant.groups import (
+    ContactSpec,
     GroupBackend,
     GroupCreateFailed,
     GroupCreateNeedsReview,
@@ -78,6 +79,11 @@ class GroupRenameBody(BaseModel):
         return self
 
 
+class ContactBody(BaseModel):
+    phone: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+
+
 class GroupCreateBody(BaseModel):
     title: str = Field(..., min_length=1)
     # Generic idempotency anchor. ``planfix_task_id`` is a backward-compat alias.
@@ -86,6 +92,7 @@ class GroupCreateBody(BaseModel):
     about: str | None = None
     admins: list[str] = Field(default_factory=list)
     members: list[str] = Field(default_factory=list)
+    contacts: list[ContactBody] = Field(default_factory=list)
     reserve_admins: list[str] | None = None
     reserve_members: list[str] | None = None
     skip_reserve: bool = False
@@ -218,6 +225,9 @@ def build_router() -> APIRouter:
             about=body.about,
             admins=body.admins,
             members=body.members,
+            contacts=[
+                ContactSpec(phone=c.phone, name=c.name) for c in body.contacts
+            ],
             reserve_admins=body.reserve_admins,
             reserve_members=body.reserve_members,
             skip_reserve=body.skip_reserve,

@@ -27,6 +27,7 @@ from telegram_assistant.folders.service import (
     FolderPeerFailureError,
     resolve_folder,
 )
+from telegram_assistant.members.service import normalize_phone
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
     OperationRecord,
@@ -94,6 +95,24 @@ def _tabs_to_layout(tabs: bool) -> TopicsLayout:
 
 
 @dataclass(frozen=True)
+class ContactSpec:
+    """A user identified by phone + name, imported to contacts before adding.
+
+    A bare Telegram user id only resolves once the account has seen the user.
+    Supplying ``phone`` + ``name`` lets group create import the user into the
+    account's Telegram contacts first (which caches them), so the subsequent
+    chat-add resolves. ``phone`` is normalised via
+    :func:`telegram_assistant.members.service.normalize_phone`.
+    """
+
+    phone: str
+    name: str
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"phone": self.phone, "name": self.name}
+
+
+@dataclass(frozen=True)
 class GroupCreateRequest:
     """Input shape shared by HTTP, CLI, and tests."""
 
@@ -102,6 +121,7 @@ class GroupCreateRequest:
     about: str | None = None
     admins: Sequence[str] = ()
     members: Sequence[str] = ()
+    contacts: Sequence[ContactSpec] = ()
     reserve_admins: Sequence[str] | None = None
     reserve_members: Sequence[str] | None = None
     skip_reserve: bool = False
@@ -119,6 +139,7 @@ class GroupCreateRequest:
             "about": self.about,
             "admins": list(self.admins),
             "members": list(self.members),
+            "contacts": [c.to_payload() for c in self.contacts],
             "reserve_admins": (
                 list(self.reserve_admins) if self.reserve_admins is not None else None
             ),
@@ -149,6 +170,7 @@ class GroupCreateResult:
     admins_added: list[str] = field(default_factory=list)
     members_added: list[str] = field(default_factory=list)
     admins_promoted: list[str] = field(default_factory=list)
+    contacts_imported: list[dict[str, Any]] = field(default_factory=list)
     skipped: list[dict[str, Any]] = field(default_factory=list)
     task_message_sent: bool = False
     replayed: bool = False
@@ -165,6 +187,7 @@ class GroupCreateResult:
             "admins_added": list(self.admins_added),
             "members_added": list(self.members_added),
             "admins_promoted": list(self.admins_promoted),
+            "contacts_imported": list(self.contacts_imported),
             "skipped": list(self.skipped),
             "task_message_sent": self.task_message_sent,
             "replayed": self.replayed,
@@ -184,6 +207,7 @@ class GroupCreateResult:
             admins_added=list(payload.get("admins_added") or []),
             members_added=list(payload.get("members_added") or []),
             admins_promoted=list(payload.get("admins_promoted") or []),
+            contacts_imported=list(payload.get("contacts_imported") or []),
             skipped=list(payload.get("skipped") or []),
             task_message_sent=bool(payload.get("task_message_sent", False)),
             replayed=True,
@@ -207,6 +231,17 @@ class GroupBackend(Protocol):
         ...
 
     async def add_member(self, *, chat_id: int, user: str) -> None:
+        ...
+
+    async def import_contact(
+        self, *, phone: str, first_name: str, last_name: str = ""
+    ) -> int | None:
+        """Import a phone contact; return the resolved Telegram user id.
+
+        Returns ``None`` when the phone has no associated Telegram account
+        (nothing to add). Importing caches the user so a subsequent
+        ``add_member`` by numeric id resolves.
+        """
         ...
 
     async def promote_admin(self, *, chat_id: int, user: str) -> None:
@@ -314,6 +349,12 @@ async def _execute_create(
         else config.defaults.create_invite_link
     )
 
+    # Normalise contact phones up front: a malformed phone is bad input, so it
+    # must abort before any supergroup is created (not leave a half-built chat).
+    normalized_contacts: list[tuple[str, str]] = [
+        (normalize_phone(c.phone), c.name) for c in request.contacts
+    ]
+
     # A plugin-provided postfix is a presentation concern only: it lands on the
     # Telegram title but never enters the idempotency key (keyed on raw
     # request.title), so replays of the same external_ref still match.
@@ -383,11 +424,56 @@ async def _execute_create(
         skip=request.skip_reserve,
     )
 
+    # Import phone+name contacts before population. A successful import caches
+    # the user and yields a numeric id, which is folded into the member list so
+    # the normal add loop adds them. A phone with no Telegram account (or an
+    # import error) is recorded and skipped — the group still gets created.
+    contacts_imported: list[dict[str, Any]] = []
+    contact_user_ids: list[str] = []
+    for phone, name in normalized_contacts:
+        record: dict[str, Any] = {"phone": phone, "name": name, "user_id": None}
+        try:
+            user_id = await backend.import_contact(
+                phone=phone, first_name=name, last_name=""
+            )
+        except FloodWaitError:
+            raise
+        except Exception as exc:
+            record["status"] = "error"
+            record["reason"] = str(exc)
+            contacts_imported.append(record)
+            skipped.append(
+                {"step": "import_contact", "phone": phone, "reason": str(exc)}
+            )
+            continue
+        if user_id is None:
+            record["status"] = "no_account"
+            contacts_imported.append(record)
+            skipped.append(
+                {
+                    "step": "import_contact",
+                    "phone": phone,
+                    "reason": "no_telegram_account",
+                }
+            )
+            continue
+        record["status"] = "imported"
+        record["user_id"] = user_id
+        contacts_imported.append(record)
+        contact_user_ids.append(str(user_id))
+
     # Build the ordered population plan, deduping users that appear in multiple
-    # buckets so we never invite the same handle twice.
+    # buckets so we never invite the same handle twice. Imported contacts go
+    # first so their resolved ids are added before the named handles.
     all_members = _dedupe(
         _drop_blank(
-            [*request.members, *reserve_members, *request.admins, *reserve_admins]
+            [
+                *contact_user_ids,
+                *request.members,
+                *reserve_members,
+                *request.admins,
+                *reserve_admins,
+            ]
         )
     )
     members_added: list[str] = []
@@ -501,6 +587,7 @@ async def _execute_create(
         admins_added=list(request.admins),
         members_added=members_added,
         admins_promoted=admins_promoted,
+        contacts_imported=contacts_imported,
         skipped=skipped,
         task_message_sent=task_message_sent,
     )
@@ -532,6 +619,11 @@ async def create_group(
         plugins = PluginRegistry()
     if not request.title.strip() and request.external_ref is None:
         raise ValueError("group create requires external_ref or non-empty title")
+
+    # Validate contact phones up front: a malformed phone is bad input and must
+    # fail before we create an operation row or touch Telegram.
+    for contact in request.contacts:
+        normalize_phone(contact.phone)
 
     # Group create is gated by WRITE on the destination folder (the place the
     # new chat will land). Checked up front so a denied create never reaches the

@@ -141,3 +141,56 @@ async def test_member_ban_member_passes_numeric_user_as_int() -> None:
 
     assert client.entity_args[1] == 1234556
     assert isinstance(client.entity_args[1], int)
+
+
+# ---------------------------------------------------------------------------
+# import_contact boundary (groups/telethon_backend)
+# ---------------------------------------------------------------------------
+
+
+class _ImportedUser:
+    def __init__(self, user_id: int) -> None:
+        self.id = user_id
+
+
+class _ImportResult:
+    def __init__(self, users: list[_ImportedUser]) -> None:
+        self.users = users
+
+
+class _ImportRecordingClient:
+    """Client double recording the ``ImportContactsRequest`` payload."""
+
+    def __init__(self, users: list[_ImportedUser]) -> None:
+        self._users = users
+        self.requests: list[Any] = []
+
+    async def __call__(self, request: Any) -> Any:
+        self.requests.append(request)
+        return _ImportResult(self._users)
+
+
+@pytest.mark.asyncio
+async def test_import_contact_returns_user_id_and_sends_phone_and_name() -> None:
+    client = _ImportRecordingClient([_ImportedUser(555)])
+    backend = TelethonGroupBackend(client)
+
+    user_id = await backend.import_contact(
+        phone="+79222222222", first_name="Иван", last_name=""
+    )
+
+    assert user_id == 555
+    assert len(client.requests) == 1
+    contact = client.requests[0].contacts[0]
+    assert contact.phone == "+79222222222"
+    assert contact.first_name == "Иван"
+
+
+@pytest.mark.asyncio
+async def test_import_contact_returns_none_when_no_telegram_account() -> None:
+    client = _ImportRecordingClient([])  # phone not on Telegram
+    backend = TelethonGroupBackend(client)
+
+    user_id = await backend.import_contact(phone="+79222222222", first_name="Иван")
+
+    assert user_id is None

@@ -1,6 +1,7 @@
 """Group-creation domain shared by HTTP, CLI, and the worker."""
 
 from telegram_assistant.groups.service import (
+    ContactSpec,
     GroupBackend,
     GroupCreateFailed,
     GroupCreateNeedsReview,
@@ -25,6 +26,7 @@ from telegram_assistant.groups.service import (
 )
 
 __all__ = [
+    "ContactSpec",
     "GroupBackend",
     "GroupCreateFailed",
     "GroupCreateNeedsReview",
