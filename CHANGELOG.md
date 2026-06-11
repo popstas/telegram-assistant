@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add group rename domain service and Telethon backend
 - Add rename idempotency keys for groups and topics
 - planfix: Clean up /task in topics, keep topic name **BREAKING**
 

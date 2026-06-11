@@ -65,12 +65,12 @@
 - [x] run tests - must pass before next task
 
 ### Task 3: Topic rename domain service + Telethon backend
-- [ ] add `TopicRenameRequest{telegram_chat_id:int, telegram_topic_id:int, new_title:str, reason:str|None}` + `TopicRenameResult` + `TopicRename{Failed,Pending,NeedsReview}` in `topics/service.py`
-- [ ] add `async def rename_topic(*, chat_id:int, topic_id:int, title:str) -> None` to the `TopicBackend` Protocol
-- [ ] add `async def rename_topic(*, backend, store, request, authorizer=None)` service fn: WRITE gate → `begin_operation(TOPIC_RENAME, topic_rename_key(...))` → replay → `backend.rename_topic(...)` → FLOOD_WAIT → needs_review → complete (positive `telegram_topic_id` required, like close)
-- [ ] implement backend `rename_topic` in `topics/telethon_backend.py` via `channels.EditForumTopicRequest(channel=peer, topic_id=..., title=...)`, wrapped with `translate_flood_wait`
-- [ ] write tests in `tests/test_topics_rename.py` with a fake backend: happy path, replay, new title → fresh op, WRITE-denied, FLOOD_WAIT → NeedsReview
-- [ ] run tests - must pass before next task
+- [x] add `TopicRenameRequest{telegram_chat_id:int, telegram_topic_id:int, new_title:str, reason:str|None}` + `TopicRenameResult` + `TopicRename{Failed,Pending,NeedsReview}` in `topics/service.py`
+- [x] add `async def rename_topic(*, chat_id:int, topic_id:int, title:str) -> None` to the `TopicBackend` Protocol
+- [x] add `async def rename_topic(*, backend, store, request, authorizer=None)` service fn: WRITE gate → `begin_operation(TOPIC_RENAME, topic_rename_key(...))` → replay → `backend.rename_topic(...)` → FLOOD_WAIT → needs_review → complete (positive `telegram_topic_id` required, like close)
+- [x] implement backend `rename_topic` in `topics/telethon_backend.py` via `channels.EditForumTopicRequest(channel=peer, topic_id=..., title=...)`, wrapped with `translate_flood_wait`
+- [x] write tests in `tests/test_topics_rename.py` with a fake backend: happy path, replay, new title → fresh op, WRITE-denied, FLOOD_WAIT → NeedsReview
+- [x] run tests - must pass before next task
 
 ### Task 4: `groups rename` CLI command
 - [ ] add `@groups_app.command("rename")` in `cli/main.py`: chat addressing (`--chat-id`/`--chat-name`/`--entity`/`--folder-name`/`--folder-id`), `--new-title` (required), `--reason`, `--dry-run`, `--config-path`
