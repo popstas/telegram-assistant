@@ -67,6 +67,18 @@ class GroupLayoutSetNeedsReview(GroupError):
     """A previous layout-set attempt resulted in needs_review."""
 
 
+class GroupRenameFailed(GroupError):
+    """A previous rename attempt with this idempotency key already failed."""
+
+
+class GroupRenamePending(GroupError):
+    """A concurrent rename attempt with this idempotency key is in flight."""
+
+
+class GroupRenameNeedsReview(GroupError):
+    """A previous rename attempt resulted in needs_review."""
+
+
 def _layout_to_tabs(layout: str) -> bool:
     """Map the public ``"list" | "tabs"`` string to the Telethon ``tabs`` flag."""
     if layout == "tabs":
@@ -207,6 +219,9 @@ class GroupBackend(Protocol):
         ...
 
     async def set_topics_layout(self, *, chat_id: int, tabs: bool) -> None:
+        ...
+
+    async def set_title(self, *, chat_id: int, title: str) -> None:
         ...
 
     async def get_topics_layout(self, *, chat_id: int) -> bool:
@@ -741,3 +756,133 @@ async def get_topics_layout(
     """
     tabs = await backend.get_topics_layout(chat_id=telegram_chat_id)
     return _tabs_to_layout(bool(tabs))
+
+
+# ---------------------------------------------------------------------------
+# Group rename
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GroupRenameRequest:
+    """Input shape for :func:`rename_group`."""
+
+    telegram_chat_id: int
+    new_title: str
+    reason: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "telegram_chat_id": self.telegram_chat_id,
+            "new_title": self.new_title,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class GroupRenameResult:
+    """Result returned by both the live execution and a replay."""
+
+    telegram_chat_id: int
+    old_title: str | None
+    new_title: str
+    status: str = "renamed"
+    replayed: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "telegram_chat_id": self.telegram_chat_id,
+            "old_title": self.old_title,
+            "new_title": self.new_title,
+            "status": self.status,
+            "replayed": self.replayed,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> GroupRenameResult:
+        return cls(
+            telegram_chat_id=int(payload["telegram_chat_id"]),
+            old_title=payload.get("old_title"),
+            new_title=str(payload["new_title"]),
+            status=str(payload.get("status", "renamed")),
+            replayed=True,
+        )
+
+
+async def rename_group(
+    *,
+    backend: GroupBackend,
+    store: OperationStore,
+    request: GroupRenameRequest,
+    authorizer: Authorizer | None = None,
+) -> tuple[GroupRenameResult, OperationRecord]:
+    """Rename an existing supergroup, or replay the saved result for the same key.
+
+    Idempotency key: ``group_rename:chat={id}:title={new_title}``. Re-running the
+    same rename replays the completed operation without touching Telegram; a
+    different target title is a fresh operation keyed under the new title.
+
+    State machine transitions mirror :func:`set_topics_layout`:
+
+    * `completed`    → return saved result with ``replayed=True``
+    * `failed`       → raise :class:`GroupRenameFailed`
+    * `needs_review` → raise :class:`GroupRenameNeedsReview`
+    * `pending`      → raise :class:`GroupRenamePending`
+    """
+    if not request.new_title.strip():
+        raise ValueError("rename_group requires a non-empty new_title")
+
+    # Renaming a group is a WRITE op on the chat itself.
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
+
+    key = idempotency.group_rename_key(
+        telegram_chat_id=request.telegram_chat_id,
+        new_title=request.new_title,
+    )
+    begin = store.begin_operation(
+        operation_type=idempotency.GROUP_RENAME,
+        idempotency_key=key,
+        request_payload=request.to_payload(),
+    )
+
+    if not begin.created:
+        op = begin.operation
+        if op.status is OperationStatus.COMPLETED:
+            payload = op.result_payload or {}
+            return GroupRenameResult.from_dict(payload), op
+        if op.status is OperationStatus.FAILED:
+            raise GroupRenameFailed(op.error or "previous attempt failed")
+        if op.status is OperationStatus.NEEDS_REVIEW:
+            raise GroupRenameNeedsReview(op.error or "previous attempt needs review")
+        raise GroupRenamePending(
+            f"operation {op.id} is still pending; retry via 'operations retry'"
+        )
+
+    operation_id = begin.operation.id
+    try:
+        await backend.set_title(
+            chat_id=request.telegram_chat_id,
+            title=request.new_title.strip(),
+        )
+    except FloodWaitError as exc:
+        # FLOOD_WAIT must not lock the idempotency key into a terminal failure —
+        # promote to needs_review so an operator can `operations retry`.
+        store.mark_needs_review(
+            operation_id, f"FLOOD_WAIT during group rename: {exc}"
+        )
+        raise GroupRenameNeedsReview(str(exc)) from exc
+    except GroupError:
+        raise
+    except Exception as exc:
+        store.fail_operation(operation_id, str(exc))
+        raise
+
+    result = GroupRenameResult(
+        telegram_chat_id=request.telegram_chat_id,
+        old_title=None,
+        new_title=request.new_title.strip(),
+        status="renamed",
+    )
+    op = store.complete_operation(operation_id, result.to_dict())
+    return result, op

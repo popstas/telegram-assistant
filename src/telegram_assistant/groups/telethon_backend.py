@@ -166,6 +166,15 @@ class TelethonGroupBackend:
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
 
+    async def set_title(self, *, chat_id: int, title: str) -> None:
+        from telethon.tl.functions.channels import EditTitleRequest
+
+        try:
+            channel = await self._client.get_input_entity(chat_id)
+            await self._client(EditTitleRequest(channel=channel, title=title))
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+
     async def set_default_permissions(
         self,
         *,

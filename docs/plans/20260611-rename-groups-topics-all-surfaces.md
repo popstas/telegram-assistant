@@ -56,13 +56,13 @@
 - [x] run tests - must pass before next task
 
 ### Task 2: Group rename domain service + Telethon backend
-- [ ] add `GroupRenameRequest{telegram_chat_id:int, new_title:str, reason:str|None}` with `to_payload()` and `GroupRenameResult{telegram_chat_id, old_title:str|None, new_title, status:"renamed", replayed:bool}` with `to_dict`/`from_dict` in `groups/service.py`
-- [ ] add error classes `GroupRenameFailed/GroupRenamePending/GroupRenameNeedsReview` (mirror `GroupLayoutSet*`)
-- [ ] add `async def set_title(*, chat_id:int, title:str) -> None` to the `GroupBackend` Protocol
-- [ ] add `async def rename_group(*, backend, store, request, authorizer=None) -> tuple[GroupRenameResult, OperationRecord]`: WRITE gate → `begin_operation(GROUP_RENAME, group_rename_key(...))` → replay branch (COMPLETED/FAILED/PENDING/NEEDS_REVIEW) → `backend.set_title(...)` → FLOOD_WAIT → `mark_needs_review` + raise NeedsReview → `complete_operation`
-- [ ] implement `set_title` in `groups/telethon_backend.py` via `channels.EditTitleRequest(channel=peer, title=...)`, wrapped with `translate_flood_wait`
-- [ ] write tests in `tests/test_groups_rename.py` with a fake backend: happy path, replay (same key, no second backend call), new title → fresh op, WRITE-denied → AccessDenied, FLOOD_WAIT → NeedsReview
-- [ ] run tests - must pass before next task
+- [x] add `GroupRenameRequest{telegram_chat_id:int, new_title:str, reason:str|None}` with `to_payload()` and `GroupRenameResult{telegram_chat_id, old_title:str|None, new_title, status:"renamed", replayed:bool}` with `to_dict`/`from_dict` in `groups/service.py`
+- [x] add error classes `GroupRenameFailed/GroupRenamePending/GroupRenameNeedsReview` (mirror `GroupLayoutSet*`)
+- [x] add `async def set_title(*, chat_id:int, title:str) -> None` to the `GroupBackend` Protocol
+- [x] add `async def rename_group(*, backend, store, request, authorizer=None) -> tuple[GroupRenameResult, OperationRecord]`: WRITE gate → `begin_operation(GROUP_RENAME, group_rename_key(...))` → replay branch (COMPLETED/FAILED/PENDING/NEEDS_REVIEW) → `backend.set_title(...)` → FLOOD_WAIT → `mark_needs_review` + raise NeedsReview → `complete_operation`
+- [x] implement `set_title` in `groups/telethon_backend.py` via `channels.EditTitleRequest(channel=peer, title=...)`, wrapped with `translate_flood_wait`
+- [x] write tests in `tests/test_groups_rename.py` with a fake backend: happy path, replay (same key, no second backend call), new title → fresh op, WRITE-denied → AccessDenied, FLOOD_WAIT → NeedsReview
+- [x] run tests - must pass before next task
 
 ### Task 3: Topic rename domain service + Telethon backend
 - [ ] add `TopicRenameRequest{telegram_chat_id:int, telegram_topic_id:int, new_title:str, reason:str|None}` + `TopicRenameResult` + `TopicRename{Failed,Pending,NeedsReview}` in `topics/service.py`
