@@ -438,7 +438,7 @@ never silently to get a blocked command through.
 - Temp file: no.
 - Automation: none — WRITE-gated state change (reopening a closed topic).
 - Confirmation: required after dry-run; the plan must call out
-  `already_open: true` if the dry-run reports it (real run is a no-op replay).
+  `already_open: true` if the dry-run reports it (real run is a no-op).
 - Typical errors: `TopicNotFoundError`, `AmbiguousTopicNameError`,
   folder errors.
 
@@ -935,7 +935,7 @@ Request: «Закрой топик "Документы" в чате Клиент
 
 3. Show resolved `telegram_topic_id`, `already_closed`. If the topic is
    already closed, repeat that and ask the human whether they still
-   want to run the no-op replay.
+   want to run the no-op.
 4. Otherwise wait for explicit confirmation and run without
    `--dry-run`.
 
@@ -955,7 +955,7 @@ Request: «Открой топик "Документы" в чате Клиент
 
 3. Show resolved `telegram_topic_id`, `already_open`. If the topic is
    already open, repeat that and ask the human whether they still
-   want to run the no-op replay.
+   want to run the no-op.
 4. Otherwise wait for explicit confirmation and run without
    `--dry-run`.
 

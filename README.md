@@ -172,7 +172,7 @@ MCP tool catalog:
 | `telegram_topics_create` | `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `external_ref`, `message` |
 | `telegram_topics_bulk_create` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `items`, `mode`, `continue_on_error`, `operation_id` |
 | `telegram_topics_close` | `topic_id` or `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, optional `delete_messages`, `operation_id` |
-| `telegram_topics_open` | `topic_id` or `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`/`folder_id`, optional `reason`; WRITE-gated, idempotent |
+| `telegram_topics_open` | `topic_id` or `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`/`folder_id`, optional `reason`; WRITE-gated, re-runnable (already-open is a no-op) |
 | `telegram_topics_rename` | `new_title`, `topic_id` or `topic_name`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`/`folder_id`, optional `reason`; WRITE-gated, idempotent by target title |
 | `telegram_members_add` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `items`, `mode`, `continue_on_error`, `operation_id` |
 | `telegram_members_remove` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `items`, `mode`, `continue_on_error`, `operation_id` |

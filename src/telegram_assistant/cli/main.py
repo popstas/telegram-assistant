@@ -1808,7 +1808,7 @@ def topics_close(
         warnings: list[str] = []
         if already_closed:
             warnings.append(
-                f"topic {effective_topic_id} is already closed; real run will be a no-op replay"
+                f"topic {effective_topic_id} is already closed; real run is a no-op (TOPIC_NOT_MODIFIED)"
             )
         resolved_payload: dict[str, object] = {
             "telegram_chat_id": resolved_chat_id,
@@ -2060,7 +2060,7 @@ def topics_open(
         warnings: list[str] = []
         if already_open:
             warnings.append(
-                f"topic {effective_topic_id} is already open; real run will be a no-op replay"
+                f"topic {effective_topic_id} is already open; real run is a no-op (TOPIC_NOT_MODIFIED)"
             )
         resolved_payload: dict[str, object] = {
             "telegram_chat_id": resolved_chat_id,

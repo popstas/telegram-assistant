@@ -25,4 +25,19 @@ def translate_flood_wait(exc: BaseException) -> BaseException:
     return exc
 
 
-__all__ = ["translate_flood_wait"]
+def is_topic_not_modified(exc: BaseException) -> bool:
+    """True if *exc* is Telegram's ``TOPIC_NOT_MODIFIED`` RPC error.
+
+    Telegram raises this from ``EditForumTopicRequest`` when the edit would not
+    change the topic's state — e.g. closing an already-closed topic or opening
+    an already-open one. For our close/open state-setters that means the
+    desired state already holds, so callers treat it as a successful no-op
+    rather than a terminal failure. Match on the RPC error ``message`` (with a
+    string fallback) to avoid importing Telethon at module load time.
+    """
+    if getattr(exc, "message", None) == "TOPIC_NOT_MODIFIED":
+        return True
+    return "TOPIC_NOT_MODIFIED" in str(exc)
+
+
+__all__ = ["translate_flood_wait", "is_topic_not_modified"]

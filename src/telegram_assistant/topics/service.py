@@ -902,12 +902,16 @@ async def close_topic(
     request: TopicCloseRequest,
     authorizer: Authorizer | None = None,
 ) -> tuple[TopicCloseResult, OperationRecord]:
-    """Close a forum topic, or replay the saved result for the same key.
+    """Close a forum topic.
 
-    Idempotency key: ``telegram_chat_id + telegram_topic_id`` (per the plan).
-    Re-close returns ``status=closed`` with ``replayed=True`` without touching
-    Telegram a second time. The topic itself and its history are never
-    deleted — closing only flips the topic's ``closed`` flag.
+    Close/open are repeatable state-setters, not one-shot operations: a topic
+    can be closed, reopened, and closed again. Each call re-executes against
+    Telegram (which returns ``TOPIC_NOT_MODIFIED`` — treated as a successful
+    no-op — when the topic already holds the requested state), so the
+    idempotency record is superseded rather than replayed. This also lets a
+    stale ``failed``/``needs_review`` record self-heal on the next attempt. The
+    topic and its history are never deleted — closing only flips the ``closed``
+    flag.
     """
     if request.telegram_topic_id <= 0:
         raise ValueError("close_topic requires a positive telegram_topic_id")
@@ -920,6 +924,11 @@ async def close_topic(
         telegram_chat_id=request.telegram_chat_id,
         telegram_topic_id=request.telegram_topic_id,
     )
+    # Drop any prior record for this key so the close always re-executes
+    # (toggling) and a stuck failed/pending record cannot latch into a 4xx.
+    existing = store.find_by_idempotency_key(key)
+    if existing is not None:
+        store.delete_operation(existing.id)
     begin = store.begin_operation(
         operation_type=idempotency.TOPIC_CLOSE,
         idempotency_key=key,
@@ -927,16 +936,10 @@ async def close_topic(
     )
 
     if not begin.created:
-        op = begin.operation
-        if op.status is OperationStatus.COMPLETED:
-            payload = op.result_payload or {}
-            return TopicCloseResult.from_dict(payload), op
-        if op.status is OperationStatus.FAILED:
-            raise TopicCloseFailed(op.error or "previous attempt failed")
-        if op.status is OperationStatus.NEEDS_REVIEW:
-            raise TopicCloseNeedsReview(op.error or "previous attempt needs review")
+        # A concurrent close of the same topic claimed the key first.
         raise TopicClosePending(
-            f"operation {op.id} is still pending; retry via 'operations retry'"
+            f"operation {begin.operation.id} is still in flight; "
+            "retry via 'operations retry'"
         )
 
     operation_id = begin.operation.id
@@ -976,12 +979,14 @@ async def open_topic(
     request: TopicOpenRequest,
     authorizer: Authorizer | None = None,
 ) -> tuple[TopicOpenResult, OperationRecord]:
-    """Reopen a closed forum topic, or replay the saved result for the same key.
+    """Reopen a closed forum topic.
 
-    Idempotency key: ``telegram_chat_id + telegram_topic_id`` (independent of the
-    close key). Re-open returns ``status=open`` with ``replayed=True`` without
-    touching Telegram a second time. Opening only flips the topic's ``closed``
-    flag back to ``False``; the topic and its history are untouched.
+    The mirror of :func:`close_topic`: a repeatable state-setter. Each call
+    re-executes against Telegram (``TOPIC_NOT_MODIFIED`` is treated as a
+    successful no-op when the topic is already open), so the idempotency record
+    is superseded rather than replayed and a stale record self-heals. Opening
+    only flips the topic's ``closed`` flag back to ``False``; the topic and its
+    history are untouched.
     """
     if request.telegram_topic_id <= 0:
         raise ValueError("open_topic requires a positive telegram_topic_id")
@@ -994,6 +999,11 @@ async def open_topic(
         telegram_chat_id=request.telegram_chat_id,
         telegram_topic_id=request.telegram_topic_id,
     )
+    # Drop any prior record for this key so the open always re-executes
+    # (toggling) and a stuck failed/pending record cannot latch into a 4xx.
+    existing = store.find_by_idempotency_key(key)
+    if existing is not None:
+        store.delete_operation(existing.id)
     begin = store.begin_operation(
         operation_type=idempotency.TOPIC_OPEN,
         idempotency_key=key,
@@ -1001,16 +1011,10 @@ async def open_topic(
     )
 
     if not begin.created:
-        op = begin.operation
-        if op.status is OperationStatus.COMPLETED:
-            payload = op.result_payload or {}
-            return TopicOpenResult.from_dict(payload), op
-        if op.status is OperationStatus.FAILED:
-            raise TopicOpenFailed(op.error or "previous attempt failed")
-        if op.status is OperationStatus.NEEDS_REVIEW:
-            raise TopicOpenNeedsReview(op.error or "previous attempt needs review")
+        # A concurrent open of the same topic claimed the key first.
         raise TopicOpenPending(
-            f"operation {op.id} is still pending; retry via 'operations retry'"
+            f"operation {begin.operation.id} is still in flight; "
+            "retry via 'operations retry'"
         )
 
     operation_id = begin.operation.id

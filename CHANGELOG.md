@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- topics: Add open/reopen command across all surfaces
+
 ## v0.6.0 - 2026-06-16
 
 ### Features

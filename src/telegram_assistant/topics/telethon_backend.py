@@ -11,7 +11,10 @@ import secrets
 from collections.abc import Sequence
 from typing import Any
 
-from telegram_assistant.telegram_client.errors import translate_flood_wait
+from telegram_assistant.telegram_client.errors import (
+    is_topic_not_modified,
+    translate_flood_wait,
+)
 from telegram_assistant.topics.service import TopicSummary
 
 
@@ -151,6 +154,10 @@ class TelethonTopicBackend:
             }
             await self._client(request_cls(**kwargs))
         except Exception as exc:
+            if is_topic_not_modified(exc):
+                # Topic is already closed — the desired state holds, so this is
+                # a successful no-op rather than an error.
+                return
             raise translate_flood_wait(exc) from exc
 
     async def open_topic(self, *, chat_id: int, topic_id: int) -> None:
@@ -164,6 +171,10 @@ class TelethonTopicBackend:
             }
             await self._client(request_cls(**kwargs))
         except Exception as exc:
+            if is_topic_not_modified(exc):
+                # Topic is already open — the desired state holds, so this is
+                # a successful no-op rather than an error.
+                return
             raise translate_flood_wait(exc) from exc
 
     async def rename_topic(self, *, chat_id: int, topic_id: int, title: str) -> None:

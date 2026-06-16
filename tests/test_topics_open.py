@@ -22,7 +22,6 @@ from telegram_assistant.persistence import (
     OperationStore,
 )
 from telegram_assistant.topics import (
-    TopicOpenFailed,
     TopicOpenRequest,
     TopicSummary,
     open_topic,
@@ -116,7 +115,7 @@ async def test_open_topic_happy_path(store: OperationStore) -> None:
     assert backend.opened == [(-100, 42)]
 
 
-async def test_open_topic_is_idempotent_on_reopen(
+async def test_open_topic_reruns_on_reopen(
     store: OperationStore,
 ) -> None:
     backend = FakeTopicBackend(
@@ -127,27 +126,34 @@ async def test_open_topic_is_idempotent_on_reopen(
     assert first.replayed is False
     assert backend.opened == [(-100, 42)]
 
-    # Second call with the same chat+topic ids must replay without invoking
-    # the backend a second time.
-    backend2 = FakeTopicBackend()
+    # Close/open are repeatable state-setters: a second call re-executes
+    # against the backend (the prior record is superseded), so toggling works.
+    backend2 = FakeTopicBackend(
+        topics=[TopicSummary(topic_id=42, title="Issue 1", closed=False)]
+    )
     second, op2 = await open_topic(
         backend=backend2, store=store, request=request
     )
-    assert second.replayed is True
+    assert second.replayed is False
     assert second.status == "open"
-    assert op1.id == op2.id
-    assert backend2.opened == []
+    assert op1.id != op2.id
+    assert backend2.opened == [(-100, 42)]
 
 
-async def test_open_topic_failure_marks_failed(store: OperationStore) -> None:
+async def test_open_topic_failure_does_not_latch(store: OperationStore) -> None:
     backend = FakeTopicBackend(fail_open=True)
     request = TopicOpenRequest(telegram_chat_id=-100, telegram_topic_id=99)
     with pytest.raises(RuntimeError):
         await open_topic(backend=backend, store=store, request=request)
-    with pytest.raises(TopicOpenFailed):
-        await open_topic(
-            backend=FakeTopicBackend(), store=store, request=request
-        )
+    # A failed attempt must not permanently latch the key (the bug that made
+    # /open return 409 forever): the next call supersedes the stale failed
+    # record and re-executes successfully.
+    healthy = FakeTopicBackend(
+        topics=[TopicSummary(topic_id=99, title="Issue", closed=True)]
+    )
+    result, _ = await open_topic(backend=healthy, store=store, request=request)
+    assert result.status == "open"
+    assert healthy.opened == [(-100, 99)]
 
 
 async def test_open_topic_rejects_non_positive_topic_id(
@@ -248,7 +254,7 @@ def test_http_open_topic_happy_path(minimal_config_yaml: str) -> None:
     assert backend.opened == [(-100, 42)]
 
 
-def test_http_open_topic_replays_on_reopen(
+def test_http_open_topic_reruns_on_reopen(
     minimal_config_yaml: str,
 ) -> None:
     import tempfile
@@ -268,7 +274,10 @@ def test_http_open_topic_replays_on_reopen(
     )
     assert r1.status_code == 200
 
-    backend2 = FakeTopicBackend()
+    # A second open re-executes (state-setter), not a silent replay.
+    backend2 = FakeTopicBackend(
+        topics=[TopicSummary(topic_id=7, title="Issue", closed=False)]
+    )
     client2 = _http_client(minimal_config_yaml, backend2, store=store)
     r2 = client2.post(
         "/telegram/topics/7/open",
@@ -277,9 +286,9 @@ def test_http_open_topic_replays_on_reopen(
     )
     assert r2.status_code == 200, r2.text
     body = r2.json()
-    assert body["replayed"] is True
+    assert body["replayed"] is False
     assert body["status"] == "open"
-    assert backend2.opened == []
+    assert backend2.opened == [(-100, 7)]
 
 
 def test_http_open_topic_requires_auth(minimal_config_yaml: str) -> None:

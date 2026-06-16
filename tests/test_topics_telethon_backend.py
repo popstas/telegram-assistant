@@ -434,3 +434,77 @@ async def test_list_topics_paginates_beyond_first_page(
     assert topics[-1].topic_id == 237
     # 237 over 100/page => 3 calls (100, 100, 37 stops).
     assert client.calls == 3
+
+
+class _EditForumTopicRequest:
+    def __init__(self, *, peer: Any, topic_id: int, closed: bool) -> None:
+        self.peer = peer
+        self.topic_id = topic_id
+        self.closed = closed
+
+
+class _TopicNotModifiedClient:
+    """Client whose edit call raises Telegram's ``TOPIC_NOT_MODIFIED``."""
+
+    async def get_input_entity(self, chat_id: int) -> _Peer:
+        return _Peer(chat_id)
+
+    async def __call__(self, request: Any) -> Any:
+        class BadRequestError(Exception):
+            def __init__(self) -> None:
+                super().__init__("RPCError 400: TOPIC_NOT_MODIFIED")
+                self.message = "TOPIC_NOT_MODIFIED"
+
+        raise BadRequestError()
+
+
+@pytest.mark.asyncio
+async def test_close_topic_swallows_topic_not_modified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Closing an already-closed topic is a successful no-op, not a 500."""
+    monkeypatch.setattr(
+        tb,
+        "_import_forum_request",
+        lambda name: _EditForumTopicRequest
+        if name == "EditForumTopicRequest"
+        else None,
+    )
+    backend = TelethonTopicBackend(_TopicNotModifiedClient())
+    # Must not raise.
+    await backend.close_topic(chat_id=42, topic_id=7)
+
+
+@pytest.mark.asyncio
+async def test_open_topic_swallows_topic_not_modified(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opening an already-open topic is a successful no-op, not a 500.
+
+    Regression: previously raised TOPIC_NOT_MODIFIED -> 500 and latched the
+    operation FAILED, making every later /open return 409.
+    """
+    monkeypatch.setattr(
+        tb,
+        "_import_forum_request",
+        lambda name: _EditForumTopicRequest
+        if name == "EditForumTopicRequest"
+        else None,
+    )
+    backend = TelethonTopicBackend(_TopicNotModifiedClient())
+    # Must not raise.
+    await backend.open_topic(chat_id=42, topic_id=7)
+
+
+def test_is_topic_not_modified_detection() -> None:
+    from telegram_assistant.telegram_client.errors import is_topic_not_modified
+
+    class _ByMessage(Exception):
+        message = "TOPIC_NOT_MODIFIED"
+
+    class _ByStr(Exception):
+        pass
+
+    assert is_topic_not_modified(_ByMessage()) is True
+    assert is_topic_not_modified(_ByStr("RPCError 400: TOPIC_NOT_MODIFIED")) is True
+    assert is_topic_not_modified(ValueError("something else")) is False
