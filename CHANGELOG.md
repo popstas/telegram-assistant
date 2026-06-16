@@ -7,6 +7,10 @@
 
 - topics: Add open/reopen command across all surfaces
 
+### Bug Fixes
+
+- topics: Treat TOPIC_NOT_MODIFIED as no-op and make open/close re-runnable
+
 ## v0.6.0 - 2026-06-16
 
 ### Features

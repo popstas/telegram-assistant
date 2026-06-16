@@ -110,13 +110,6 @@ def test_topic_create_key_requires_chat_and_name_when_no_external_ref() -> None:
         )
 
 
-def test_topic_close_key_shape() -> None:
-    assert (
-        idempotency.topic_close_key(telegram_chat_id=-100, telegram_topic_id=5)
-        == "topic_close:chat=-100:topic=5"
-    )
-
-
 def test_group_rename_key_shape_and_stability() -> None:
     key = idempotency.group_rename_key(telegram_chat_id=-100123, new_title="  New Name  ")
     assert key == "group_rename:chat=-100123:title=New Name"

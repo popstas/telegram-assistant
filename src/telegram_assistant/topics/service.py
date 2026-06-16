@@ -904,14 +904,13 @@ async def close_topic(
 ) -> tuple[TopicCloseResult, OperationRecord]:
     """Close a forum topic.
 
-    Close/open are repeatable state-setters, not one-shot operations: a topic
-    can be closed, reopened, and closed again. Each call re-executes against
-    Telegram (which returns ``TOPIC_NOT_MODIFIED`` — treated as a successful
-    no-op — when the topic already holds the requested state), so the
-    idempotency record is superseded rather than replayed. This also lets a
-    stale ``failed``/``needs_review`` record self-heal on the next attempt. The
-    topic and its history are never deleted — closing only flips the ``closed``
-    flag.
+    A direct, non-idempotent state-setter: there is no operation-store dedup or
+    replay, so every call executes against Telegram and the topic can be closed,
+    reopened, and closed again freely. A repeat is harmless because the Telethon
+    backend treats Telegram's ``TOPIC_NOT_MODIFIED`` (topic already in the
+    requested state) as a successful no-op. A fresh audit operation is recorded
+    per call under a unique key. The topic and its history are never deleted —
+    closing only flips the ``closed`` flag.
     """
     if request.telegram_topic_id <= 0:
         raise ValueError("close_topic requires a positive telegram_topic_id")
@@ -920,27 +919,13 @@ async def close_topic(
     if authorizer is not None:
         await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
 
-    key = idempotency.topic_close_key(
-        telegram_chat_id=request.telegram_chat_id,
-        telegram_topic_id=request.telegram_topic_id,
-    )
-    # Drop any prior record for this key so the close always re-executes
-    # (toggling) and a stuck failed/pending record cannot latch into a 4xx.
-    existing = store.find_by_idempotency_key(key)
-    if existing is not None:
-        store.delete_operation(existing.id)
+    # No idempotency: a unique key per call means begin_operation always creates
+    # a fresh audit row and can never dedup, replay, or latch into a 409.
     begin = store.begin_operation(
         operation_type=idempotency.TOPIC_CLOSE,
-        idempotency_key=key,
+        idempotency_key=uuid.uuid4().hex,
         request_payload=request.to_payload(),
     )
-
-    if not begin.created:
-        # A concurrent close of the same topic claimed the key first.
-        raise TopicClosePending(
-            f"operation {begin.operation.id} is still in flight; "
-            "retry via 'operations retry'"
-        )
 
     operation_id = begin.operation.id
     try:
@@ -981,12 +966,12 @@ async def open_topic(
 ) -> tuple[TopicOpenResult, OperationRecord]:
     """Reopen a closed forum topic.
 
-    The mirror of :func:`close_topic`: a repeatable state-setter. Each call
-    re-executes against Telegram (``TOPIC_NOT_MODIFIED`` is treated as a
-    successful no-op when the topic is already open), so the idempotency record
-    is superseded rather than replayed and a stale record self-heals. Opening
-    only flips the topic's ``closed`` flag back to ``False``; the topic and its
-    history are untouched.
+    The mirror of :func:`close_topic`: a direct, non-idempotent state-setter.
+    Every call executes against Telegram (``TOPIC_NOT_MODIFIED`` — topic already
+    open — is treated as a successful no-op by the backend), with a fresh audit
+    operation recorded per call under a unique key; there is no store-level
+    dedup, replay, or 409 latch. Opening only flips the topic's ``closed`` flag
+    back to ``False``; the topic and its history are untouched.
     """
     if request.telegram_topic_id <= 0:
         raise ValueError("open_topic requires a positive telegram_topic_id")
@@ -995,27 +980,13 @@ async def open_topic(
     if authorizer is not None:
         await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
 
-    key = idempotency.topic_open_key(
-        telegram_chat_id=request.telegram_chat_id,
-        telegram_topic_id=request.telegram_topic_id,
-    )
-    # Drop any prior record for this key so the open always re-executes
-    # (toggling) and a stuck failed/pending record cannot latch into a 4xx.
-    existing = store.find_by_idempotency_key(key)
-    if existing is not None:
-        store.delete_operation(existing.id)
+    # No idempotency: a unique key per call means begin_operation always creates
+    # a fresh audit row and can never dedup, replay, or latch into a 409.
     begin = store.begin_operation(
         operation_type=idempotency.TOPIC_OPEN,
-        idempotency_key=key,
+        idempotency_key=uuid.uuid4().hex,
         request_payload=request.to_payload(),
     )
-
-    if not begin.created:
-        # A concurrent open of the same topic claimed the key first.
-        raise TopicOpenPending(
-            f"operation {begin.operation.id} is still in flight; "
-            "retry via 'operations retry'"
-        )
 
     operation_id = begin.operation.id
     try:

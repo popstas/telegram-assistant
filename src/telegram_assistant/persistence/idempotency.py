@@ -62,14 +62,6 @@ def topic_create_key(
     return f"{TOPIC_CREATE}:chat={telegram_chat_id}:name={topic_name.strip()}"
 
 
-def topic_close_key(*, telegram_chat_id: int | str, telegram_topic_id: int | str) -> str:
-    return f"{TOPIC_CLOSE}:chat={telegram_chat_id}:topic={telegram_topic_id}"
-
-
-def topic_open_key(*, telegram_chat_id: int | str, telegram_topic_id: int | str) -> str:
-    return f"{TOPIC_OPEN}:chat={telegram_chat_id}:topic={telegram_topic_id}"
-
-
 def topic_rename_key(
     *,
     telegram_chat_id: int | str,

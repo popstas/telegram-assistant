@@ -140,6 +140,24 @@ async def test_close_topic_reruns_on_reclose(
     assert backend2.closed == [(-100, 42)]
 
 
+async def test_close_topic_executes_every_call(store: OperationStore) -> None:
+    """No idempotency: each call runs the backend and records a fresh op."""
+    backend = FakeTopicBackend(
+        topics=[TopicSummary(topic_id=42, title="Issue 1")]
+    )
+    request = TopicCloseRequest(telegram_chat_id=-100, telegram_topic_id=42)
+    op_ids = []
+    for _ in range(3):
+        result, op = await close_topic(
+            backend=backend, store=store, request=request
+        )
+        assert result.replayed is False
+        assert op.status is OperationStatus.COMPLETED
+        op_ids.append(op.id)
+    assert backend.closed == [(-100, 42), (-100, 42), (-100, 42)]
+    assert len(set(op_ids)) == 3  # a distinct audit op per call
+
+
 async def test_close_topic_failure_does_not_latch(store: OperationStore) -> None:
     backend = FakeTopicBackend(fail_close=True)
     request = TopicCloseRequest(telegram_chat_id=-100, telegram_topic_id=99)
