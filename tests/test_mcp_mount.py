@@ -234,6 +234,7 @@ EXPECTED_TOOL_NAMES = {
     "telegram_topics_close",
     "telegram_topics_create",
     "telegram_topics_layout",
+    "telegram_topics_open",
     "telegram_topics_rename",
 }
 

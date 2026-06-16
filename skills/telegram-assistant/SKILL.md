@@ -69,7 +69,8 @@ Commands fall into three buckets:
    `groups get-layout`. Run them immediately, no confirmation, no
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
-   `groups rename`, `topics create`, `topics close`, `topics rename`,
+   `groups rename`, `topics create`, `topics close`, `topics open`,
+   `topics rename`,
    `messages send` (single chat),
    `messages react`, `messages forward`, `notifications mute`,
    `notifications unmute`, `folders add-chat`, `folders remove-chat`,
@@ -157,7 +158,7 @@ not skip steps, even if the request looks obvious.
 7. For state-changing commands that support `--dry-run`, run with
    `--dry-run` first. The supported set is: `groups create`,
    `groups set-layout`, `groups rename`, `topics create`,
-   `topics bulk-create`, `topics close`, `topics rename`,
+   `topics bulk-create`, `topics close`, `topics open`, `topics rename`,
    `members bulk-add`, `members bulk-remove`,
    `messages send`, `messages react`, `messages forward`,
    `notifications mute`, `notifications unmute`, `folders add-chat`,
@@ -208,6 +209,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `topics` | `create` | Add one forum topic to an existing supergroup. | `telegram-assistant topics create ...` |
 | `topics` | `bulk-create` | Add several topics to one chat from a CSV/JSON list. | `telegram-assistant topics bulk-create ...` |
 | `topics` | `close` | Close (but not delete) an existing topic. | `telegram-assistant topics close ...` |
+| `topics` | `open` | Reopen a previously closed topic. | `telegram-assistant topics open ...` |
 | `topics` | `rename` | Rename an existing forum topic (change its title). | `telegram-assistant topics rename ...` |
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
@@ -238,7 +240,7 @@ when a real (non-dry-run) call is allowed; **Typical errors** = error
 messages the agent must surface verbatim instead of paraphrasing.
 
 Most chat-targeting commands (`messages send`, `messages recent`,
-`messages react`, `groups rename`, `topics create`/`close`/`rename`/`bulk-create`,
+`messages react`, `groups rename`, `topics create`/`close`/`open`/`rename`/`bulk-create`,
 `members bulk-add`/`bulk-remove`, `notifications mute`/`unmute`,
 `folders add-chat`/`remove-chat`) also accept
 `--entity` as a flexible alternative to
@@ -424,6 +426,19 @@ never silently to get a blocked command through.
   preserved.
 - Confirmation: required after dry-run; the plan must call out
   `already_closed: true` if the dry-run reports it.
+- Typical errors: `TopicNotFoundError`, `AmbiguousTopicNameError`,
+  folder errors.
+
+#### `topics` / `open`
+
+- Extract: chat reference and topic reference (`--topic-name` or
+  `--topic-id`), optional `--reason`.
+- Required flags: exactly one of each pair.
+- From config: `--folder-name` default.
+- Temp file: no.
+- Automation: none — WRITE-gated state change (reopening a closed topic).
+- Confirmation: required after dry-run; the plan must call out
+  `already_open: true` if the dry-run reports it (real run is a no-op replay).
 - Typical errors: `TopicNotFoundError`, `AmbiguousTopicNameError`,
   folder errors.
 
@@ -924,6 +939,26 @@ Request: «Закрой топик "Документы" в чате Клиент
 4. Otherwise wait for explicit confirmation and run without
    `--dry-run`.
 
+### `topics open`
+
+Request: «Открой топик "Документы" в чате Клиент / проект.»
+
+1. Resource/action: `topics` / `open`.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant topics open \
+     --chat-name "Клиент / проект" \
+     --topic-name "Документы" \
+     --dry-run
+   ```
+
+3. Show resolved `telegram_topic_id`, `already_open`. If the topic is
+   already open, repeat that and ask the human whether they still
+   want to run the no-op replay.
+4. Otherwise wait for explicit confirmation and run without
+   `--dry-run`.
+
 ### `topics rename`
 
 Request: «Переименуй топик "Документы" в чате Клиент / проект в "Архив".»
@@ -1199,7 +1234,7 @@ Reuse the short templates from "Clarification templates" below.
   cannot do.
 - A required parameter is missing: no username for `members bulk-add`
   / `members bulk-remove`, no chat reference for any chat-scoped
-  command, no topic for `topics create` / `topics close`, no text for
+  command, no topic for `topics create` / `topics close` / `topics open`, no text for
   `messages send`, no `--operation-id` for `operations status` /
   `operations retry`.
 - A lookup is ambiguous: more than one chat matches the title, more

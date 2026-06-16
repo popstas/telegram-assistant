@@ -81,6 +81,18 @@ class TopicCloseNeedsReview(TopicError):
     """A previous close attempt resulted in needs_review."""
 
 
+class TopicOpenFailed(TopicError):
+    """A previous open attempt with this idempotency key already failed."""
+
+
+class TopicOpenPending(TopicError):
+    """A concurrent open attempt with this idempotency key is in flight."""
+
+
+class TopicOpenNeedsReview(TopicError):
+    """A previous open attempt resulted in needs_review."""
+
+
 class TopicRenameFailed(TopicError):
     """A previous rename attempt with this idempotency key already failed."""
 
@@ -202,6 +214,9 @@ class TopicBackend(Protocol):
         ...
 
     async def close_topic(self, *, chat_id: int, topic_id: int) -> None:
+        ...
+
+    async def open_topic(self, *, chat_id: int, topic_id: int) -> None:
         ...
 
     async def rename_topic(self, *, chat_id: int, topic_id: int, title: str) -> None:
@@ -805,6 +820,52 @@ class TopicCloseResult:
         )
 
 
+@dataclass(frozen=True)
+class TopicOpenRequest:
+    """Input shape for :func:`open_topic`."""
+
+    telegram_chat_id: int
+    telegram_topic_id: int
+    reason: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "telegram_chat_id": self.telegram_chat_id,
+            "telegram_topic_id": self.telegram_topic_id,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class TopicOpenResult:
+    """Result returned by both the live execution and a replay."""
+
+    telegram_chat_id: int
+    telegram_topic_id: int
+    status: str
+    reason: str | None = None
+    replayed: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "telegram_chat_id": self.telegram_chat_id,
+            "telegram_topic_id": self.telegram_topic_id,
+            "status": self.status,
+            "reason": self.reason,
+            "replayed": self.replayed,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> TopicOpenResult:
+        return cls(
+            telegram_chat_id=int(payload["telegram_chat_id"]),
+            telegram_topic_id=int(payload["telegram_topic_id"]),
+            status=str(payload.get("status", "open")),
+            reason=payload.get("reason"),
+            replayed=True,
+        )
+
+
 async def resolve_topic_id_by_name(
     *,
     backend: TopicBackend,
@@ -902,6 +963,80 @@ async def close_topic(
         telegram_chat_id=request.telegram_chat_id,
         telegram_topic_id=request.telegram_topic_id,
         status="closed",
+        reason=request.reason,
+    )
+    op = store.complete_operation(operation_id, result.to_dict())
+    return result, op
+
+
+async def open_topic(
+    *,
+    backend: TopicBackend,
+    store: OperationStore,
+    request: TopicOpenRequest,
+    authorizer: Authorizer | None = None,
+) -> tuple[TopicOpenResult, OperationRecord]:
+    """Reopen a closed forum topic, or replay the saved result for the same key.
+
+    Idempotency key: ``telegram_chat_id + telegram_topic_id`` (independent of the
+    close key). Re-open returns ``status=open`` with ``replayed=True`` without
+    touching Telegram a second time. Opening only flips the topic's ``closed``
+    flag back to ``False``; the topic and its history are untouched.
+    """
+    if request.telegram_topic_id <= 0:
+        raise ValueError("open_topic requires a positive telegram_topic_id")
+
+    # Opening a topic is a WRITE op on the host chat.
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
+
+    key = idempotency.topic_open_key(
+        telegram_chat_id=request.telegram_chat_id,
+        telegram_topic_id=request.telegram_topic_id,
+    )
+    begin = store.begin_operation(
+        operation_type=idempotency.TOPIC_OPEN,
+        idempotency_key=key,
+        request_payload=request.to_payload(),
+    )
+
+    if not begin.created:
+        op = begin.operation
+        if op.status is OperationStatus.COMPLETED:
+            payload = op.result_payload or {}
+            return TopicOpenResult.from_dict(payload), op
+        if op.status is OperationStatus.FAILED:
+            raise TopicOpenFailed(op.error or "previous attempt failed")
+        if op.status is OperationStatus.NEEDS_REVIEW:
+            raise TopicOpenNeedsReview(op.error or "previous attempt needs review")
+        raise TopicOpenPending(
+            f"operation {op.id} is still pending; retry via 'operations retry'"
+        )
+
+    operation_id = begin.operation.id
+    try:
+        await backend.open_topic(
+            chat_id=request.telegram_chat_id,
+            topic_id=request.telegram_topic_id,
+        )
+    except FloodWaitError as exc:
+        # Same reasoning as create_topic: FLOOD_WAIT must not lock the
+        # idempotency key into a terminal failure. Promote to needs_review so
+        # the operator can retry once the window expires.
+        store.mark_needs_review(
+            operation_id, f"FLOOD_WAIT during topic open: {exc}"
+        )
+        raise TopicOpenNeedsReview(str(exc)) from exc
+    except TopicError:
+        raise
+    except Exception as exc:
+        store.fail_operation(operation_id, str(exc))
+        raise
+
+    result = TopicOpenResult(
+        telegram_chat_id=request.telegram_chat_id,
+        telegram_topic_id=request.telegram_topic_id,
+        status="open",
         reason=request.reason,
     )
     op = store.complete_operation(operation_id, result.to_dict())

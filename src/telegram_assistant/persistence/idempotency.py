@@ -15,6 +15,7 @@ GROUP_RENAME = "group_rename"
 TOPIC_CREATE = "topic_create"
 TOPIC_BULK_CREATE = "topic_bulk_create"
 TOPIC_CLOSE = "topic_close"
+TOPIC_OPEN = "topic_open"
 TOPIC_RENAME = "topic_rename"
 MEMBER_BULK_ADD = "member_bulk_add"
 MEMBER_BULK_REMOVE = "member_bulk_remove"
@@ -63,6 +64,10 @@ def topic_create_key(
 
 def topic_close_key(*, telegram_chat_id: int | str, telegram_topic_id: int | str) -> str:
     return f"{TOPIC_CLOSE}:chat={telegram_chat_id}:topic={telegram_topic_id}"
+
+
+def topic_open_key(*, telegram_chat_id: int | str, telegram_topic_id: int | str) -> str:
+    return f"{TOPIC_OPEN}:chat={telegram_chat_id}:topic={telegram_topic_id}"
 
 
 def topic_rename_key(

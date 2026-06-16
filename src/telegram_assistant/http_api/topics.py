@@ -41,6 +41,10 @@ from telegram_assistant.topics import (
     TopicCreatePending,
     TopicCreateRequest,
     TopicNotFoundError,
+    TopicOpenFailed,
+    TopicOpenNeedsReview,
+    TopicOpenPending,
+    TopicOpenRequest,
     TopicRenameFailed,
     TopicRenameNeedsReview,
     TopicRenamePending,
@@ -48,6 +52,7 @@ from telegram_assistant.topics import (
     bulk_create_topics,
     close_topic,
     create_topic,
+    open_topic,
     rename_topic,
     resolve_topic_id_by_name,
 )
@@ -110,6 +115,25 @@ class TopicCloseBody(BaseModel):
 
     @model_validator(mode="after")
     def _exactly_one_chat_ref(self) -> TopicCloseBody:
+        _validate_chat_ref(
+            telegram_chat_id=self.telegram_chat_id,
+            chat_name=self.chat_name,
+            entity=self.entity,
+            folder_name=self.folder_name,
+        )
+        return self
+
+
+class TopicOpenBody(BaseModel):
+    telegram_chat_id: int | None = None
+    chat_name: str | None = None
+    entity: str | int | None = None
+    folder_name: str | None = None
+    folder_id: int | None = None
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_chat_ref(self) -> TopicOpenBody:
         _validate_chat_ref(
             telegram_chat_id=self.telegram_chat_id,
             chat_name=self.chat_name,
@@ -500,6 +524,62 @@ def build_router() -> APIRouter:
                 detail={"error": "needs_review", "message": str(exc)},
             ) from exc
         except TopicCloseFailed as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"error": "previous_attempt_failed", "message": str(exc)},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        payload = result.to_dict()
+        payload["operation_id"] = op.id
+        payload["operation_status"] = op.status.value
+        return payload
+
+    @router.post("/topics/{topic_id}/open")
+    async def open_(
+        topic_id: int, body: TopicOpenBody, request: Request
+    ) -> dict[str, Any]:
+        if topic_id <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="topic_id must be a positive integer",
+            )
+        backend = _topic_backend_or_503(request)
+        store = _store_or_503(request)
+        chat_id = await _resolve_chat_id_generic(
+            telegram_chat_id=body.telegram_chat_id,
+            chat_name=body.chat_name,
+            entity=body.entity,
+            folder_name=body.folder_name,
+            folder_id=body.folder_id,
+            request=request,
+        )
+        await _enforce_write(request, chat_id)
+
+        domain_request = TopicOpenRequest(
+            telegram_chat_id=chat_id,
+            telegram_topic_id=topic_id,
+            reason=body.reason,
+        )
+
+        try:
+            result, op = await open_topic(
+                backend=backend, store=store, request=domain_request
+            )
+        except TopicOpenPending as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"error": "pending", "message": str(exc)},
+            ) from exc
+        except TopicOpenNeedsReview as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"error": "needs_review", "message": str(exc)},
+            ) from exc
+        except TopicOpenFailed as exc:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"error": "previous_attempt_failed", "message": str(exc)},

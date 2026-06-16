@@ -128,6 +128,7 @@ from telegram_assistant.http_api.topics import (
     BulkTopicItemBody,
     TopicCloseBody,
     TopicCreateBody,
+    TopicOpenBody,
     _enforce_write,
     _resolve_chat_id,
     _resolve_chat_id_generic,
@@ -197,6 +198,10 @@ from telegram_assistant.topics import (
     TopicCreatePending,
     TopicCreateRequest,
     TopicNotFoundError,
+    TopicOpenFailed,
+    TopicOpenNeedsReview,
+    TopicOpenPending,
+    TopicOpenRequest,
     TopicRenameFailed,
     TopicRenameNeedsReview,
     TopicRenamePending,
@@ -204,6 +209,7 @@ from telegram_assistant.topics import (
     bulk_create_topics,
     close_topic,
     create_topic,
+    open_topic,
     rename_topic,
     resolve_topic_id_by_name,
 )
@@ -410,6 +416,7 @@ def _raise_from_exception(exc: Exception) -> NoReturn:
         | TopicCreatePending
         | BulkTopicCreatePending
         | TopicClosePending
+        | TopicOpenPending
         | TopicRenamePending
         | BulkMemberAddPending
         | BulkMemberRemovePending,
@@ -428,6 +435,7 @@ def _raise_from_exception(exc: Exception) -> NoReturn:
         | TopicCreateFailed
         | BulkTopicCreateFailed
         | TopicCloseFailed
+        | TopicOpenFailed
         | TopicRenameFailed
         | BulkMemberAddFailed
         | BulkMemberRemoveFailed,
@@ -446,6 +454,7 @@ def _raise_from_exception(exc: Exception) -> NoReturn:
         | TopicCreateNeedsReview
         | BulkTopicCreateNeedsReview
         | TopicCloseNeedsReview
+        | TopicOpenNeedsReview
         | TopicRenameNeedsReview
         | BulkMemberAddNeedsReview
         | BulkMemberRemoveNeedsReview,
@@ -1376,6 +1385,72 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 backend=backend,
                 store=store,
                 request=TopicCloseRequest(
+                    telegram_chat_id=chat_id,
+                    telegram_topic_id=effective_topic_id,
+                    reason=body.reason,
+                ),
+            )
+            payload = result.to_dict()
+            payload["operation_id"] = op.id
+            payload["operation_status"] = op.status.value
+            return payload
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_topics_open",
+        annotations=WRITE_IDEMPOTENT,
+        structured_output=True,
+    )
+    async def telegram_topics_open(
+        topic_id: int | None = None,
+        topic_name: str | None = None,
+        telegram_chat_id: int | None = None,
+        chat_name: str | None = None,
+        entity: str | int | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Reopen a closed forum topic."""
+        request = _request(provider)
+        try:
+            if (topic_id is None) == (topic_name is None):
+                raise ValueError("provide exactly one of topic_id or topic_name")
+            if topic_id is not None and topic_id <= 0:
+                raise ValueError("topic_id must be a positive integer")
+            body = TopicOpenBody(
+                telegram_chat_id=telegram_chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                reason=reason,
+            )
+            backend = _topic_backend_or_503(request)  # type: ignore[arg-type]
+            store = _topic_store_or_503(request)  # type: ignore[arg-type]
+            chat_id = await _resolve_chat_id_generic(
+                telegram_chat_id=body.telegram_chat_id,
+                chat_name=body.chat_name,
+                entity=body.entity,
+                folder_name=body.folder_name,
+                folder_id=body.folder_id,
+                request=request,  # type: ignore[arg-type]
+            )
+            await _enforce_write(request, chat_id)  # type: ignore[arg-type]
+            effective_topic_id = (
+                topic_id
+                if topic_id is not None
+                else await resolve_topic_id_by_name(
+                    backend=backend,
+                    telegram_chat_id=chat_id,
+                    topic_name=topic_name or "",
+                )
+            )
+            result, op = await open_topic(
+                backend=backend,
+                store=store,
+                request=TopicOpenRequest(
                     telegram_chat_id=chat_id,
                     telegram_topic_id=effective_topic_id,
                     reason=body.reason,

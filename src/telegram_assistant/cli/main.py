@@ -1900,6 +1900,258 @@ def topics_close(
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
 
 
+@topics_app.command("open")
+def topics_open(
+    topic_id: int | None = typer.Option(
+        None,
+        "--topic-id",
+        help="Numeric forum topic id to reopen.",
+    ),
+    topic_name: str | None = typer.Option(
+        None,
+        "--topic-name",
+        help="Topic title to resolve within the chat (alternative to --topic-id).",
+    ),
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id of the supergroup.",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, link, phone, "
+        "or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    reason: str | None = typer.Option(
+        None,
+        "--reason",
+        help="Optional human-readable reason; passed through to logs.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Validate the request and report the plan without reopening the topic.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Reopen a closed forum topic (the topic and its history are kept)."""
+    from telegram_assistant.folders import (
+        FolderError,
+    )
+    from telegram_assistant.topics import (
+        AmbiguousTopicNameError,
+        TopicNotFoundError,
+        TopicOpenFailed,
+        TopicOpenNeedsReview,
+        TopicOpenPending,
+        TopicOpenRequest,
+        open_topic,
+        resolve_topic_id_by_name,
+    )
+
+    if sum([chat_id is not None, chat_name is not None, entity is not None]) != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if (topic_id is None) == (topic_name is None):
+        typer.echo(
+            "exactly one of --topic-id or --topic-name must be supplied", err=True
+        )
+        raise typer.Exit(code=2)
+
+    config, manager, store, open_backends = _build_topic_backends(config_path)
+
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    if dry_run:
+        async def _resolve_open() -> tuple[int, int, bool, str | None]:
+            try:
+                topic_backend, folder_backend = await open_backends()
+                resolved_chat_id, _ = await _cli_resolve_chat_and_authorizer(
+                    manager=manager,
+                    config=config,
+                    folder_backend=folder_backend,
+                    chat_id=chat_id,
+                    chat_name=chat_name,
+                    entity=entity,
+                    folder_name=resolved_folder_name,
+                    folder_id=effective_folder_id,
+                )
+
+                summaries = list(
+                    await topic_backend.list_topics(chat_id=resolved_chat_id)
+                )
+                if topic_id is not None:
+                    effective_topic_id = topic_id
+                    matches = [t for t in summaries if t.topic_id == topic_id]
+                    title = matches[0].title if matches else None
+                    if not matches:
+                        raise TopicNotFoundError(
+                            f"topic id {topic_id} not found in chat {resolved_chat_id}"
+                        )
+                else:
+                    effective_topic_id = await resolve_topic_id_by_name(
+                        backend=topic_backend,
+                        telegram_chat_id=resolved_chat_id,
+                        topic_name=topic_name or "",
+                    )
+                    title = topic_name
+                already_open = any(
+                    t.topic_id == effective_topic_id and not t.closed
+                    for t in summaries
+                )
+                return resolved_chat_id, effective_topic_id, already_open, title
+            finally:
+                try:
+                    await manager.disconnect()
+                except Exception:
+                    pass
+
+        try:
+            (
+                resolved_chat_id,
+                effective_topic_id,
+                already_open,
+                resolved_topic_title,
+            ) = asyncio.run(_resolve_open())
+        except (AmbiguousTopicNameError, TopicNotFoundError) as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except FolderError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        except Exception as exc:
+            _raise_for_access_or_entity_error(exc)
+            typer.echo(f"topics open failed: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+
+        warnings: list[str] = []
+        if already_open:
+            warnings.append(
+                f"topic {effective_topic_id} is already open; real run will be a no-op replay"
+            )
+        resolved_payload: dict[str, object] = {
+            "telegram_chat_id": resolved_chat_id,
+            "telegram_topic_id": effective_topic_id,
+            "topic_name": resolved_topic_title,
+            "already_open": already_open,
+            "reason": reason,
+        }
+        if chat_name is not None:
+            resolved_payload["chat_name"] = chat_name
+            resolved_payload["folder_name"] = resolved_folder_name
+        planned_actions = [
+            f"reopen topic {effective_topic_id} in chat {resolved_chat_id} (history preserved)"
+        ]
+        payload = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "topics.open",
+            "would": (
+                f"reopen topic {effective_topic_id} in chat {resolved_chat_id}"
+            ),
+            "resolved": resolved_payload,
+            "planned_actions": planned_actions,
+            "warnings": warnings,
+        }
+        typer.echo(json.dumps(payload, sort_keys=True, default=str))
+        return
+
+    async def _run() -> dict[str, object]:
+        try:
+            topic_backend, folder_backend = await open_backends()
+            resolved_chat_id, authorizer = await _cli_resolve_chat_and_authorizer(
+                manager=manager,
+                config=config,
+                folder_backend=folder_backend,
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=resolved_folder_name,
+                folder_id=effective_folder_id,
+            )
+
+            if topic_id is not None:
+                effective_topic_id = topic_id
+            else:
+                effective_topic_id = await resolve_topic_id_by_name(
+                    backend=topic_backend,
+                    telegram_chat_id=resolved_chat_id,
+                    topic_name=topic_name or "",
+                )
+
+            request = TopicOpenRequest(
+                telegram_chat_id=resolved_chat_id,
+                telegram_topic_id=effective_topic_id,
+                reason=reason,
+            )
+            result, op = await open_topic(
+                backend=topic_backend,
+                store=store,
+                request=request,
+                authorizer=authorizer,
+            )
+            payload = result.to_dict()
+            payload["operation_id"] = op.id
+            payload["operation_status"] = op.status.value
+            return payload
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except (TopicOpenPending, TopicOpenNeedsReview, TopicOpenFailed) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except (AmbiguousTopicNameError, TopicNotFoundError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"topics open failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
 @topics_app.command("rename")
 def topics_rename(
     new_title: str = typer.Option(..., "--new-title", help="New topic title."),
