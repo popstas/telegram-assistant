@@ -37,6 +37,20 @@ need() {
 need curl
 need jq
 
+# Skip cleanly when no authorized Telethon session is present (the live e2e
+# requires the authorized session the uvicorn server owns; without it the
+# mutating endpoints return 503). The session path is read from data/config.yml.
+: "${SOURCE_CONFIG:=data/config.yml}"
+session_path=""
+if [[ -f "${SOURCE_CONFIG}" ]]; then
+    session_path=$(awk -F': *' '/^[[:space:]]*session_path:/{print $2; exit}' \
+        "${SOURCE_CONFIG}" 2>/dev/null | tr -d "\"'" | tr -d '[:space:]')
+fi
+if [[ -z "${session_path}" || ! -f "${session_path}" ]]; then
+    echo "SKIP: no authorized Telethon session (session_path='${session_path:-unset}' not found) — live HTTP extras e2e skipped" >&2
+    exit 0
+fi
+
 auth_header=(-H "Authorization: Bearer ${BEARER}")
 json_header=(-H "Content-Type: application/json")
 
@@ -72,6 +86,34 @@ step "POST /telegram/topics (idempotent re-call, same chat + topic name)"
 curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
     -d "${topic_payload}" \
     "${BASE_URL}/telegram/topics" | jq '{telegram_topic_id, replayed, operation_status}'
+
+# --- topic rename round-trip (id path, then name path back) -----------------
+# Rename "HTTP Topic" -> "HTTP Topic Renamed" via the id path, then rename back
+# via the name-resolving path so the close steps below still address it by id.
+HTTP_TOPIC_RENAMED="${HTTP_TOPIC_NAME} Renamed"
+
+step "POST /telegram/topics/${topic_id}/rename -> '${HTTP_TOPIC_RENAMED}'"
+rename_payload=$(jq -nc --arg cid "${chat_id}" --arg title "${HTTP_TOPIC_RENAMED}" \
+    '{telegram_chat_id: ($cid|tonumber), new_title: $title, reason: "e2e http topic rename"}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${rename_payload}" \
+    "${BASE_URL}/telegram/topics/${topic_id}/rename" \
+    | jq '{telegram_topic_id, old_title, new_title, status, replayed}'
+
+step "POST /telegram/topics/${topic_id}/rename (idempotent re-call, same title replays)"
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${rename_payload}" \
+    "${BASE_URL}/telegram/topics/${topic_id}/rename" \
+    | jq '{telegram_topic_id, new_title, replayed}'
+
+step "POST /telegram/topics/rename (name path) — rename back to '${HTTP_TOPIC_NAME}'"
+rename_back_payload=$(jq -nc --arg cid "${chat_id}" \
+    --arg cur "${HTTP_TOPIC_RENAMED}" --arg title "${HTTP_TOPIC_NAME}" \
+    '{telegram_chat_id: ($cid|tonumber), topic_name: $cur, new_title: $title, reason: "e2e http topic rename back"}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${rename_back_payload}" \
+    "${BASE_URL}/telegram/topics/rename" \
+    | jq '{telegram_topic_id, new_title, status}'
 
 step "POST /telegram/topics/${topic_id}/close"
 close_payload=$(jq -nc --arg cid "${chat_id}" \
@@ -248,6 +290,33 @@ curl -sS -X DELETE "${auth_header[@]}" "${json_header[@]}" \
 curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
     -d "${remove_chat_payload}" \
     "${BASE_URL}/telegram/folders/${FOLDER}/chats" | jq '{folder_id, already_in_folder}'
+
+# --- group rename round-trip (rename then rename back) ----------------------
+# Rename "Client chat test 2" -> "<title> (renamed)" by id, then rename back so
+# every later --chat-name / title lookup (and other scripts) still resolve.
+HTTP_CHAT_RENAMED="${CHAT_TITLE} (renamed)"
+
+step "POST /telegram/groups/rename -> '${HTTP_CHAT_RENAMED}'"
+grename_payload=$(jq -nc --arg cid "${chat_id}" --arg title "${HTTP_CHAT_RENAMED}" \
+    '{chat_id: ($cid|tonumber), new_title: $title, reason: "e2e http group rename"}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${grename_payload}" \
+    "${BASE_URL}/telegram/groups/rename" \
+    | jq '{telegram_chat_id, old_title, new_title, status, replayed}'
+
+step "POST /telegram/groups/rename (idempotent re-call, same title replays)"
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${grename_payload}" \
+    "${BASE_URL}/telegram/groups/rename" \
+    | jq '{telegram_chat_id, new_title, replayed}'
+
+step "POST /telegram/groups/rename — rename back to '${CHAT_TITLE}'"
+grename_back_payload=$(jq -nc --arg cid "${chat_id}" --arg title "${CHAT_TITLE}" \
+    '{chat_id: ($cid|tonumber), new_title: $title, reason: "e2e http group rename back"}')
+curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
+    -d "${grename_back_payload}" \
+    "${BASE_URL}/telegram/groups/rename" \
+    | jq '{telegram_chat_id, new_title, status}'
 
 echo
 echo "http extras e2e flow completed — review the responses above and the chats on Telegram"

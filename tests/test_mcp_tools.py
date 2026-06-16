@@ -65,6 +65,7 @@ class FakeLayoutBackend:
         self.forum_tabs = forum_tabs
         self.get_calls: list[int] = []
         self.set_calls: list[tuple[int, bool]] = []
+        self.renamed: list[tuple[int, str]] = []
 
     async def get_topics_layout(self, *, chat_id: int) -> bool:
         self.get_calls.append(chat_id)
@@ -74,11 +75,15 @@ class FakeLayoutBackend:
         self.set_calls.append((chat_id, tabs))
         self.forum_tabs = tabs
 
+    async def set_title(self, *, chat_id: int, title: str) -> None:
+        self.renamed.append((chat_id, title))
+
 
 class FakeTopicBackend:
     def __init__(self) -> None:
         self.created: list[dict[str, Any]] = []
         self.closed: list[dict[str, int]] = []
+        self.renamed: list[dict[str, Any]] = []
         self.sent: list[dict[str, Any]] = []
         self.topics = [
             TopicSummary(topic_id=42, title="Kickoff", closed=False),
@@ -97,6 +102,13 @@ class FakeTopicBackend:
 
     async def close_topic(self, *, chat_id: int, topic_id: int) -> None:
         self.closed.append({"chat_id": chat_id, "topic_id": topic_id})
+
+    async def rename_topic(
+        self, *, chat_id: int, topic_id: int, title: str
+    ) -> None:
+        self.renamed.append(
+            {"chat_id": chat_id, "topic_id": topic_id, "title": title}
+        )
 
     async def list_topics(self, *, chat_id: int) -> list[TopicSummary]:
         return list(self.topics)
@@ -462,6 +474,224 @@ def test_mcp_topics_close_accepts_topic_name(
     assert result["isError"] is False
     assert result["structuredContent"]["telegram_topic_id"] == 42
     assert backend.closed == [{"chat_id": -100123, "topic_id": 42}]
+
+
+def test_mcp_groups_rename_renames_via_backend(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeLayoutBackend()
+    with _client(minimal_config_yaml, tmp_path, group_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_groups_rename",
+            {"telegram_chat_id": -100123, "new_title": "Renamed Group"},
+        )
+
+    assert result["isError"] is False, result
+    payload = result["structuredContent"]
+    assert payload["telegram_chat_id"] == -100123
+    assert payload["new_title"] == "Renamed Group"
+    assert payload["status"] == "renamed"
+    assert backend.renamed == [(-100123, "Renamed Group")]
+
+
+def test_mcp_groups_rename_replays_same_title(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeLayoutBackend()
+    with _client(minimal_config_yaml, tmp_path, group_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        first = _call_tool(
+            client,
+            token,
+            "telegram_groups_rename",
+            {"telegram_chat_id": -100123, "new_title": "Same Title"},
+        )
+        second = _call_tool(
+            client,
+            token,
+            "telegram_groups_rename",
+            {"telegram_chat_id": -100123, "new_title": "Same Title"},
+        )
+
+    assert first["isError"] is False
+    assert second["isError"] is False
+    assert second["structuredContent"]["replayed"] is True
+    # Replay does not hit the backend a second time.
+    assert backend.renamed == [(-100123, "Same Title")]
+
+
+def test_mcp_groups_rename_requires_write_access(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeLayoutBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        '    rules:\n      - all: true\n        permission: "read"\n',
+    )
+    with _client(config_yaml, tmp_path, group_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_groups_rename",
+            {"telegram_chat_id": -100123, "new_title": "Renamed Group"},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "access_denied"' in text
+    assert backend.renamed == []
+
+
+def test_mcp_topics_rename_by_id_renames_via_backend(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    with _client(minimal_config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_rename",
+            {"telegram_chat_id": -100123, "topic_id": 42, "new_title": "Renamed"},
+        )
+
+    assert result["isError"] is False, result
+    payload = result["structuredContent"]
+    assert payload["telegram_topic_id"] == 42
+    assert payload["new_title"] == "Renamed"
+    assert backend.renamed == [
+        {"chat_id": -100123, "topic_id": 42, "title": "Renamed"}
+    ]
+
+
+def test_mcp_topics_rename_accepts_topic_name(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    with _client(minimal_config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_rename",
+            {"telegram_chat_id": -100123, "topic_name": "Kickoff", "new_title": "Renamed"},
+        )
+
+    assert result["isError"] is False, result
+    assert result["structuredContent"]["telegram_topic_id"] == 42
+    assert backend.renamed == [
+        {"chat_id": -100123, "topic_id": 42, "title": "Renamed"}
+    ]
+
+
+def test_mcp_topics_rename_requires_write_access(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        '    rules:\n      - all: true\n        permission: "read"\n',
+    )
+    with _client(config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_rename",
+            {"telegram_chat_id": -100123, "topic_id": 42, "new_title": "Renamed"},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "access_denied"' in text
+    assert backend.renamed == []
+
+
+def test_mcp_topics_rename_rejects_both_topic_id_and_name(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    with _client(minimal_config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_rename",
+            {
+                "telegram_chat_id": -100123,
+                "topic_id": 42,
+                "topic_name": "Kickoff",
+                "new_title": "Renamed",
+            },
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "invalid_request"' in text
+    assert "exactly one of topic_id or topic_name" in text
+    assert backend.renamed == []
+
+
+def test_mcp_topics_rename_rejects_neither_topic_id_nor_name(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    with _client(minimal_config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_rename",
+            {"telegram_chat_id": -100123, "new_title": "Renamed"},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "invalid_request"' in text
+    assert "exactly one of topic_id or topic_name" in text
+    assert backend.renamed == []
+
+
+def test_mcp_topics_rename_rejects_non_positive_topic_id(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeTopicBackend()
+    with _client(minimal_config_yaml, tmp_path, topic_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_topics_rename",
+            {"telegram_chat_id": -100123, "topic_id": 0, "new_title": "Renamed"},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "invalid_request"' in text
+    assert "topic_id must be a positive integer" in text
+    assert backend.renamed == []
 
 
 def test_mcp_members_add_accepts_generic_chat_resolution_args(

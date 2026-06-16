@@ -69,7 +69,8 @@ Commands fall into three buckets:
    `groups get-layout`. Run them immediately, no confirmation, no
    `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
-   `topics create`, `topics close`, `messages send` (single chat),
+   `groups rename`, `topics create`, `topics close`, `topics rename`,
+   `messages send` (single chat),
    `messages react`, `messages forward`, `notifications mute`,
    `notifications unmute`, `folders add-chat`, `folders remove-chat`,
    `operations retry`. Always:
@@ -155,8 +156,9 @@ not skip steps, even if the request looks obvious.
    described above.
 7. For state-changing commands that support `--dry-run`, run with
    `--dry-run` first. The supported set is: `groups create`,
-   `groups set-layout`, `topics create`, `topics bulk-create`,
-   `topics close`, `members bulk-add`, `members bulk-remove`,
+   `groups set-layout`, `groups rename`, `topics create`,
+   `topics bulk-create`, `topics close`, `topics rename`,
+   `members bulk-add`, `members bulk-remove`,
    `messages send`, `messages react`, `messages forward`,
    `notifications mute`, `notifications unmute`, `folders add-chat`,
    `folders remove-chat`, `operations retry`.
@@ -202,9 +204,11 @@ agent stops and asks for clarification — it does not invent a new path.
 | `groups` | `create` | Create a new supergroup (title or `external_ref`, alias `planfix_task_id`), optionally with members/admins and folder placement. | `telegram-assistant groups create ...` |
 | `groups` | `set-layout` | Change the topics layout (list ↔ tabs) on an existing forum supergroup. | `telegram-assistant groups set-layout ...` |
 | `groups` | `get-layout` | Read the current topics layout (`list` or `tabs`) for a forum supergroup. | `telegram-assistant groups get-layout ...` |
+| `groups` | `rename` | Rename an existing supergroup (change its title). | `telegram-assistant groups rename ...` |
 | `topics` | `create` | Add one forum topic to an existing supergroup. | `telegram-assistant topics create ...` |
 | `topics` | `bulk-create` | Add several topics to one chat from a CSV/JSON list. | `telegram-assistant topics bulk-create ...` |
 | `topics` | `close` | Close (but not delete) an existing topic. | `telegram-assistant topics close ...` |
+| `topics` | `rename` | Rename an existing forum topic (change its title). | `telegram-assistant topics rename ...` |
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
@@ -234,7 +238,7 @@ when a real (non-dry-run) call is allowed; **Typical errors** = error
 messages the agent must surface verbatim instead of paraphrasing.
 
 Most chat-targeting commands (`messages send`, `messages recent`,
-`messages react`, `topics create`/`close`/`bulk-create`,
+`messages react`, `groups rename`, `topics create`/`close`/`rename`/`bulk-create`,
 `members bulk-add`/`bulk-remove`, `notifications mute`/`unmute`,
 `folders add-chat`/`remove-chat`) also accept
 `--entity` as a flexible alternative to
@@ -283,10 +287,13 @@ never silently to get a blocked command through.
 #### `groups` / `create`
 
 - Extract: `--title` (or `--external-ref`), `--admin` and `--member`
-  lists, optional `--about`, optional `--topics-layout` (`list` or
-  `tabs`) when the human names how topics should open. `--external-ref`
-  is the generic idempotency anchor; `--planfix-task-id` is a
-  backward-compat alias that maps onto it.
+  lists (`--manager` is an alias for `--member` — same regular-member
+  role, just a separate bucket), optional `--contact "<phone>|<name>"`
+  entries (repeatable) for users only reachable by phone, optional
+  `--about`, optional
+  `--topics-layout` (`list` or `tabs`) when the human names how topics
+  should open. `--external-ref` is the generic idempotency anchor;
+  `--planfix-task-id` is a backward-compat alias that maps onto it.
 - Required flags: at least one of `--title` or `--external-ref`
   (`--planfix-task-id`).
 - From config: `--folder-name` defaults to
@@ -302,17 +309,25 @@ never silently to get a blocked command through.
   and the bot's reply after creation — surface the effective title in
   the plan so the postfix is visible.
 - Temp file: no — admins and members go on the command line as repeated
-  `--admin @employee_username` / `--member @member_username` flags.
+  `--admin @employee_username` / `--member @member_username` flags;
+  phone contacts as repeated `--contact "<phone>|<name>"`.
 - Automation: include `--external-ref` (or the `--planfix-task-id`
   alias) when the human gives one; with the Planfix plugin enabled the
   dry-run plan shows whether `@planfix_bot` is among planned members so
   the `/task <id>` service message will actually fire, the
   `effective_title` (raw title + postfix), and the resolved
-  `topics_layout`.
+  `topics_layout`. For `--contact`, the phone is normalised (dirty
+  formats like `89222222222`, `+7-922-222-22-22`, and `t.me` phone
+  links all collapse to `+<digits>`); the dry-run plan shows the
+  canonical phone. Each contact is imported into the technical account's
+  Telegram contacts (so the user becomes resolvable) and then added as a
+  regular member — a phone with no Telegram account is recorded in
+  `skipped`/`contacts_imported` and the group is still created.
 - Confirmation: required after dry-run.
 - Typical errors: `group create requires external_ref or non-empty
-  title`, folder errors from `resolve_folder`, `GroupCreateFailed`,
-  `GroupCreateNeedsReview`.
+  title`, `invalid --contact ...: expected "<phone>|<name>"`,
+  `invalid phone reference: ...` (un-normalisable phone), folder errors
+  from `resolve_folder`, `GroupCreateFailed`, `GroupCreateNeedsReview`.
 
 #### `groups` / `set-layout`
 
@@ -344,6 +359,26 @@ never silently to get a blocked command through.
 - Confirmation: not required (read-only).
 - Typical errors: `groups get-layout failed: ...` (chat not found, chat
   is not a forum, session not authorized) — surface verbatim and stop.
+
+#### `groups` / `rename`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  `--new-title` (the new group title), optional `--reason`.
+- Required flags: exactly one chat reference and `--new-title`.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first
+  (resolves + validates without renaming), show the plan, wait for
+  confirmation, then run without `--dry-run`. Map «переименуй чат X в
+  "Новое название"» → `--entity X --new-title "Новое название"`. The
+  operation is idempotent on the target title — replaying the same rename
+  completes immediately; a different title is a fresh operation.
+- Confirmation: required (bucket 2).
+- Typical errors: `group rename requires a non-empty --new-title`,
+  `GroupRenameNeedsReview` (FLOOD_WAIT — retry via `operations retry`),
+  `GroupRenameFailed` (Telethon error captured on the operation row),
+  `access denied ...` (exit code 3), entity not-found / ambiguous (exit
+  code 2).
 
 #### `topics` / `create`
 
@@ -391,6 +426,29 @@ never silently to get a blocked command through.
   `already_closed: true` if the dry-run reports it.
 - Typical errors: `TopicNotFoundError`, `AmbiguousTopicNameError`,
   folder errors.
+
+#### `topics` / `rename`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  topic reference (`--topic-id` or `--topic-name`), `--new-title` (the new
+  topic title), optional `--reason`.
+- Required flags: exactly one chat reference, exactly one of `--topic-id`
+  / `--topic-name`, and `--new-title`.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first
+  (resolves chat + topic and validates without renaming), show the plan,
+  wait for confirmation, then run without `--dry-run`. Map «переименуй
+  топик "Старое" в чате X в "Новое"» → `--entity X --topic-name "Старое"
+  --new-title "Новое"`. The operation is idempotent on the target title —
+  replaying the same rename completes immediately; a different title is a
+  fresh operation.
+- Confirmation: required (bucket 2).
+- Typical errors: `topic rename requires a non-empty --new-title`,
+  `TopicNotFoundError`, `AmbiguousTopicNameError`,
+  `TopicRenameNeedsReview` (FLOOD_WAIT — retry via `operations retry`),
+  `TopicRenameFailed`, `access denied ...` (exit code 3), entity
+  not-found / ambiguous (exit code 2).
 
 #### `members` / `bulk-add`
 
@@ -772,6 +830,30 @@ Request: «Какой layout у чата -1003915612716?»
 3. Return the single-word output (`list` or `tabs`) verbatim. If the
    CLI exits non-zero, surface the message and stop.
 
+### `groups rename`
+
+Request: «Переименуй чат Клиент / проект в "Клиент / проект (архив)".»
+
+1. Resource/action: `groups` / `rename`.
+2. Extracted: `--chat-name "Клиент / проект"`,
+   `--new-title "Клиент / проект (архив)"`. Folder defaults to the
+   configured chat folder for the `--chat-name` lookup.
+3. Skip `health` unless a problem surfaces (don't probe when nothing is wrong).
+4. Dry-run:
+
+   ```bash
+   telegram-assistant groups rename \
+     --chat-name "Клиент / проект" \
+     --new-title "Клиент / проект (архив)" \
+     --dry-run
+   ```
+
+5. Show resolved chat id, the new title, and the single planned action
+   (`rename chat <id> to '<new title>'`).
+6. Wait for «да» / «выполни», then re-run the same command without
+   `--dry-run`. On `needs_review` (FLOOD_WAIT) point the human at
+   `operations retry`; do not auto-retry.
+
 ### `topics create`
 
 Request: «Создай топик "Документы" в чате Клиент / проект.»
@@ -841,6 +923,30 @@ Request: «Закрой топик "Документы" в чате Клиент
    want to run the no-op replay.
 4. Otherwise wait for explicit confirmation and run without
    `--dry-run`.
+
+### `topics rename`
+
+Request: «Переименуй топик "Документы" в чате Клиент / проект в "Архив".»
+
+1. Resource/action: `topics` / `rename`.
+2. Dry-run:
+
+   ```bash
+   telegram-assistant topics rename \
+     --chat-name "Клиент / проект" \
+     --topic-name "Документы" \
+     --new-title "Архив" \
+     --dry-run
+   ```
+
+   Use `--topic-id <id>` instead of `--topic-name` when the human gives a
+   numeric topic id.
+3. Show resolved chat id, resolved `telegram_topic_id`, and the new
+   title. If the topic name is ambiguous (`AmbiguousTopicNameError`) or
+   not found (`TopicNotFoundError`), surface the message and ask.
+4. Wait for explicit confirmation and run without `--dry-run`. On
+   `needs_review` (FLOOD_WAIT) point the human at `operations retry`; do
+   not auto-retry.
 
 ### `members bulk-add`
 

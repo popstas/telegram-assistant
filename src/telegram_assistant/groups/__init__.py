@@ -1,6 +1,7 @@
 """Group-creation domain shared by HTTP, CLI, and the worker."""
 
 from telegram_assistant.groups.service import (
+    ContactSpec,
     GroupBackend,
     GroupCreateFailed,
     GroupCreateNeedsReview,
@@ -11,14 +12,21 @@ from telegram_assistant.groups.service import (
     GroupLayoutSetFailed,
     GroupLayoutSetNeedsReview,
     GroupLayoutSetPending,
+    GroupRenameFailed,
+    GroupRenameNeedsReview,
+    GroupRenamePending,
+    GroupRenameRequest,
+    GroupRenameResult,
     LayoutSetRequest,
     LayoutSetResult,
     create_group,
     get_topics_layout,
+    rename_group,
     set_topics_layout,
 )
 
 __all__ = [
+    "ContactSpec",
     "GroupBackend",
     "GroupCreateFailed",
     "GroupCreateNeedsReview",
@@ -29,9 +37,15 @@ __all__ = [
     "GroupLayoutSetFailed",
     "GroupLayoutSetNeedsReview",
     "GroupLayoutSetPending",
+    "GroupRenameFailed",
+    "GroupRenameNeedsReview",
+    "GroupRenamePending",
+    "GroupRenameRequest",
+    "GroupRenameResult",
     "LayoutSetRequest",
     "LayoutSetResult",
     "create_group",
     "get_topics_layout",
+    "rename_group",
     "set_topics_layout",
 ]

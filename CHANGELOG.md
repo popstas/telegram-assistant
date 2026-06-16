@@ -1,6 +1,42 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- groups: Import phone+name contacts during group create
+- Finalize rename docs and regenerate changelog
+- Verify rename acceptance criteria across all surfaces
+- Add group/topic rename round-trips to live e2e scripts
+- Document groups/topics rename in skill and README
+- Add MCP telegram_groups_rename and telegram_topics_rename tools
+- Add topic rename HTTP endpoints
+- Add group rename HTTP endpoint
+- Add topics rename CLI command
+- Add groups rename CLI command
+- Add topic rename domain service and Telethon backend
+- Add group rename domain service and Telethon backend
+- Add rename idempotency keys for groups and topics
+- planfix: Clean up /task in topics, keep topic name **BREAKING**
+
+### Bug Fixes
+
+- members: Treat bare numeric member refs as Telegram user ids
+- review: Cover rename pending/failed HTTP arms + MCP arg guards
+
+### Documentation
+
+- plan: Rename groups and topics across all surfaces
+
+### Miscellaneous
+
+- Move completed rename plan to docs/plans/completed
+
+### Task
+
+- Add rename groups and topics tools task; clear completed items
+
 ## v0.5.0 - 2026-06-09
 
 ### Features

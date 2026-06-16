@@ -11,9 +11,11 @@ OperationType = str
 
 GROUP_CREATE = "group_create"
 GROUP_LAYOUT_SET = "group_layout_set"
+GROUP_RENAME = "group_rename"
 TOPIC_CREATE = "topic_create"
 TOPIC_BULK_CREATE = "topic_bulk_create"
 TOPIC_CLOSE = "topic_close"
+TOPIC_RENAME = "topic_rename"
 MEMBER_BULK_ADD = "member_bulk_add"
 MEMBER_BULK_REMOVE = "member_bulk_remove"
 MESSAGE_SEND = "message_send"
@@ -36,6 +38,14 @@ def group_layout_set_key(*, telegram_chat_id: int | str, layout: str) -> str:
     return f"{GROUP_LAYOUT_SET}:chat={telegram_chat_id}:layout={layout}"
 
 
+def group_rename_key(*, telegram_chat_id: int | str, new_title: str) -> str:
+    if not str(telegram_chat_id).strip():
+        raise ValueError("group_rename requires a non-empty telegram_chat_id")
+    if new_title is None or not new_title.strip():
+        raise ValueError("group_rename requires a non-empty new_title")
+    return f"{GROUP_RENAME}:chat={telegram_chat_id}:title={new_title.strip()}"
+
+
 def topic_create_key(
     *,
     external_ref: int | str | None,
@@ -53,6 +63,24 @@ def topic_create_key(
 
 def topic_close_key(*, telegram_chat_id: int | str, telegram_topic_id: int | str) -> str:
     return f"{TOPIC_CLOSE}:chat={telegram_chat_id}:topic={telegram_topic_id}"
+
+
+def topic_rename_key(
+    *,
+    telegram_chat_id: int | str,
+    telegram_topic_id: int | str,
+    new_title: str,
+) -> str:
+    if not str(telegram_chat_id).strip():
+        raise ValueError("topic_rename requires a non-empty telegram_chat_id")
+    if not str(telegram_topic_id).strip():
+        raise ValueError("topic_rename requires a non-empty telegram_topic_id")
+    if new_title is None or not new_title.strip():
+        raise ValueError("topic_rename requires a non-empty new_title")
+    return (
+        f"{TOPIC_RENAME}:chat={telegram_chat_id}:"
+        f"topic={telegram_topic_id}:title={new_title.strip()}"
+    )
 
 
 def member_add_key(*, telegram_chat_id: int | str, user: str) -> str:

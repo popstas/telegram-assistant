@@ -81,6 +81,18 @@ class TopicCloseNeedsReview(TopicError):
     """A previous close attempt resulted in needs_review."""
 
 
+class TopicRenameFailed(TopicError):
+    """A previous rename attempt with this idempotency key already failed."""
+
+
+class TopicRenamePending(TopicError):
+    """A concurrent rename attempt with this idempotency key is in flight."""
+
+
+class TopicRenameNeedsReview(TopicError):
+    """A previous rename attempt resulted in needs_review."""
+
+
 class AmbiguousTopicNameError(TopicError):
     """More than one topic in the chat shares the requested name."""
 
@@ -190,6 +202,9 @@ class TopicBackend(Protocol):
         ...
 
     async def close_topic(self, *, chat_id: int, topic_id: int) -> None:
+        ...
+
+    async def rename_topic(self, *, chat_id: int, topic_id: int, title: str) -> None:
         ...
 
     async def get_recent_messages(
@@ -888,6 +903,147 @@ async def close_topic(
         telegram_topic_id=request.telegram_topic_id,
         status="closed",
         reason=request.reason,
+    )
+    op = store.complete_operation(operation_id, result.to_dict())
+    return result, op
+
+
+# ---------------------------------------------------------------------------
+# Rename topic
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TopicRenameRequest:
+    """Input shape for :func:`rename_topic`."""
+
+    telegram_chat_id: int
+    telegram_topic_id: int
+    new_title: str
+    reason: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "telegram_chat_id": self.telegram_chat_id,
+            "telegram_topic_id": self.telegram_topic_id,
+            "new_title": self.new_title,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class TopicRenameResult:
+    """Result returned by both the live execution and a replay."""
+
+    telegram_chat_id: int
+    telegram_topic_id: int
+    old_title: str | None
+    new_title: str
+    status: str = "renamed"
+    replayed: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "telegram_chat_id": self.telegram_chat_id,
+            "telegram_topic_id": self.telegram_topic_id,
+            "old_title": self.old_title,
+            "new_title": self.new_title,
+            "status": self.status,
+            "replayed": self.replayed,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> TopicRenameResult:
+        return cls(
+            telegram_chat_id=int(payload["telegram_chat_id"]),
+            telegram_topic_id=int(payload["telegram_topic_id"]),
+            old_title=payload.get("old_title"),
+            new_title=str(payload["new_title"]),
+            status=str(payload.get("status", "renamed")),
+            replayed=True,
+        )
+
+
+async def rename_topic(
+    *,
+    backend: TopicBackend,
+    store: OperationStore,
+    request: TopicRenameRequest,
+    authorizer: Authorizer | None = None,
+) -> tuple[TopicRenameResult, OperationRecord]:
+    """Rename a forum topic, or replay the saved result for the same key.
+
+    Idempotency key: ``topic_rename:chat={id}:topic={tid}:title={new_title}``.
+    Re-running the same rename replays the completed operation without touching
+    Telegram; a different target title is a fresh operation keyed under the new
+    title.
+
+    State machine transitions mirror :func:`close_topic`:
+
+    * `completed`    → return saved result with ``replayed=True``
+    * `failed`       → raise :class:`TopicRenameFailed`
+    * `needs_review` → raise :class:`TopicRenameNeedsReview`
+    * `pending`      → raise :class:`TopicRenamePending`
+    """
+    if request.telegram_topic_id <= 0:
+        raise ValueError("rename_topic requires a positive telegram_topic_id")
+    if not request.new_title.strip():
+        raise ValueError("rename_topic requires a non-empty new_title")
+
+    # Renaming a topic is a WRITE op on the host chat.
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
+
+    key = idempotency.topic_rename_key(
+        telegram_chat_id=request.telegram_chat_id,
+        telegram_topic_id=request.telegram_topic_id,
+        new_title=request.new_title,
+    )
+    begin = store.begin_operation(
+        operation_type=idempotency.TOPIC_RENAME,
+        idempotency_key=key,
+        request_payload=request.to_payload(),
+    )
+
+    if not begin.created:
+        op = begin.operation
+        if op.status is OperationStatus.COMPLETED:
+            payload = op.result_payload or {}
+            return TopicRenameResult.from_dict(payload), op
+        if op.status is OperationStatus.FAILED:
+            raise TopicRenameFailed(op.error or "previous attempt failed")
+        if op.status is OperationStatus.NEEDS_REVIEW:
+            raise TopicRenameNeedsReview(op.error or "previous attempt needs review")
+        raise TopicRenamePending(
+            f"operation {op.id} is still pending; retry via 'operations retry'"
+        )
+
+    operation_id = begin.operation.id
+    try:
+        await backend.rename_topic(
+            chat_id=request.telegram_chat_id,
+            topic_id=request.telegram_topic_id,
+            title=request.new_title.strip(),
+        )
+    except FloodWaitError as exc:
+        # FLOOD_WAIT must not lock the idempotency key into a terminal failure —
+        # promote to needs_review so an operator can `operations retry`.
+        store.mark_needs_review(
+            operation_id, f"FLOOD_WAIT during topic rename: {exc}"
+        )
+        raise TopicRenameNeedsReview(str(exc)) from exc
+    except TopicError:
+        raise
+    except Exception as exc:
+        store.fail_operation(operation_id, str(exc))
+        raise
+
+    result = TopicRenameResult(
+        telegram_chat_id=request.telegram_chat_id,
+        telegram_topic_id=request.telegram_topic_id,
+        old_title=None,
+        new_title=request.new_title.strip(),
+        status="renamed",
     )
     op = store.complete_operation(operation_id, result.to_dict())
     return result, op

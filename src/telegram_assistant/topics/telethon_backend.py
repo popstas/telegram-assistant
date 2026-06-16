@@ -153,6 +153,19 @@ class TelethonTopicBackend:
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
 
+    async def rename_topic(self, *, chat_id: int, topic_id: int, title: str) -> None:
+        try:
+            request_cls = _import_forum_request("EditForumTopicRequest")
+            peer = await self._client.get_input_entity(chat_id)
+            kwargs: dict[str, Any] = {
+                **_peer_kwarg(request_cls, peer),
+                "topic_id": topic_id,
+                "title": title,
+            }
+            await self._client(request_cls(**kwargs))
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+
     async def list_topics(self, *, chat_id: int) -> list[TopicSummary]:
         try:
             request_cls = _import_forum_request("GetForumTopicsRequest")

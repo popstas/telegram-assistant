@@ -27,6 +27,7 @@ from telegram_assistant.folders.service import (
     FolderPeerFailureError,
     resolve_folder,
 )
+from telegram_assistant.members.service import normalize_phone
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
     OperationRecord,
@@ -67,6 +68,18 @@ class GroupLayoutSetNeedsReview(GroupError):
     """A previous layout-set attempt resulted in needs_review."""
 
 
+class GroupRenameFailed(GroupError):
+    """A previous rename attempt with this idempotency key already failed."""
+
+
+class GroupRenamePending(GroupError):
+    """A concurrent rename attempt with this idempotency key is in flight."""
+
+
+class GroupRenameNeedsReview(GroupError):
+    """A previous rename attempt resulted in needs_review."""
+
+
 def _layout_to_tabs(layout: str) -> bool:
     """Map the public ``"list" | "tabs"`` string to the Telethon ``tabs`` flag."""
     if layout == "tabs":
@@ -82,6 +95,24 @@ def _tabs_to_layout(tabs: bool) -> TopicsLayout:
 
 
 @dataclass(frozen=True)
+class ContactSpec:
+    """A user identified by phone + name, imported to contacts before adding.
+
+    A bare Telegram user id only resolves once the account has seen the user.
+    Supplying ``phone`` + ``name`` lets group create import the user into the
+    account's Telegram contacts first (which caches them), so the subsequent
+    chat-add resolves. ``phone`` is normalised via
+    :func:`telegram_assistant.members.service.normalize_phone`.
+    """
+
+    phone: str
+    name: str
+
+    def to_payload(self) -> dict[str, Any]:
+        return {"phone": self.phone, "name": self.name}
+
+
+@dataclass(frozen=True)
 class GroupCreateRequest:
     """Input shape shared by HTTP, CLI, and tests."""
 
@@ -90,6 +121,8 @@ class GroupCreateRequest:
     about: str | None = None
     admins: Sequence[str] = ()
     members: Sequence[str] = ()
+    managers: Sequence[str] = ()
+    contacts: Sequence[ContactSpec] = ()
     reserve_admins: Sequence[str] | None = None
     reserve_members: Sequence[str] | None = None
     skip_reserve: bool = False
@@ -107,6 +140,8 @@ class GroupCreateRequest:
             "about": self.about,
             "admins": list(self.admins),
             "members": list(self.members),
+            "managers": list(self.managers),
+            "contacts": [c.to_payload() for c in self.contacts],
             "reserve_admins": (
                 list(self.reserve_admins) if self.reserve_admins is not None else None
             ),
@@ -137,6 +172,7 @@ class GroupCreateResult:
     admins_added: list[str] = field(default_factory=list)
     members_added: list[str] = field(default_factory=list)
     admins_promoted: list[str] = field(default_factory=list)
+    contacts_imported: list[dict[str, Any]] = field(default_factory=list)
     skipped: list[dict[str, Any]] = field(default_factory=list)
     task_message_sent: bool = False
     replayed: bool = False
@@ -153,6 +189,7 @@ class GroupCreateResult:
             "admins_added": list(self.admins_added),
             "members_added": list(self.members_added),
             "admins_promoted": list(self.admins_promoted),
+            "contacts_imported": list(self.contacts_imported),
             "skipped": list(self.skipped),
             "task_message_sent": self.task_message_sent,
             "replayed": self.replayed,
@@ -172,6 +209,7 @@ class GroupCreateResult:
             admins_added=list(payload.get("admins_added") or []),
             members_added=list(payload.get("members_added") or []),
             admins_promoted=list(payload.get("admins_promoted") or []),
+            contacts_imported=list(payload.get("contacts_imported") or []),
             skipped=list(payload.get("skipped") or []),
             task_message_sent=bool(payload.get("task_message_sent", False)),
             replayed=True,
@@ -197,6 +235,17 @@ class GroupBackend(Protocol):
     async def add_member(self, *, chat_id: int, user: str) -> None:
         ...
 
+    async def import_contact(
+        self, *, phone: str, first_name: str, last_name: str = ""
+    ) -> int | None:
+        """Import a phone contact; return the resolved Telegram user id.
+
+        Returns ``None`` when the phone has no associated Telegram account
+        (nothing to add). Importing caches the user so a subsequent
+        ``add_member`` by numeric id resolves.
+        """
+        ...
+
     async def promote_admin(self, *, chat_id: int, user: str) -> None:
         ...
 
@@ -207,6 +256,9 @@ class GroupBackend(Protocol):
         ...
 
     async def set_topics_layout(self, *, chat_id: int, tabs: bool) -> None:
+        ...
+
+    async def set_title(self, *, chat_id: int, title: str) -> None:
         ...
 
     async def get_topics_layout(self, *, chat_id: int) -> bool:
@@ -299,6 +351,12 @@ async def _execute_create(
         else config.defaults.create_invite_link
     )
 
+    # Normalise contact phones up front: a malformed phone is bad input, so it
+    # must abort before any supergroup is created (not leave a half-built chat).
+    normalized_contacts: list[tuple[str, str]] = [
+        (normalize_phone(c.phone), c.name) for c in request.contacts
+    ]
+
     # A plugin-provided postfix is a presentation concern only: it lands on the
     # Telegram title but never enters the idempotency key (keyed on raw
     # request.title), so replays of the same external_ref still match.
@@ -368,11 +426,57 @@ async def _execute_create(
         skip=request.skip_reserve,
     )
 
+    # Import phone+name contacts before population. A successful import caches
+    # the user and yields a numeric id, which is folded into the member list so
+    # the normal add loop adds them. A phone with no Telegram account (or an
+    # import error) is recorded and skipped — the group still gets created.
+    contacts_imported: list[dict[str, Any]] = []
+    contact_user_ids: list[str] = []
+    for phone, name in normalized_contacts:
+        record: dict[str, Any] = {"phone": phone, "name": name, "user_id": None}
+        try:
+            user_id = await backend.import_contact(
+                phone=phone, first_name=name, last_name=""
+            )
+        except FloodWaitError:
+            raise
+        except Exception as exc:
+            record["status"] = "error"
+            record["reason"] = str(exc)
+            contacts_imported.append(record)
+            skipped.append(
+                {"step": "import_contact", "phone": phone, "reason": str(exc)}
+            )
+            continue
+        if user_id is None:
+            record["status"] = "no_account"
+            contacts_imported.append(record)
+            skipped.append(
+                {
+                    "step": "import_contact",
+                    "phone": phone,
+                    "reason": "no_telegram_account",
+                }
+            )
+            continue
+        record["status"] = "imported"
+        record["user_id"] = user_id
+        contacts_imported.append(record)
+        contact_user_ids.append(str(user_id))
+
     # Build the ordered population plan, deduping users that appear in multiple
-    # buckets so we never invite the same handle twice.
+    # buckets so we never invite the same handle twice. Imported contacts go
+    # first so their resolved ids are added before the named handles.
     all_members = _dedupe(
         _drop_blank(
-            [*request.members, *reserve_members, *request.admins, *reserve_admins]
+            [
+                *contact_user_ids,
+                *request.members,
+                *request.managers,
+                *reserve_members,
+                *request.admins,
+                *reserve_admins,
+            ]
         )
     )
     members_added: list[str] = []
@@ -486,6 +590,7 @@ async def _execute_create(
         admins_added=list(request.admins),
         members_added=members_added,
         admins_promoted=admins_promoted,
+        contacts_imported=contacts_imported,
         skipped=skipped,
         task_message_sent=task_message_sent,
     )
@@ -517,6 +622,11 @@ async def create_group(
         plugins = PluginRegistry()
     if not request.title.strip() and request.external_ref is None:
         raise ValueError("group create requires external_ref or non-empty title")
+
+    # Validate contact phones up front: a malformed phone is bad input and must
+    # fail before we create an operation row or touch Telegram.
+    for contact in request.contacts:
+        normalize_phone(contact.phone)
 
     # Group create is gated by WRITE on the destination folder (the place the
     # new chat will land). Checked up front so a denied create never reaches the
@@ -741,3 +851,133 @@ async def get_topics_layout(
     """
     tabs = await backend.get_topics_layout(chat_id=telegram_chat_id)
     return _tabs_to_layout(bool(tabs))
+
+
+# ---------------------------------------------------------------------------
+# Group rename
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GroupRenameRequest:
+    """Input shape for :func:`rename_group`."""
+
+    telegram_chat_id: int
+    new_title: str
+    reason: str | None = None
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "telegram_chat_id": self.telegram_chat_id,
+            "new_title": self.new_title,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
+class GroupRenameResult:
+    """Result returned by both the live execution and a replay."""
+
+    telegram_chat_id: int
+    old_title: str | None
+    new_title: str
+    status: str = "renamed"
+    replayed: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "telegram_chat_id": self.telegram_chat_id,
+            "old_title": self.old_title,
+            "new_title": self.new_title,
+            "status": self.status,
+            "replayed": self.replayed,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> GroupRenameResult:
+        return cls(
+            telegram_chat_id=int(payload["telegram_chat_id"]),
+            old_title=payload.get("old_title"),
+            new_title=str(payload["new_title"]),
+            status=str(payload.get("status", "renamed")),
+            replayed=True,
+        )
+
+
+async def rename_group(
+    *,
+    backend: GroupBackend,
+    store: OperationStore,
+    request: GroupRenameRequest,
+    authorizer: Authorizer | None = None,
+) -> tuple[GroupRenameResult, OperationRecord]:
+    """Rename an existing supergroup, or replay the saved result for the same key.
+
+    Idempotency key: ``group_rename:chat={id}:title={new_title}``. Re-running the
+    same rename replays the completed operation without touching Telegram; a
+    different target title is a fresh operation keyed under the new title.
+
+    State machine transitions mirror :func:`set_topics_layout`:
+
+    * `completed`    → return saved result with ``replayed=True``
+    * `failed`       → raise :class:`GroupRenameFailed`
+    * `needs_review` → raise :class:`GroupRenameNeedsReview`
+    * `pending`      → raise :class:`GroupRenamePending`
+    """
+    if not request.new_title.strip():
+        raise ValueError("rename_group requires a non-empty new_title")
+
+    # Renaming a group is a WRITE op on the chat itself.
+    if authorizer is not None:
+        await authorizer.require(request.telegram_chat_id, AccessLevel.WRITE)
+
+    key = idempotency.group_rename_key(
+        telegram_chat_id=request.telegram_chat_id,
+        new_title=request.new_title,
+    )
+    begin = store.begin_operation(
+        operation_type=idempotency.GROUP_RENAME,
+        idempotency_key=key,
+        request_payload=request.to_payload(),
+    )
+
+    if not begin.created:
+        op = begin.operation
+        if op.status is OperationStatus.COMPLETED:
+            payload = op.result_payload or {}
+            return GroupRenameResult.from_dict(payload), op
+        if op.status is OperationStatus.FAILED:
+            raise GroupRenameFailed(op.error or "previous attempt failed")
+        if op.status is OperationStatus.NEEDS_REVIEW:
+            raise GroupRenameNeedsReview(op.error or "previous attempt needs review")
+        raise GroupRenamePending(
+            f"operation {op.id} is still pending; retry via 'operations retry'"
+        )
+
+    operation_id = begin.operation.id
+    try:
+        await backend.set_title(
+            chat_id=request.telegram_chat_id,
+            title=request.new_title.strip(),
+        )
+    except FloodWaitError as exc:
+        # FLOOD_WAIT must not lock the idempotency key into a terminal failure —
+        # promote to needs_review so an operator can `operations retry`.
+        store.mark_needs_review(
+            operation_id, f"FLOOD_WAIT during group rename: {exc}"
+        )
+        raise GroupRenameNeedsReview(str(exc)) from exc
+    except GroupError:
+        raise
+    except Exception as exc:
+        store.fail_operation(operation_id, str(exc))
+        raise
+
+    result = GroupRenameResult(
+        telegram_chat_id=request.telegram_chat_id,
+        old_title=None,
+        new_title=request.new_title.strip(),
+        status="renamed",
+    )
+    op = store.complete_operation(operation_id, result.to_dict())
+    return result, op

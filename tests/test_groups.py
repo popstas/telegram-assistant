@@ -22,6 +22,7 @@ from telegram_assistant.folders import (
     FolderSnapshot,
 )
 from telegram_assistant.groups import (
+    ContactSpec,
     GroupCreateFailed,
     GroupCreateNeedsReview,
     GroupCreateRequest,
@@ -57,10 +58,15 @@ class FakeGroupBackend:
         get_messages_error: Exception | None = None,
         delete_messages_error: Exception | None = None,
         sent_message_id: int = 42,
+        contact_user_ids: dict[str, int] | None = None,
+        import_contact_error: Exception | None = None,
     ) -> None:
         self._chat_id = chat_id
         self._fail_on_add = fail_on_add or set()
         self._fail_on_promote = fail_on_promote or set()
+        self._contact_user_ids = contact_user_ids or {}
+        self._import_contact_error = import_contact_error
+        self.imported_contacts: list[tuple[str, str, str]] = []
         self._invite_link = invite_link
         self._set_layout_error = set_layout_error
         self._set_permissions_error = set_permissions_error
@@ -98,6 +104,14 @@ class FakeGroupBackend:
         if user in self._fail_on_add:
             raise RuntimeError(f"privacy restricted: {user}")
         self.added.append(user)
+
+    async def import_contact(
+        self, *, phone: str, first_name: str, last_name: str = ""
+    ) -> int | None:
+        self.imported_contacts.append((phone, first_name, last_name))
+        if self._import_contact_error is not None:
+            raise self._import_contact_error
+        return self._contact_user_ids.get(phone)
 
     async def promote_admin(self, *, chat_id: int, user: str) -> None:
         if user in self._fail_on_promote:
@@ -250,6 +264,133 @@ async def test_create_group_happy_path(
     assert backend.messages == [(-100123, "/task 42")]
     assert folder_backend.added == [(2, -100123)]
     assert result.replayed is False
+
+
+async def test_create_group_imports_phone_contact_and_adds_it(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    # The dirty phone normalises to +79222222222, which resolves to user 555.
+    backend = FakeGroupBackend(contact_user_ids={"+79222222222": 555})
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        contacts=[ContactSpec(phone="+7-922-222-22-22", name="Иван Петров")],
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    # Imported with the normalised phone and the name as first_name.
+    assert backend.imported_contacts == [("+79222222222", "Иван Петров", "")]
+    # The resolved id is added to the chat (as a string) before named handles.
+    assert "555" in backend.added
+    assert "555" in result.members_added
+    assert result.contacts_imported == [
+        {
+            "phone": "+79222222222",
+            "name": "Иван Петров",
+            "user_id": 555,
+            "status": "imported",
+        }
+    ]
+
+
+async def test_create_group_phone_contact_without_telegram_account_is_skipped(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    # No mapping → import returns None (phone has no Telegram account).
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        contacts=[ContactSpec(phone="89222222222", name="Иван")],
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    assert backend.imported_contacts == [("+79222222222", "Иван", "")]
+    assert result.contacts_imported == [
+        {"phone": "+79222222222", "name": "Иван", "user_id": None, "status": "no_account"}
+    ]
+    assert {
+        "step": "import_contact",
+        "phone": "+79222222222",
+        "reason": "no_telegram_account",
+    } in result.skipped
+
+
+async def test_create_group_malformed_contact_phone_aborts_before_create(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        contacts=[ContactSpec(phone="12345", name="Short")],
+    )
+
+    with pytest.raises(ValueError, match="invalid phone reference"):
+        await create_group(
+            backend=backend,
+            folder_backend=folder_backend,
+            store=store,
+            config=config.telegram,
+            plugins=build_registry(config),
+            request=request,
+        )
+    # No supergroup is created when the phone is malformed.
+    assert backend.created == []
+
+
+async def test_create_group_managers_are_added_like_members(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["@bob"],
+        managers=["@carol", "@bob"],  # @bob duplicated across both buckets
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    # Managers land in members_added as regular members; @bob added once.
+    assert "@carol" in result.members_added
+    assert result.members_added.count("@bob") == 1
+    # Not promoted to admin.
+    assert result.admins_promoted == ["@reserve_account"]
 
 
 async def test_create_group_skip_reserve_uses_only_explicit_lists(
@@ -1385,6 +1526,193 @@ def test_cli_groups_create_happy_path(
     assert payload["task_message_sent"] is True
     # @planfix_bot is in the reserves so it was added via the configured default.
     assert "@planfix_bot" in payload["members_added"]
+
+
+def test_cli_groups_create_contact_imported_and_added(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeGroupBackend(contact_user_ids={"+79222222222": 555})
+    folder_backend = FakeFolderBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "groups",
+            "create",
+            "--title",
+            "Acme",
+            "--planfix-task-id",
+            "42",
+            "--contact",
+            "+7-922-222-22-22|Иван Петров",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["contacts_imported"] == [
+        {
+            "phone": "+79222222222",
+            "name": "Иван Петров",
+            "user_id": 555,
+            "status": "imported",
+        }
+    ]
+    assert "555" in payload["members_added"]
+    assert backend.imported_contacts == [("+79222222222", "Иван Петров", "")]
+
+
+def test_cli_groups_create_dry_run_normalizes_contact(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "groups",
+            "create",
+            "--title",
+            "Acme",
+            "--contact",
+            "https://t.me/+79222222222|Иван",
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["status"] == "dry_run"
+    assert payload["resolved"]["contacts"] == [
+        {"phone": "+79222222222", "name": "Иван"}
+    ]
+    assert (
+        "import contact 'Иван' +79222222222 and add to chat"
+        in payload["planned_actions"]
+    )
+    # Dry-run must not import anything.
+    assert backend.imported_contacts == []
+    assert backend.created == []
+
+
+def test_cli_groups_create_bad_contact_format_exit_2(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "groups",
+            "create",
+            "--title",
+            "Acme",
+            "--contact",
+            "+79222222222",  # missing |name
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "invalid --contact" in result.stdout + str(result.stderr or "")
+
+
+def test_cli_groups_create_manager_added_as_member(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "groups",
+            "create",
+            "--title",
+            "Acme",
+            "--planfix-task-id",
+            "42",
+            "--manager",
+            "@carol",
+            "--member",
+            "@bob",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert "@carol" in payload["members_added"]
+    assert "@bob" in payload["members_added"]
+
+
+def test_http_create_group_managers_added_as_members(
+    minimal_config_yaml: str,
+) -> None:
+    backend = FakeGroupBackend()
+    client = _http_client(minimal_config_yaml, backend)
+    resp = client.post(
+        "/telegram/groups",
+        json={
+            "title": "Acme",
+            "external_ref": 42,
+            "members": ["@bob"],
+            "managers": ["@carol"],
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "@carol" in body["members_added"]
+    assert "@bob" in body["members_added"]
+
+
+def test_http_create_group_imports_contact(minimal_config_yaml: str) -> None:
+    backend = FakeGroupBackend(contact_user_ids={"+79222222222": 555})
+    client = _http_client(minimal_config_yaml, backend)
+    resp = client.post(
+        "/telegram/groups",
+        json={
+            "title": "Acme",
+            "external_ref": 42,
+            "contacts": [{"phone": "89222222222", "name": "Иван"}],
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["contacts_imported"] == [
+        {"phone": "+79222222222", "name": "Иван", "user_id": 555, "status": "imported"}
+    ]
+    assert "555" in body["members_added"]
 
 
 def test_cli_groups_create_no_reserve_skips_configured_reserves(

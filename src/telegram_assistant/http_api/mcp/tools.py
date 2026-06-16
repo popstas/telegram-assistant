@@ -30,6 +30,7 @@ from telegram_assistant.folders import (
     resolve_chat_in_folder,
 )
 from telegram_assistant.groups import (
+    ContactSpec,
     GroupCreateFailed,
     GroupCreateNeedsReview,
     GroupCreatePending,
@@ -37,9 +38,14 @@ from telegram_assistant.groups import (
     GroupLayoutSetFailed,
     GroupLayoutSetNeedsReview,
     GroupLayoutSetPending,
+    GroupRenameFailed,
+    GroupRenameNeedsReview,
+    GroupRenamePending,
+    GroupRenameRequest,
     LayoutSetRequest,
     create_group,
     get_topics_layout,
+    rename_group,
     set_topics_layout,
 )
 from telegram_assistant.health import collect_health
@@ -53,6 +59,7 @@ from telegram_assistant.http_api.access import (
 )
 from telegram_assistant.http_api.folders import AddChatRequest
 from telegram_assistant.http_api.groups import (
+    ContactBody,
     GroupCreateBody,
 )
 from telegram_assistant.http_api.groups import (
@@ -190,9 +197,14 @@ from telegram_assistant.topics import (
     TopicCreatePending,
     TopicCreateRequest,
     TopicNotFoundError,
+    TopicRenameFailed,
+    TopicRenameNeedsReview,
+    TopicRenamePending,
+    TopicRenameRequest,
     bulk_create_topics,
     close_topic,
     create_topic,
+    rename_topic,
     resolve_topic_id_by_name,
 )
 from telegram_assistant.worker.queue import FloodWaitError
@@ -393,10 +405,12 @@ def _raise_from_exception(exc: Exception) -> NoReturn:
         exc,
         GroupCreatePending
         | GroupLayoutSetPending
+        | GroupRenamePending
         | MessageSendPending
         | TopicCreatePending
         | BulkTopicCreatePending
         | TopicClosePending
+        | TopicRenamePending
         | BulkMemberAddPending
         | BulkMemberRemovePending,
     ):
@@ -409,10 +423,12 @@ def _raise_from_exception(exc: Exception) -> NoReturn:
         exc,
         GroupCreateFailed
         | GroupLayoutSetFailed
+        | GroupRenameFailed
         | MessageSendFailed
         | TopicCreateFailed
         | BulkTopicCreateFailed
         | TopicCloseFailed
+        | TopicRenameFailed
         | BulkMemberAddFailed
         | BulkMemberRemoveFailed,
     ):
@@ -425,10 +441,12 @@ def _raise_from_exception(exc: Exception) -> NoReturn:
         exc,
         GroupCreateNeedsReview
         | GroupLayoutSetNeedsReview
+        | GroupRenameNeedsReview
         | MessageSendNeedsReview
         | TopicCreateNeedsReview
         | BulkTopicCreateNeedsReview
         | TopicCloseNeedsReview
+        | TopicRenameNeedsReview
         | BulkMemberAddNeedsReview
         | BulkMemberRemoveNeedsReview,
     ):
@@ -1025,6 +1043,8 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         about: str | None = None,
         admins: list[str] | None = None,
         members: list[str] | None = None,
+        managers: list[str] | None = None,
+        contacts: list[dict[str, str]] | None = None,
         reserve_admins: list[str] | None = None,
         reserve_members: list[str] | None = None,
         skip_reserve: bool = False,
@@ -1035,7 +1055,13 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         folder_id: int | None = None,
         skip_folder: bool = False,
     ) -> dict[str, Any]:
-        """Create a Telegram supergroup."""
+        """Create a Telegram supergroup.
+
+        ``contacts`` is an optional list of ``{"phone", "name"}`` entries: each
+        is imported into the account's Telegram contacts (the phone is
+        normalised) and then added as a regular member — use it for users only
+        reachable by phone number.
+        """
         request = _request(provider)
         try:
             body = GroupCreateBody(
@@ -1045,6 +1071,8 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 about=about,
                 admins=admins or [],
                 members=members or [],
+                managers=managers or [],
+                contacts=[ContactBody(**c) for c in (contacts or [])],
                 reserve_admins=reserve_admins,
                 reserve_members=reserve_members,
                 skip_reserve=skip_reserve,
@@ -1077,6 +1105,10 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                     about=body.about,
                     admins=body.admins,
                     members=body.members,
+                    contacts=[
+                        ContactSpec(phone=c.phone, name=c.name)
+                        for c in body.contacts
+                    ],
                     reserve_admins=body.reserve_admins,
                     reserve_members=body.reserve_members,
                     skip_reserve=body.skip_reserve,
@@ -1127,6 +1159,53 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                     telegram_chat_id=chat_id,
                     layout=layout,
                 ),
+            )
+            payload = result.to_dict()
+            payload["operation_id"] = op.id
+            payload["operation_status"] = op.status.value
+            return payload
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_groups_rename",
+        annotations=WRITE_IDEMPOTENT,
+        structured_output=True,
+    )
+    async def telegram_groups_rename(
+        new_title: str,
+        telegram_chat_id: int | None = None,
+        chat_name: str | None = None,
+        entity: str | int | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Rename a Telegram supergroup (WRITE-gated, idempotent by target title)."""
+        request = _request(provider)
+        try:
+            # Reuse the group backend factory: rename is a thin WRITE op on the
+            # supergroup, so no dedicated rename backend is warranted.
+            backend, folder_backend = _group_backends_or_503(request)  # type: ignore[arg-type]
+            store = _group_store_or_503(request)  # type: ignore[arg-type]
+            chat_id = await _resolve_chat_id_generic(
+                telegram_chat_id=telegram_chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                request=request,  # type: ignore[arg-type]
+            )
+            authorizer = build_authorizer(request, folder_backend=folder_backend)  # type: ignore[arg-type]
+            result, op = await rename_group(
+                backend=backend,
+                store=store,
+                request=GroupRenameRequest(
+                    telegram_chat_id=chat_id,
+                    new_title=new_title,
+                    reason=reason,
+                ),
+                authorizer=authorizer,
             )
             payload = result.to_dict()
             payload["operation_id"] = op.id
@@ -1300,6 +1379,66 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                     telegram_chat_id=chat_id,
                     telegram_topic_id=effective_topic_id,
                     reason=body.reason,
+                ),
+            )
+            payload = result.to_dict()
+            payload["operation_id"] = op.id
+            payload["operation_status"] = op.status.value
+            return payload
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_topics_rename",
+        annotations=WRITE_IDEMPOTENT,
+        structured_output=True,
+    )
+    async def telegram_topics_rename(
+        new_title: str,
+        topic_id: int | None = None,
+        topic_name: str | None = None,
+        telegram_chat_id: int | None = None,
+        chat_name: str | None = None,
+        entity: str | int | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Rename a forum topic (WRITE-gated, idempotent by target title)."""
+        request = _request(provider)
+        try:
+            if (topic_id is None) == (topic_name is None):
+                raise ValueError("provide exactly one of topic_id or topic_name")
+            if topic_id is not None and topic_id <= 0:
+                raise ValueError("topic_id must be a positive integer")
+            backend = _topic_backend_or_503(request)  # type: ignore[arg-type]
+            store = _topic_store_or_503(request)  # type: ignore[arg-type]
+            chat_id = await _resolve_chat_id_generic(
+                telegram_chat_id=telegram_chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                request=request,  # type: ignore[arg-type]
+            )
+            await _enforce_write(request, chat_id)  # type: ignore[arg-type]
+            effective_topic_id = (
+                topic_id
+                if topic_id is not None
+                else await resolve_topic_id_by_name(
+                    backend=backend,
+                    telegram_chat_id=chat_id,
+                    topic_name=topic_name or "",
+                )
+            )
+            result, op = await rename_topic(
+                backend=backend,
+                store=store,
+                request=TopicRenameRequest(
+                    telegram_chat_id=chat_id,
+                    telegram_topic_id=effective_topic_id,
+                    new_title=new_title,
+                    reason=reason,
                 ),
             )
             payload = result.to_dict()

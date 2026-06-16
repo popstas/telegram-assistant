@@ -16,6 +16,7 @@ from telegram_assistant.members.service import (
     MemberAlreadyPresentError,
     MemberNotPresentError,
     MemberPrivacyError,
+    coerce_user_ref,
 )
 from telegram_assistant.worker.queue import FloodWaitError
 
@@ -64,7 +65,7 @@ class TelethonMemberBackend:
 
         try:
             channel = await self._client.get_input_entity(chat_id)
-            member = await self._client.get_input_entity(user)
+            member = await self._client.get_input_entity(coerce_user_ref(user))
             await self._client(
                 InviteToChannelRequest(channel=channel, users=[member])
             )
@@ -77,7 +78,7 @@ class TelethonMemberBackend:
 
         try:
             channel = await self._client.get_input_entity(chat_id)
-            member = await self._client.get_input_entity(user)
+            member = await self._client.get_input_entity(coerce_user_ref(user))
         except Exception as exc:
             raise _classify_rpc_error(exc) from exc
         rights = ChatAdminRights(
@@ -112,7 +113,7 @@ class TelethonMemberBackend:
 
         try:
             channel = await self._client.get_input_entity(chat_id)
-            member = await self._client.get_input_entity(user)
+            member = await self._client.get_input_entity(coerce_user_ref(user))
         except Exception as exc:
             raise _classify_rpc_error(exc) from exc
         banned = ChatBannedRights(
@@ -139,7 +140,7 @@ class TelethonMemberBackend:
 
         try:
             channel = await self._client.get_input_entity(chat_id)
-            member = await self._client.get_input_entity(user)
+            member = await self._client.get_input_entity(coerce_user_ref(user))
         except Exception as exc:
             raise _classify_rpc_error(exc) from exc
         cleared = ChatBannedRights(until_date=None)

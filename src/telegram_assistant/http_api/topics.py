@@ -25,6 +25,7 @@ from telegram_assistant.http_api.access import (
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.topics import (
+    AmbiguousTopicNameError,
     BulkTopicCreateFailed,
     BulkTopicCreateNeedsReview,
     BulkTopicCreatePending,
@@ -39,11 +40,18 @@ from telegram_assistant.topics import (
     TopicCreateNeedsReview,
     TopicCreatePending,
     TopicCreateRequest,
+    TopicNotFoundError,
+    TopicRenameFailed,
+    TopicRenameNeedsReview,
+    TopicRenamePending,
+    TopicRenameRequest,
     bulk_create_topics,
     close_topic,
     create_topic,
+    rename_topic,
+    resolve_topic_id_by_name,
 )
-from telegram_assistant.worker.queue import WorkerQueue
+from telegram_assistant.worker.queue import FloodWaitError, WorkerQueue
 
 
 def _validate_chat_ref(
@@ -109,6 +117,38 @@ class TopicCloseBody(BaseModel):
             folder_name=self.folder_name,
         )
         return self
+
+
+class TopicRenameBody(BaseModel):
+    """Body for the id-path rename: ``POST /topics/{topic_id}/rename``."""
+
+    new_title: str = Field(..., min_length=1)
+    telegram_chat_id: int | None = None
+    chat_name: str | None = None
+    entity: str | int | None = None
+    folder_name: str | None = None
+    folder_id: int | None = None
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_chat_ref(self) -> TopicRenameBody:
+        _validate_chat_ref(
+            telegram_chat_id=self.telegram_chat_id,
+            chat_name=self.chat_name,
+            entity=self.entity,
+            folder_name=self.folder_name,
+        )
+        return self
+
+
+class TopicRenameByNameBody(TopicRenameBody):
+    """Body for the name-resolving rename: ``POST /topics/rename``.
+
+    Adds ``topic_name`` (resolved within the chat via ``list_topics``) on top of
+    the same chat-reference + ``new_title`` shape as the id path.
+    """
+
+    topic_name: str = Field(..., min_length=1)
 
 
 class BulkTopicItemBody(BaseModel):
@@ -193,6 +233,29 @@ def _translate_folder_error(exc: Exception) -> HTTPException:
             },
         )
     if isinstance(exc, ChatNotFoundError):
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    return HTTPException(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
+    )
+
+
+def _translate_topic_resolution_error(exc: Exception) -> HTTPException:
+    """Map topic-name resolution errors to HTTP responses.
+
+    ``AmbiguousTopicNameError`` → 409, ``TopicNotFoundError`` → 404 (mirrors the
+    entity not-found / ambiguous taxonomy).
+    """
+    if isinstance(exc, AmbiguousTopicNameError):
+        return HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "error": "ambiguous_topic_name",
+                "topic_name": exc.topic_name,
+                "telegram_chat_id": exc.telegram_chat_id,
+                "matches": exc.matches,
+            },
+        )
+    if isinstance(exc, TopicNotFoundError):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
     return HTTPException(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(exc)
@@ -450,5 +513,131 @@ def build_router() -> APIRouter:
         payload["operation_id"] = op.id
         payload["operation_status"] = op.status.value
         return payload
+
+    async def _execute_rename(
+        *,
+        request: Request,
+        backend: TopicBackend,
+        store: OperationStore,
+        chat_id: int,
+        topic_id: int,
+        new_title: str,
+        reason: str | None,
+    ) -> dict[str, Any]:
+        domain_request = TopicRenameRequest(
+            telegram_chat_id=chat_id,
+            telegram_topic_id=topic_id,
+            new_title=new_title,
+            reason=reason,
+        )
+        try:
+            result, op = await rename_topic(
+                backend=backend, store=store, request=domain_request
+            )
+        except TopicRenamePending as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"error": "pending", "message": str(exc)},
+            ) from exc
+        except TopicRenameNeedsReview as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"error": "needs_review", "message": str(exc)},
+            ) from exc
+        except TopicRenameFailed as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"error": "previous_attempt_failed", "message": str(exc)},
+            ) from exc
+        except FloodWaitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"error": "needs_review", "message": str(exc)},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        payload = result.to_dict()
+        payload["operation_id"] = op.id
+        payload["operation_status"] = op.status.value
+        return payload
+
+    @router.post("/topics/{topic_id}/rename")
+    async def rename_by_id(
+        topic_id: int, body: TopicRenameBody, request: Request
+    ) -> dict[str, Any]:
+        # Reuse the existing topic backend factory: rename is a thin WRITE op on
+        # the topic, so no dedicated rename backend is warranted.
+        if topic_id <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="topic_id must be a positive integer",
+            )
+        backend = _topic_backend_or_503(request)
+        store = _store_or_503(request)
+        chat_id = await _resolve_chat_id_generic(
+            telegram_chat_id=body.telegram_chat_id,
+            chat_name=body.chat_name,
+            entity=body.entity,
+            folder_name=body.folder_name,
+            folder_id=body.folder_id,
+            request=request,
+        )
+        await _enforce_write(request, chat_id)
+        return await _execute_rename(
+            request=request,
+            backend=backend,
+            store=store,
+            chat_id=chat_id,
+            topic_id=topic_id,
+            new_title=body.new_title,
+            reason=body.reason,
+        )
+
+    @router.post("/topics/rename")
+    async def rename_by_name(
+        body: TopicRenameByNameBody, request: Request
+    ) -> dict[str, Any]:
+        backend = _topic_backend_or_503(request)
+        store = _store_or_503(request)
+        chat_id = await _resolve_chat_id_generic(
+            telegram_chat_id=body.telegram_chat_id,
+            chat_name=body.chat_name,
+            entity=body.entity,
+            folder_name=body.folder_name,
+            folder_id=body.folder_id,
+            request=request,
+        )
+        await _enforce_write(request, chat_id)
+
+        try:
+            topic_id = await resolve_topic_id_by_name(
+                backend=backend,
+                telegram_chat_id=chat_id,
+                topic_name=body.topic_name,
+            )
+        except (AmbiguousTopicNameError, TopicNotFoundError) as exc:
+            raise _translate_topic_resolution_error(exc) from exc
+        except FloodWaitError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail={"error": "needs_review", "message": str(exc)},
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        return await _execute_rename(
+            request=request,
+            backend=backend,
+            store=store,
+            chat_id=chat_id,
+            topic_id=topic_id,
+            new_title=body.new_title,
+            reason=body.reason,
+        )
 
     return router
