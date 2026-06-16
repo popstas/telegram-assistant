@@ -5,6 +5,7 @@
 
 ### Features
 
+- groups: Add managers field as a members alias in group create
 - groups: Import phone+name contacts during group create
 - Finalize rename docs and regenerate changelog
 - Verify rename acceptance criteria across all surfaces
