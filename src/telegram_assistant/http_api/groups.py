@@ -47,6 +47,16 @@ from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.worker.queue import FloodWaitError
 
 
+def _first_or_none(value: str | list[str] | None) -> str | None:
+    """Collapse a string-or-list request value to its first non-blank element."""
+    if isinstance(value, list):
+        value = next((item for item in value if str(item).strip()), None)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 class LayoutSetBody(BaseModel):
     chat_id: int
     layout: Literal["list", "tabs"]
@@ -103,10 +113,32 @@ class GroupCreateBody(BaseModel):
     folder_name: str | None = None
     folder_id: int | None = None
     skip_folder: bool = False
+    # ``lang`` selects the language of the localized ``answer`` response string.
+    # ``telegram_id``, when filled, adds a phone-style client by numeric id.
+    # Both may arrive as a bare value or a list of strings (first element wins),
+    # mirroring the google-drive-access ``_apply_lang`` shape.
+    lang: str | list[str] | None = None
+    telegram_id: int | str | list[str] | None = None
 
     @property
     def effective_external_ref(self) -> int | str | None:
         return self.external_ref if self.external_ref is not None else self.planfix_task_id
+
+    @property
+    def effective_lang(self) -> str | None:
+        return _first_or_none(self.lang)
+
+    @property
+    def effective_telegram_id(self) -> str | None:
+        value = self.telegram_id
+        if isinstance(value, list):
+            value = next(
+                (item for item in value if str(item).strip()), None
+            )
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
 
 def _backends_or_503(
@@ -239,6 +271,8 @@ def build_router() -> APIRouter:
             folder_name=body.folder_name,
             folder_id=body.folder_id,
             skip_folder=body.skip_folder,
+            lang=body.effective_lang,
+            telegram_id=body.effective_telegram_id,
         )
 
         authorizer = build_authorizer(request, folder_backend=folder_backend)
