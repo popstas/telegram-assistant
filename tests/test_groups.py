@@ -2008,7 +2008,9 @@ async def test_create_group_phone_client_without_telegram_id_is_skipped(
         request=request,
     )
 
-    assert op.status is OperationStatus.COMPLETED
+    # The warning outcome is not cached (see not-cached test), so the operation
+    # is not completed/replayable.
+    assert op.status is OperationStatus.PENDING
     # The phone client was dropped from population entirely.
     assert "https://t.me/79222222222" not in result.members_added
     assert "@bob" in result.members_added
@@ -2076,7 +2078,8 @@ async def test_create_group_international_tme_link_without_telegram_id_warns(
         request=request,
     )
 
-    assert op.status is OperationStatus.COMPLETED
+    # Not cached (phone-without-telegram_id) → operation left re-runnable.
+    assert op.status is OperationStatus.PENDING
     assert "https://t.me/+351962765682" not in result.members_added
     assert {
         "step": "client_invite",
@@ -2087,6 +2090,56 @@ async def test_create_group_international_tme_link_without_telegram_id_warns(
         "Клиента невозможно подключить по номеру телефона без telegram id. "
         "Впишите telegram id в контакт, после этого отправьте клиенту инвайт"
     )
+
+
+async def test_create_group_phone_without_telegram_id_is_not_cached(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    # The phone-without-telegram_id warning must NOT be cached as a completed
+    # operation: re-sending the same task must re-evaluate (so the operator can
+    # fill telegram_id and retry) instead of replaying the stale warning.
+    config = _config(minimal_config_yaml)
+    folder_backend = FakeFolderBackend()
+    base_kwargs = dict(
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+    )
+    warn_request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["https://t.me/79222222222"],
+    )
+
+    backend1 = FakeGroupBackend(chat_id=-101)
+    result1, op1 = await create_group(backend=backend1, request=warn_request, **base_kwargs)
+    assert result1.replayed is False
+    assert result1.answer.startswith("Клиента невозможно подключить")
+    # The warning outcome is not persisted for replay.
+    assert store.find_by_idempotency_key(op1.idempotency_key) is None
+
+    # Second identical call re-evaluates (fresh create), it does NOT replay.
+    backend2 = FakeGroupBackend(chat_id=-102)
+    result2, _ = await create_group(backend=backend2, request=warn_request, **base_kwargs)
+    assert result2.replayed is False
+    # A fresh supergroup was created on the retry (re-evaluation, not a replay).
+    assert len(backend2.created) == 1
+    assert result2.answer.startswith("Клиента невозможно подключить")
+
+    # Once telegram_id is supplied, the retry connects the client and the
+    # successful result IS cached.
+    fixed_request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["https://t.me/79222222222"],
+        telegram_id=555123,
+    )
+    backend3 = FakeGroupBackend(chat_id=-103)
+    result3, op3 = await create_group(backend=backend3, request=fixed_request, **base_kwargs)
+    assert result3.answer == "Группа создана: Acme, клиент добавлен"
+    assert "555123" in result3.members_added
+    assert store.find_by_idempotency_key(op3.idempotency_key) is not None
 
 
 async def test_create_group_phone_client_with_telegram_id_added_by_id(
