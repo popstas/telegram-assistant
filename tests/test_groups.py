@@ -1588,6 +1588,41 @@ def test_http_create_group_phone_without_telegram_id_warns(
     )
 
 
+def test_http_create_group_zero_telegram_id_warns(
+    minimal_config_yaml: str,
+) -> None:
+    # Reproduces the live Planfix request: telegram_id arrives as ["0"] (the
+    # "no telegram id" placeholder) and lang as "En". The "0" must be treated as
+    # absent so the warning fires, not "client added".
+    backend = FakeGroupBackend()
+    client = _http_client(minimal_config_yaml, backend)
+    resp = client.post(
+        "/telegram/groups",
+        json={
+            "title": "Pedro Fadrique // ExpertizeMe",
+            "planfix_task_id": 913132,
+            "members": ["+351962765682"],
+            "managers": ["popstas"],
+            "lang": "En",
+            "telegram_id": ["0"],
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "+351962765682" not in body["members_added"]
+    assert {
+        "step": "client_invite",
+        "user": "+351962765682",
+        "reason": "phone_without_telegram_id",
+    } in body["skipped"]
+    # lang "En" → English warning.
+    assert body["answer"] == (
+        "The client cannot be connected by phone number without a telegram id. "
+        "Fill in the telegram id in the contact, then send the client an invite"
+    )
+
+
 def test_http_create_group_replay_returns_persisted_answer(
     minimal_config_yaml: str,
 ) -> None:
@@ -2050,6 +2085,45 @@ async def test_create_group_phone_client_without_telegram_id_en(
     assert result.answer == (
         "The client cannot be connected by phone number without a telegram id. "
         "Fill in the telegram id in the contact, then send the client an invite"
+    )
+
+
+@pytest.mark.parametrize("placeholder", ["0", ["0"], 0, "  ", "", "-1"])
+async def test_create_group_phone_with_zero_telegram_id_warns(
+    minimal_config_yaml: str, store: OperationStore, placeholder
+) -> None:
+    # The Planfix integration sends telegram_id="0" (often as ["0"]) to mean
+    # "no telegram id". A zero / blank / non-positive value must be treated as
+    # absent so the phone-without-telegram_id warning fires, not an attempt to
+    # add user 0.
+    config = _config(minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["+351962765682"],
+        telegram_id=placeholder,
+    )
+
+    result, _ = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert "+351962765682" not in result.members_added
+    assert {
+        "step": "client_invite",
+        "user": "+351962765682",
+        "reason": "phone_without_telegram_id",
+    } in result.skipped
+    assert result.answer == (
+        "Клиента невозможно подключить по номеру телефона без telegram id. "
+        "Впишите telegram id в контакт, после этого отправьте клиенту инвайт"
     )
 
 
