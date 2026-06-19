@@ -2068,3 +2068,66 @@ async def test_create_group_non_phone_client_unchanged(
     assert "@client" in result.members_added
     # Default (absent) lang → Russian answer.
     assert result.answer == "Группа создана"
+
+
+async def test_create_group_phone_client_with_telegram_id_add_fails_downgrades_answer(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    # The substituted numeric id fails to add (e.g. privacy restriction).
+    backend = FakeGroupBackend(fail_on_add={"555123"})
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["https://t.me/79222222222"],
+        telegram_id=555123,
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    # The add failed, so the answer must not claim the client was added.
+    assert "555123" not in result.members_added
+    assert any(
+        entry["step"] == "add_member" and entry["user"] == "555123"
+        for entry in result.skipped
+    )
+    assert result.answer == "Группа создана"
+
+
+async def test_create_group_numeric_id_client_is_added_not_dropped(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    # A 10-digit numeric Telegram user id is a member, not a phone — it must be
+    # added normally rather than dropped as a phone-without-telegram_id client.
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["1234567890"],
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    assert "1234567890" in result.members_added
+    # It was not dropped as a phone client.
+    assert not any(entry["step"] == "client_invite" for entry in result.skipped)
+    assert result.answer == "Группа создана"
