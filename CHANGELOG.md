@@ -15,6 +15,7 @@
 
 ### Bug Fixes
 
+- groups: Don't cache phone-without-telegram_id warning so retry re-evaluates
 - review: Prevent numeric user ids being misread as phone clients
 - topics: Remove idempotency from open/close so every call executes
 - topics: Treat TOPIC_NOT_MODIFIED as no-op and make open/close re-runnable

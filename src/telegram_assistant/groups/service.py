@@ -340,6 +340,29 @@ def _dedupe(items: Sequence[str]) -> list[str]:
     return out
 
 
+def _resolve_client_telegram_id(value: int | str | None) -> str | None:
+    """Return the client's Telegram id as a canonical string, or ``None``.
+
+    The Planfix integration sends ``telegram_id`` as ``"0"`` (often wrapped as
+    ``["0"]``) to mean "no telegram id". A valid Telegram user id is a positive
+    integer, so treat ``0``, negative, blank, or non-numeric values as
+    **absent** — this is what makes the phone-without-telegram_id warning fire
+    instead of trying to add user ``0``.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        numeric = int(text)
+    except ValueError:
+        return None
+    if numeric <= 0:
+        return None
+    return str(numeric)
+
+
 async def _execute_create(
     *,
     backend: GroupBackend,
@@ -484,9 +507,7 @@ async def _execute_create(
     substituted_client_id: str | None = None
     if effective_members and looks_like_phone(str(effective_members[0])):
         client_ref = effective_members[0]
-        telegram_id = (
-            "" if request.telegram_id is None else str(request.telegram_id).strip()
-        )
+        telegram_id = _resolve_client_telegram_id(request.telegram_id)
         if telegram_id:
             effective_members[0] = telegram_id
             substituted_client_id = telegram_id
@@ -512,7 +533,7 @@ async def _execute_create(
         len(request.members),
         first_member,
         bool(first_member and looks_like_phone(first_member)),
-        bool(request.telegram_id is not None and str(request.telegram_id).strip()),
+        _resolve_client_telegram_id(request.telegram_id) is not None,
         answer_key,
     )
 
