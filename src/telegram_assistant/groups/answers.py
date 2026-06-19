@@ -8,8 +8,6 @@ between Russian (default) and English.
 
 from __future__ import annotations
 
-from typing import Any
-
 DEFAULT_LANG = "ru"
 SUPPORTED_LANGS = ("ru", "en")
 
@@ -53,16 +51,14 @@ def normalize_lang(value: str | list[str] | None) -> str:
     return DEFAULT_LANG
 
 
-def answer(lang: str, key: str, **ctx: Any) -> str:
+def answer(lang: str, key: str) -> str:
     """Return the localized message for ``key`` in ``lang``.
 
     Falls back to the Russian text when ``lang`` is unknown, and to ``key``
-    itself when the key is not in :data:`MESSAGES`. ``ctx`` is interpolated
-    into the template via ``str.format``.
+    itself when the key is not in :data:`MESSAGES`.
     """
 
     templates = MESSAGES.get(key)
     if templates is None:
         return key
-    template = templates.get(lang) or templates.get(DEFAULT_LANG, key)
-    return template.format(**ctx)
+    return templates.get(lang) or templates.get(DEFAULT_LANG, key)

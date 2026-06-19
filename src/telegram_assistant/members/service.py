@@ -195,19 +195,28 @@ def looks_like_phone(value: str) -> bool:
 
     Matches ``t.me`` phone links (``https://t.me/79222222222``,
     ``https://t.me/+79222222222``) and bare phone numbers (``+79222222222``,
-    ``79222222222``, ``89222222222`` and the dirty/formatted variants). It
-    simply asks whether :func:`normalize_phone` can canonicalize the input, so
-    ``@handles``, plain usernames and short numeric ids return ``False``.
+    ``79222222222``, ``89222222222`` and the dirty/formatted variants), so
+    ``@handles`` and plain usernames return ``False``.
+
+    A bare digit string (no ``+`` prefix, no ``t.me`` link) is only treated as
+    a phone when it carries a country code — 11+ digits. This keeps RU/KZ
+    numbers detected while preventing 10-digit numeric Telegram user ids from
+    being misread as phones, which would otherwise drop or rewrite the member.
     """
     if value is None:
         return False
-    if not str(value).strip():
+    text = str(value).strip()
+    if not text:
         return False
     try:
-        normalize_phone(value)
+        canonical = normalize_phone(text)
     except ValueError:
         return False
-    return True
+    if _TME_PHONE_RE.search(text) or text.startswith("+"):
+        return True
+    # Bare digits: require a country code (11+ digits) to count as a phone,
+    # so 10-digit numeric user ids are left for normal member resolution.
+    return len(canonical) - 1 >= 11
 
 
 # ---------------------------------------------------------------------------

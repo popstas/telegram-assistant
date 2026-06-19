@@ -47,7 +47,7 @@ from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.worker.queue import FloodWaitError
 
 
-def _first_or_none(value: str | list[str] | None) -> str | None:
+def _first_or_none(value: int | str | list[str] | None) -> str | None:
     """Collapse a string-or-list request value to its first non-blank element."""
     if isinstance(value, list):
         value = next((item for item in value if str(item).strip()), None)
@@ -130,15 +130,7 @@ class GroupCreateBody(BaseModel):
 
     @property
     def effective_telegram_id(self) -> str | None:
-        value = self.telegram_id
-        if isinstance(value, list):
-            value = next(
-                (item for item in value if str(item).strip()), None
-            )
-        if value is None:
-            return None
-        text = str(value).strip()
-        return text or None
+        return _first_or_none(self.telegram_id)
 
 
 def _backends_or_503(

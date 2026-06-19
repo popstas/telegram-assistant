@@ -481,6 +481,7 @@ async def _execute_create(
     # A non-phone client (e.g. ``@user``) is left untouched → plain "created".
     effective_members = list(request.members)
     answer_key = "group_created"
+    substituted_client_id: str | None = None
     if effective_members and looks_like_phone(str(effective_members[0])):
         client_ref = effective_members[0]
         telegram_id = (
@@ -488,6 +489,7 @@ async def _execute_create(
         )
         if telegram_id:
             effective_members[0] = telegram_id
+            substituted_client_id = telegram_id
             answer_key = "group_created_client_added"
         else:
             effective_members = effective_members[1:]
@@ -531,6 +533,15 @@ async def _execute_create(
             )
             continue
         members_added.append(user)
+
+    # We optimistically set "client added" when substituting the numeric id.
+    # If that add did not land (privacy restriction, invalid id), don't claim
+    # the client was added — the failed add is already recorded in `skipped`.
+    if (
+        answer_key == "group_created_client_added"
+        and substituted_client_id not in members_added
+    ):
+        answer_key = "group_created"
 
     admins_promoted: list[str] = []
     for admin in _dedupe(_drop_blank([*request.admins, *reserve_admins])):
