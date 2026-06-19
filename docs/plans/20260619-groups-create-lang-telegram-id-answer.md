@@ -131,11 +131,11 @@ Dependencies identified:
 - [x] run `pytest` — must pass before Task 3.
 
 ### Task 3: Phone-client + `telegram_id` branching and `answer` construction in `_execute_create`
-- [ ] add a public helper in `members/service.py`, e.g.
+- [x] add a public helper in `members/service.py`, e.g.
       `looks_like_phone(value: str) -> bool` (reuse `_TME_PHONE_RE` and/or `normalize_phone`,
       returning `True` for `t.me/79...`, `t.me/+79...`, and bare phone forms; `False` otherwise).
       Add unit tests for it.
-- [ ] in `_execute_create` (groups/service.py), before building `all_members`, compute the
+- [x] in `_execute_create` (groups/service.py), before building `all_members`, compute the
       effective member list and the answer key from `members[0]`:
   - if `members` is non-empty and `looks_like_phone(members[0])`:
     - if `telegram_id` is empty/None → **drop** `members[0]` from the population list, append
@@ -144,9 +144,9 @@ Dependencies identified:
     - else → **replace** `members[0]` with `str(telegram_id)` so the add-member loop adds the
       client by numeric id; set `answer_key = "group_created_client_added"`.
   - else → `answer_key = "group_created"`.
-- [ ] build the localized answer via the Task 1 helper using `normalize_lang(request.lang)` and set
+- [x] build the localized answer via the Task 1 helper using `normalize_lang(request.lang)` and set
       it on the returned `GroupCreateResult(answer=...)`.
-- [ ] write tests (via `FakeGroupBackend`):
+- [x] write tests (via `FakeGroupBackend`):
   - phone `members[0]` + empty `telegram_id` → group created, client NOT in `members_added`,
     `skipped` has the `phone_without_telegram_id` entry, `answer` == the RU warning; and with
     `lang="en"` the English warning.
@@ -154,7 +154,7 @@ Dependencies identified:
     contains the id, not the phone link), `answer` == «Группа создана, клиент добавлен».
   - non-phone `members[0]` (e.g. `@user`) → unchanged behavior, `answer` == «Группа создана».
   - default `lang` (absent) → Russian answer.
-- [ ] run `pytest` — must pass before Task 4.
+- [x] run `pytest` — must pass before Task 4.
 
 ### Task 4: HTTP endpoint wiring and response coverage
 - [ ] confirm the `POST /groups` handler passes `lang`/`telegram_id` into `GroupCreateRequest` and

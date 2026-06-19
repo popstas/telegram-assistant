@@ -190,6 +190,26 @@ def normalize_phone(raw: str) -> str:
     return f"+{digits}"
 
 
+def looks_like_phone(value: str) -> bool:
+    """Return ``True`` when ``value`` is a phone-style reference.
+
+    Matches ``t.me`` phone links (``https://t.me/79222222222``,
+    ``https://t.me/+79222222222``) and bare phone numbers (``+79222222222``,
+    ``79222222222``, ``89222222222`` and the dirty/formatted variants). It
+    simply asks whether :func:`normalize_phone` can canonicalize the input, so
+    ``@handles``, plain usernames and short numeric ids return ``False``.
+    """
+    if value is None:
+        return False
+    if not str(value).strip():
+        return False
+    try:
+        normalize_phone(value)
+    except ValueError:
+        return False
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Domain DTOs
 # ---------------------------------------------------------------------------
