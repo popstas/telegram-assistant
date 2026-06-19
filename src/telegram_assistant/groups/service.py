@@ -502,6 +502,20 @@ async def _execute_create(
             )
             answer_key = "client_phone_no_telegram_id"
 
+    # Decision log to diagnose the phone-without-telegram_id warning in the live
+    # integration: shows whether the first member was seen as a phone, whether a
+    # telegram_id was supplied, and which answer branch was chosen.
+    first_member = str(request.members[0]) if request.members else None
+    logger.info(
+        "group create client-member decision: members=%d first=%r "
+        "is_phone=%s telegram_id_present=%s answer_key=%s",
+        len(request.members),
+        first_member,
+        bool(first_member and looks_like_phone(first_member)),
+        bool(request.telegram_id is not None and str(request.telegram_id).strip()),
+        answer_key,
+    )
+
     # Build the ordered population plan, deduping users that appear in multiple
     # buckets so we never invite the same handle twice. Imported contacts go
     # first so their resolved ids are added before the named handles.
@@ -721,6 +735,17 @@ async def create_group(
                     f"FLOOD_WAIT while verifying chat {saved_chat_id} exists: {exc}"
                 ) from exc
             if still_exists:
+                # Replaying a prior completed operation (idempotency key =
+                # planfix_task_id or title). The answer/skipped come from the
+                # stored result, NOT from a fresh phone/telegram_id evaluation —
+                # a row created before the answer field has answer="".
+                logger.info(
+                    "group create replaying completed operation %s (key=%r); "
+                    "returning stored answer=%r",
+                    op.id,
+                    op.idempotency_key,
+                    payload.get("answer", ""),
+                )
                 return GroupCreateResult.from_dict(payload), op
             logger.warning(
                 "saved chat %s for operation %s no longer exists; dropping the "
