@@ -798,6 +798,27 @@ async def create_group(
         store.fail_operation(operation_id, str(exc))
         raise
 
+    client_unconnected = any(
+        entry.get("step") == "client_invite"
+        and entry.get("reason") == "phone_without_telegram_id"
+        for entry in result.skipped
+    )
+    if client_unconnected:
+        # Product decision: the phone-without-telegram_id warning is NOT cached.
+        # The client could not be connected and the warning asks the operator to
+        # fill telegram_id and resend the SAME task — so we drop the operation
+        # row to keep the idempotency key free for that retry instead of
+        # replaying the warning forever. (The group was still created; a retry
+        # without telegram_id simply warns again — accepted trade-off.)
+        logger.info(
+            "group create not caching phone-without-telegram_id outcome for "
+            "operation %s (key=%r); idempotency key left free for retry",
+            operation_id,
+            begin.operation.idempotency_key,
+        )
+        store.delete_operation(operation_id)
+        return result, begin.operation
+
     op = store.complete_operation(operation_id, result.to_dict())
     return result, op
 

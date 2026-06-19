@@ -19,6 +19,10 @@
 - topics: Remove idempotency from open/close so every call executes
 - topics: Treat TOPIC_NOT_MODIFIED as no-op and make open/close re-runnable
 
+### Miscellaneous
+
+- groups: Log client-member branch decision and idempotency replay
+
 ### Task
 
 - Mark group-create lang/telegram_id/answer todos done
