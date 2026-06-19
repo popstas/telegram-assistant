@@ -169,11 +169,11 @@ Dependencies identified:
 - [x] run `pytest` — must pass before Task 5.
 
 ### Task 5: Verify acceptance criteria
-- [ ] verify all three Overview behaviors are implemented and covered by tests.
-- [ ] verify edge cases: empty `members`, `telegram_id` as empty list/blank string, unknown
+- [x] verify all three Overview behaviors are implemented and covered by tests.
+- [x] verify edge cases: empty `members`, `telegram_id` as empty list/blank string, unknown
       `lang`, mixed-case `lang`.
-- [ ] run the full unit suite: `pytest`.
-- [ ] run `ruff check src tests` — fix all issues.
+- [x] run the full unit suite: `pytest`.
+- [x] run `ruff check src tests` — fix all issues.
 
 ### Task 6: [Final] Update documentation
 - [ ] update `README.md` HTTP section for `POST /groups`: document the new `lang` and
