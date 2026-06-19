@@ -5,6 +5,7 @@
 
 ### Features
 
+- Phone-client/telegram_id branching and localized answer in group create
 - Add lang/telegram_id request fields and answer to group-create models
 - topics: Add open/reopen command across all surfaces
 

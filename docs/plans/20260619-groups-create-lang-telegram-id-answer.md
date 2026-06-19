@@ -157,16 +157,16 @@ Dependencies identified:
 - [x] run `pytest` — must pass before Task 4.
 
 ### Task 4: HTTP endpoint wiring and response coverage
-- [ ] confirm the `POST /groups` handler passes `lang`/`telegram_id` into `GroupCreateRequest` and
+- [x] confirm the `POST /groups` handler passes `lang`/`telegram_id` into `GroupCreateRequest` and
       that `result.to_dict()` (already returned) now surfaces `answer` alongside `operation_id` /
       `operation_status`.
-- [ ] write HTTP tests (FastAPI test client, following existing group HTTP test setup): a request
+- [x] write HTTP tests (FastAPI test client, following existing group HTTP test setup): a request
       with `lang`/`telegram_id` as strings and as `["..."]` lists succeeds and the JSON response
       includes the expected `answer`; a phone-`members[0]`-without-`telegram_id` request returns
       200 with the warning `answer` and a created group.
-- [ ] write a replay test: a second create with the same idempotency key returns the **persisted**
+- [x] write a replay test: a second create with the same idempotency key returns the **persisted**
       `answer` (proves `to_dict`/`from_dict` round-trip through the operation store).
-- [ ] run `pytest` — must pass before Task 5.
+- [x] run `pytest` — must pass before Task 5.
 
 ### Task 5: Verify acceptance criteria
 - [ ] verify all three Overview behaviors are implemented and covered by tests.
