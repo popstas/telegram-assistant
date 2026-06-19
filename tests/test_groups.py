@@ -1803,3 +1803,128 @@ def test_cli_groups_create_missing_folder_exit_2(
         ],
     )
     assert result.exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — phone-client / telegram_id branching and localized answer
+# ---------------------------------------------------------------------------
+
+
+async def test_create_group_phone_client_without_telegram_id_is_skipped(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["https://t.me/79222222222", "@bob"],
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    # The phone client was dropped from population entirely.
+    assert "https://t.me/79222222222" not in result.members_added
+    assert "@bob" in result.members_added
+    assert {
+        "step": "client_invite",
+        "user": "https://t.me/79222222222",
+        "reason": "phone_without_telegram_id",
+    } in result.skipped
+    assert result.answer == (
+        "Клиента невозможно подключить по номеру телефона без telegram id. "
+        "Впишите telegram id в контакт, после этого отправьте клиенту инвайт"
+    )
+
+
+async def test_create_group_phone_client_without_telegram_id_en(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["https://t.me/+79222222222"],
+        lang="en",
+    )
+
+    result, _ = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert result.answer == (
+        "The client cannot be connected by phone number without a telegram id. "
+        "Fill in the telegram id in the contact, then send the client an invite"
+    )
+
+
+async def test_create_group_phone_client_with_telegram_id_added_by_id(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["https://t.me/79222222222"],
+        telegram_id=555123,
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    # The phone link was replaced by the numeric id.
+    assert "555123" in result.members_added
+    assert "555123" in backend.added
+    assert "https://t.me/79222222222" not in result.members_added
+    assert result.answer == "Группа создана, клиент добавлен"
+
+
+async def test_create_group_non_phone_client_unchanged(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = _config(minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["@client"],
+    )
+
+    result, _ = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert "@client" in result.members_added
+    # Default (absent) lang → Russian answer.
+    assert result.answer == "Группа создана"

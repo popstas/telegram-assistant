@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add lang/telegram_id request fields and answer to group-create models
 - topics: Add open/reopen command across all surfaces
 
 ### Bug Fixes

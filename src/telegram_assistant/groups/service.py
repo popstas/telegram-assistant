@@ -27,7 +27,8 @@ from telegram_assistant.folders.service import (
     FolderPeerFailureError,
     resolve_folder,
 )
-from telegram_assistant.members.service import normalize_phone
+from telegram_assistant.groups.answers import answer, normalize_lang
+from telegram_assistant.members.service import looks_like_phone, normalize_phone
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
     OperationRecord,
@@ -471,6 +472,34 @@ async def _execute_create(
         contacts_imported.append(record)
         contact_user_ids.append(str(user_id))
 
+    # Resolve how the client member (``members[0]``) is connected. When it is a
+    # phone-style reference the client cannot be added by phone alone:
+    #   * with a ``telegram_id`` filled, substitute the numeric id so the normal
+    #     add loop connects the client → "client added" answer;
+    #   * without one, drop the client member (the group is still created) and
+    #     record the skip → phone-without-telegram_id warning answer.
+    # A non-phone client (e.g. ``@user``) is left untouched → plain "created".
+    effective_members = list(request.members)
+    answer_key = "group_created"
+    if effective_members and looks_like_phone(str(effective_members[0])):
+        client_ref = effective_members[0]
+        telegram_id = (
+            "" if request.telegram_id is None else str(request.telegram_id).strip()
+        )
+        if telegram_id:
+            effective_members[0] = telegram_id
+            answer_key = "group_created_client_added"
+        else:
+            effective_members = effective_members[1:]
+            skipped.append(
+                {
+                    "step": "client_invite",
+                    "user": client_ref,
+                    "reason": "phone_without_telegram_id",
+                }
+            )
+            answer_key = "client_phone_no_telegram_id"
+
     # Build the ordered population plan, deduping users that appear in multiple
     # buckets so we never invite the same handle twice. Imported contacts go
     # first so their resolved ids are added before the named handles.
@@ -478,7 +507,7 @@ async def _execute_create(
         _drop_blank(
             [
                 *contact_user_ids,
-                *request.members,
+                *effective_members,
                 *request.managers,
                 *reserve_members,
                 *request.admins,
@@ -586,6 +615,8 @@ async def _execute_create(
         skipped=skipped,
     )
 
+    answer_text = answer(normalize_lang(request.lang), answer_key)
+
     return GroupCreateResult(
         telegram_chat_id=chat_id,
         title=effective_title,
@@ -600,6 +631,7 @@ async def _execute_create(
         contacts_imported=contacts_imported,
         skipped=skipped,
         task_message_sent=task_message_sent,
+        answer=answer_text,
     )
 
 
