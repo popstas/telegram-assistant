@@ -132,6 +132,8 @@ class GroupCreateRequest:
     folder_name: str | None = None
     folder_id: int | None = None
     skip_folder: bool = False
+    lang: str | None = None
+    telegram_id: int | str | None = None
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -155,6 +157,8 @@ class GroupCreateRequest:
             "folder_name": self.folder_name,
             "folder_id": self.folder_id,
             "skip_folder": self.skip_folder,
+            "lang": self.lang,
+            "telegram_id": self.telegram_id,
         }
 
 
@@ -176,6 +180,7 @@ class GroupCreateResult:
     skipped: list[dict[str, Any]] = field(default_factory=list)
     task_message_sent: bool = False
     replayed: bool = False
+    answer: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -193,6 +198,7 @@ class GroupCreateResult:
             "skipped": list(self.skipped),
             "task_message_sent": self.task_message_sent,
             "replayed": self.replayed,
+            "answer": self.answer,
         }
 
     @classmethod
@@ -213,6 +219,7 @@ class GroupCreateResult:
             skipped=list(payload.get("skipped") or []),
             task_message_sent=bool(payload.get("task_message_sent", False)),
             replayed=True,
+            answer=str(payload.get("answer") or ""),
         )
 
 

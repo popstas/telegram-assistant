@@ -12,6 +12,10 @@
 - topics: Remove idempotency from open/close so every call executes
 - topics: Treat TOPIC_NOT_MODIFIED as no-op and make open/close re-runnable
 
+### Task
+
+- Add lang/telegram_id request fields and phone-without-id check
+
 ## v0.6.0 - 2026-06-16
 
 ### Features
