@@ -5,6 +5,7 @@
 
 ### Features
 
+- groups: Include group name in answer, log request, lock intl phone warning
 - Document group-create lang/telegram_id/answer HTTP fields in README
 - Verify acceptance criteria for group-create lang/telegram_id/answer
 - HTTP endpoint wiring and response coverage for group-create lang/telegram_id/answer
