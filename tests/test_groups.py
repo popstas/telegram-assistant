@@ -1458,6 +1458,146 @@ def test_http_create_group_missing_folder_returns_502(
 
 
 # ---------------------------------------------------------------------------
+# Task 4 — HTTP wiring for lang / telegram_id / answer
+# ---------------------------------------------------------------------------
+
+
+def test_http_create_group_answer_default_ru(minimal_config_yaml: str) -> None:
+    backend = FakeGroupBackend()
+    client = _http_client(minimal_config_yaml, backend)
+    resp = client.post(
+        "/telegram/groups",
+        json={"title": "Acme", "external_ref": 1, "members": ["@client"]},
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["answer"] == "Группа создана"
+
+
+def test_http_create_group_phone_with_telegram_id_string_form(
+    minimal_config_yaml: str,
+) -> None:
+    backend = FakeGroupBackend()
+    client = _http_client(minimal_config_yaml, backend)
+    resp = client.post(
+        "/telegram/groups",
+        json={
+            "title": "Acme",
+            "external_ref": 2,
+            "members": ["https://t.me/79222222222"],
+            "lang": "en",
+            "telegram_id": "555123",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["answer"] == "Group created, client added"
+    assert "555123" in body["members_added"]
+    assert "https://t.me/79222222222" not in body["members_added"]
+    assert "555123" in backend.added
+
+
+def test_http_create_group_phone_with_telegram_id_list_form(
+    minimal_config_yaml: str,
+) -> None:
+    backend = FakeGroupBackend()
+    client = _http_client(minimal_config_yaml, backend)
+    resp = client.post(
+        "/telegram/groups",
+        json={
+            "title": "Acme",
+            "external_ref": 3,
+            "members": ["https://t.me/79222222222"],
+            "lang": ["en"],
+            "telegram_id": ["555123"],
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["answer"] == "Group created, client added"
+    assert "555123" in body["members_added"]
+
+
+def test_http_create_group_phone_without_telegram_id_warns(
+    minimal_config_yaml: str,
+) -> None:
+    backend = FakeGroupBackend()
+    client = _http_client(minimal_config_yaml, backend)
+    resp = client.post(
+        "/telegram/groups",
+        json={
+            "title": "Acme",
+            "external_ref": 4,
+            "members": ["https://t.me/79222222222", "@bob"],
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    # Group is still created.
+    assert body["telegram_chat_id"] == -100123
+    # The phone client is skipped, not added.
+    assert "https://t.me/79222222222" not in body["members_added"]
+    assert {
+        "step": "client_invite",
+        "user": "https://t.me/79222222222",
+        "reason": "phone_without_telegram_id",
+    } in body["skipped"]
+    assert body["answer"] == (
+        "Клиента невозможно подключить по номеру телефона без telegram id. "
+        "Впишите telegram id в контакт, после этого отправьте клиенту инвайт"
+    )
+
+
+def test_http_create_group_replay_returns_persisted_answer(
+    minimal_config_yaml: str,
+) -> None:
+    import tempfile
+
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+    tmp.close()
+    store = OperationStore(Path(tmp.name))
+
+    backend1 = FakeGroupBackend()
+    client1 = _http_client(minimal_config_yaml, backend1, store=store)
+    r1 = client1.post(
+        "/telegram/groups",
+        json={
+            "title": "Acme",
+            "planfix_task_id": 99,
+            "members": ["https://t.me/79222222222"],
+            "lang": "en",
+            "telegram_id": "555123",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["answer"] == "Group created, client added"
+
+    backend2 = FakeGroupBackend()
+    client2 = _http_client(minimal_config_yaml, backend2, store=store)
+    r2 = client2.post(
+        "/telegram/groups",
+        json={
+            "title": "Acme",
+            "planfix_task_id": 99,
+            "members": ["https://t.me/79222222222"],
+            "lang": "en",
+            "telegram_id": "555123",
+        },
+        headers={"Authorization": "Bearer secret_token"},
+    )
+    assert r2.status_code == 200, r2.text
+    body = r2.json()
+    assert body["replayed"] is True
+    # The persisted answer round-trips through the operation store.
+    assert body["answer"] == "Group created, client added"
+    assert backend2.created == []
+
+
+# ---------------------------------------------------------------------------
 # CLI tests
 # ---------------------------------------------------------------------------
 
