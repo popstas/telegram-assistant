@@ -8,6 +8,7 @@ which the domain workflow drives the backends.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -1471,7 +1472,43 @@ def test_http_create_group_answer_default_ru(minimal_config_yaml: str) -> None:
         headers={"Authorization": "Bearer secret_token"},
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["answer"] == "Группа создана"
+    assert resp.json()["answer"] == "Группа создана: Acme"
+
+
+def test_http_create_group_logs_request_path_and_args(
+    minimal_config_yaml: str,
+) -> None:
+    # Attach a dedicated handler to the route logger: the app's
+    # configure_logging() reconfigures root handlers/propagation, so a direct
+    # handler is the reliable way to capture the request log line.
+    captured: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            captured.append(record.getMessage())
+
+    route_logger = logging.getLogger("telegram_assistant.http_api.groups")
+    handler = _Capture()
+    route_logger.addHandler(handler)
+    prev_level = route_logger.level
+    route_logger.setLevel(logging.INFO)
+    try:
+        backend = FakeGroupBackend()
+        client = _http_client(minimal_config_yaml, backend)
+        resp = client.post(
+            "/telegram/groups",
+            json={"title": "Acme", "external_ref": 7, "members": ["@client"]},
+            headers={"Authorization": "Bearer secret_token"},
+        )
+    finally:
+        route_logger.removeHandler(handler)
+        route_logger.setLevel(prev_level)
+
+    assert resp.status_code == 200, resp.text
+    assert any(
+        "/telegram/groups" in msg and "args=" in msg and "Acme" in msg
+        for msg in captured
+    ), captured
 
 
 def test_http_create_group_phone_with_telegram_id_string_form(
@@ -1492,7 +1529,7 @@ def test_http_create_group_phone_with_telegram_id_string_form(
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["answer"] == "Group created, client added"
+    assert body["answer"] == "Group created: Acme, client added"
     assert "555123" in body["members_added"]
     assert "https://t.me/79222222222" not in body["members_added"]
     assert "555123" in backend.added
@@ -1516,7 +1553,7 @@ def test_http_create_group_phone_with_telegram_id_list_form(
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["answer"] == "Group created, client added"
+    assert body["answer"] == "Group created: Acme, client added"
     assert "555123" in body["members_added"]
 
 
@@ -1574,7 +1611,7 @@ def test_http_create_group_replay_returns_persisted_answer(
         headers={"Authorization": "Bearer secret_token"},
     )
     assert r1.status_code == 200, r1.text
-    assert r1.json()["answer"] == "Group created, client added"
+    assert r1.json()["answer"] == "Group created: Acme, client added"
 
     backend2 = FakeGroupBackend()
     client2 = _http_client(minimal_config_yaml, backend2, store=store)
@@ -1593,7 +1630,7 @@ def test_http_create_group_replay_returns_persisted_answer(
     body = r2.json()
     assert body["replayed"] is True
     # The persisted answer round-trips through the operation store.
-    assert body["answer"] == "Group created, client added"
+    assert body["answer"] == "Group created: Acme, client added"
     assert backend2.created == []
 
 
@@ -2014,6 +2051,44 @@ async def test_create_group_phone_client_without_telegram_id_en(
     )
 
 
+async def test_create_group_international_tme_link_without_telegram_id_warns(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    # Regression: an international t.me phone link (e.g. Portugal +351...) with
+    # an empty telegram_id must still trigger the phone-without-telegram_id
+    # warning, not be added as a member.
+    config = _config(minimal_config_yaml)
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend()
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=42,
+        members=["https://t.me/+351962765682"],
+        telegram_id="",
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    assert "https://t.me/+351962765682" not in result.members_added
+    assert {
+        "step": "client_invite",
+        "user": "https://t.me/+351962765682",
+        "reason": "phone_without_telegram_id",
+    } in result.skipped
+    assert result.answer == (
+        "Клиента невозможно подключить по номеру телефона без telegram id. "
+        "Впишите telegram id в контакт, после этого отправьте клиенту инвайт"
+    )
+
+
 async def test_create_group_phone_client_with_telegram_id_added_by_id(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:
@@ -2041,7 +2116,7 @@ async def test_create_group_phone_client_with_telegram_id_added_by_id(
     assert "555123" in result.members_added
     assert "555123" in backend.added
     assert "https://t.me/79222222222" not in result.members_added
-    assert result.answer == "Группа создана, клиент добавлен"
+    assert result.answer == "Группа создана: Acme, клиент добавлен"
 
 
 async def test_create_group_non_phone_client_unchanged(
@@ -2067,7 +2142,7 @@ async def test_create_group_non_phone_client_unchanged(
 
     assert "@client" in result.members_added
     # Default (absent) lang → Russian answer.
-    assert result.answer == "Группа создана"
+    assert result.answer == "Группа создана: Acme"
 
 
 async def test_create_group_phone_client_with_telegram_id_add_fails_downgrades_answer(
@@ -2100,7 +2175,7 @@ async def test_create_group_phone_client_with_telegram_id_add_fails_downgrades_a
         entry["step"] == "add_member" and entry["user"] == "555123"
         for entry in result.skipped
     )
-    assert result.answer == "Группа создана"
+    assert result.answer == "Группа создана: Acme"
 
 
 async def test_create_group_numeric_id_client_is_added_not_dropped(
@@ -2130,4 +2205,4 @@ async def test_create_group_numeric_id_client_is_added_not_dropped(
     assert "1234567890" in result.members_added
     # It was not dropped as a phone client.
     assert not any(entry["step"] == "client_invite" for entry in result.skipped)
-    assert result.answer == "Группа создана"
+    assert result.answer == "Группа создана: Acme"
