@@ -176,10 +176,10 @@ Dependencies identified:
 - [x] run `ruff check src tests` — fix all issues.
 
 ### Task 6: [Final] Update documentation
-- [ ] update `README.md` HTTP section for `POST /groups`: document the new `lang` and
+- [x] update `README.md` HTTP section for `POST /groups`: document the new `lang` and
       `telegram_id` request fields (string-or-list), the new `answer` response field, and the
       phone-without-`telegram_id` behavior.
-- [ ] note in README that `lang`/`telegram_id`/`answer` are currently **HTTP-only** (no CLI/MCP).
+- [x] note in README that `lang`/`telegram_id`/`answer` are currently **HTTP-only** (no CLI/MCP).
 
 *Note: ralphex automatically moves completed plans to `docs/plans/completed/`.*
 

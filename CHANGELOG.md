@@ -5,6 +5,7 @@
 
 ### Features
 
+- Verify acceptance criteria for group-create lang/telegram_id/answer
 - HTTP endpoint wiring and response coverage for group-create lang/telegram_id/answer
 - Phone-client/telegram_id branching and localized answer in group create
 - Add lang/telegram_id request fields and answer to group-create models
