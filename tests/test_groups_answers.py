@@ -28,13 +28,34 @@ def test_normalize_lang(value, expected):
 
 
 def test_answer_group_created():
-    assert answer("ru", "group_created") == "Группа создана"
-    assert answer("en", "group_created") == "Group created"
+    assert answer("ru", "group_created", title="Acme") == "Группа создана: Acme"
+    assert answer("en", "group_created", title="Acme") == "Group created: Acme"
 
 
 def test_answer_group_created_client_added():
-    assert answer("ru", "group_created_client_added") == "Группа создана, клиент добавлен"
-    assert answer("en", "group_created_client_added") == "Group created, client added"
+    assert (
+        answer("ru", "group_created_client_added", title="Acme")
+        == "Группа создана: Acme, клиент добавлен"
+    )
+    assert (
+        answer("en", "group_created_client_added", title="Acme")
+        == "Group created: Acme, client added"
+    )
+
+
+def test_answer_group_created_without_title_keeps_placeholder():
+    # No ctx → the template is returned verbatim (no formatting applied).
+    assert answer("ru", "group_created") == "Группа создана: {title}"
+
+
+def test_answer_brace_free_message_ignores_ctx():
+    # A message with no braces is returned unchanged even when ctx is passed,
+    # so the warning text never breaks on an unexpected ``.format`` call.
+    expected = (
+        "Клиента невозможно подключить по номеру телефона без telegram id. "
+        "Впишите telegram id в контакт, после этого отправьте клиенту инвайт"
+    )
+    assert answer("ru", "client_phone_no_telegram_id", title="Acme") == expected
 
 
 def test_answer_client_phone_no_telegram_id_ru():
@@ -52,7 +73,7 @@ def test_answer_client_phone_no_telegram_id_en():
 
 
 def test_answer_unknown_lang_falls_back_to_ru():
-    assert answer("fr", "group_created") == "Группа создана"
+    assert answer("fr", "group_created", title="Acme") == "Группа создана: Acme"
 
 
 def test_answer_unknown_key_returns_key():

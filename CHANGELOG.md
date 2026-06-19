@@ -20,6 +20,7 @@
 
 ### Task
 
+- Mark group-create lang/telegram_id/answer todos done
 - Add lang/telegram_id request fields and phone-without-id check
 
 ## v0.6.0 - 2026-06-16

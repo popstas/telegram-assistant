@@ -17,6 +17,9 @@ from telegram_assistant.members import looks_like_phone
         "79222222222",
         "89222222222",
         "+7-922-222-22-22",
+        # International t.me phone link (Portugal) — reported as not warning.
+        "https://t.me/+351962765682",
+        "+351962765682",
     ],
 )
 def test_looks_like_phone_true(value: str) -> None:

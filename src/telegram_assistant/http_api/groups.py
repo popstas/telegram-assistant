@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
@@ -45,6 +46,8 @@ from telegram_assistant.http_api.access import (
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.worker.queue import FloodWaitError
+
+logger = logging.getLogger(__name__)
 
 
 def _first_or_none(value: int | str | list[str] | None) -> str | None:
@@ -227,6 +230,14 @@ def build_router() -> APIRouter:
     async def create(
         body: GroupCreateBody, request: Request
     ) -> dict[str, Any]:
+        # Request log to aid debugging the live integration: the path plus the
+        # parsed input args (structlog's redaction processor scrubs the bearer
+        # token and invite/t.me links before serialization).
+        logger.info(
+            "group create request path=%s args=%s",
+            request.url.path,
+            body.model_dump(),
+        )
         config = request.app.state.config
         backend, folder_backend = _backends_or_503(request)
         store = _store_or_503(request)

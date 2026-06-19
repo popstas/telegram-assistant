@@ -626,7 +626,9 @@ async def _execute_create(
         skipped=skipped,
     )
 
-    answer_text = answer(normalize_lang(request.lang), answer_key)
+    answer_text = answer(
+        normalize_lang(request.lang), answer_key, title=effective_title
+    )
 
     return GroupCreateResult(
         telegram_chat_id=chat_id,
