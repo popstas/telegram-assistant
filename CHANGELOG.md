@@ -21,6 +21,10 @@
 - topics: Remove idempotency from open/close so every call executes
 - topics: Treat TOPIC_NOT_MODIFIED as no-op and make open/close re-runnable
 
+### Documentation
+
+- Warn that auto-adding members can get the account banned
+
 ### Miscellaneous
 
 - groups: Log client-member branch decision and idempotency replay
