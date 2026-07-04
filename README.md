@@ -25,6 +25,24 @@ Runs on MTProto via Telethon under a technical Telegram user account.
 >   own group is low risk; adding non-consenting human users is what triggers bans.
 > - Treat the technical account as disposable, warm it up, and keep actions rate-limited.
 
+## Features
+
+- **Messages** — send targeted or folder-wide mass messages with file/URL attachments (albums), scheduling/delay, and threaded replies; read recent history, react with emoji, forward, and delete.
+- **Groups** — create supergroups (with topics, invite links, member/admin/phone-contact seeding), rename, and switch forum layout (`list` / `tabs`).
+- **Topics** — create single or bulk forum topics (CSV/JSON), close, reopen, and rename.
+- **Members** — bulk add (optionally as admin) and bulk remove (kick or ban); references by `@username`, user id, or phone-contact.
+- **Notifications** — mute (indefinitely or for a duration) and unmute chats or contacts.
+- **Folders** — inspect chat folders and move chats in or out of them.
+- **Queue & operations** — a worker performs Telegram actions with throttling and `FLOOD_WAIT` handling; inspect and retry queued operations.
+- **Idempotency** — group/topic creation is idempotent on a generic `external_ref`.
+- **Surfaces** — one domain layer behind three interfaces: HTTP API (FastAPI, bearer auth), CLI (`telegram-assistant`), and an optional MCP server (Streamable HTTP with local OAuth).
+- **Access control** — deny-by-default `read` / `write` / `delete` rules per chat, chat list, folder, or wildcard, hot-reloaded from config within ~2s.
+- **Planfix plugin** — optional, off by default: `/task <ref>` service messages and `@planfix_bot` welcome cleanup for the Planfix ↔ Telegram integration.
+
+> **Just watching and forwarding messages?** If you only need to *match and
+> forward* messages (not send/manage them), see
+> [popstas/telegram-resender](https://github.com/popstas/telegram-resender).
+
 ## Quick start
 
 ```bash

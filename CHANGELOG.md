@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Miscellaneous
+
+- Pin bump-my-version to 1.x to fix release bump crash
+
 ## v0.7.0 - 2026-06-21
 
 ### Features
