@@ -4528,7 +4528,7 @@ def messages_delete(
         effective_folder_id = folder_id
 
     access = config.telegram.access
-    only_session = (
+    only_session_default = (
         access.delete_only_session_messages if access is not None else True
     )
     # A fresh CLI process has no send history; an empty registry means the
@@ -4571,6 +4571,9 @@ def messages_delete(
         try:
             backend, folder_backend = await open_backends()
             tid, name, authorizer = await _resolve_target(folder_backend)
+            only_session = await authorizer.delete_only_session_messages(
+                tid, default=only_session_default
+            )
             result = await delete_messages(
                 backend,
                 request=DeleteMessagesRequest(

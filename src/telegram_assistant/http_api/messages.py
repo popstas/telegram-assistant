@@ -20,7 +20,7 @@ from telegram_assistant.folders import (
 )
 from telegram_assistant.http_api.access import (
     build_authorizer,
-    delete_only_session_messages,
+    delete_only_session_messages_default,
     resolve_entity_chat_id,
     sent_message_registry,
     translate_access_error,
@@ -768,6 +768,10 @@ def build_router() -> APIRouter:
         authorizer = build_authorizer(
             request, folder_backend=_folder_backend_optional(request)
         )
+        only_session = await authorizer.delete_only_session_messages(
+            telegram_chat_id,
+            default=delete_only_session_messages_default(request),
+        )
         try:
             result = await delete_messages(
                 backend,
@@ -781,7 +785,7 @@ def build_router() -> APIRouter:
                 ),
                 authorizer=authorizer,
                 sent_registry=sent_message_registry(request),
-                only_session_messages=delete_only_session_messages(request),
+                only_session_messages=only_session,
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc

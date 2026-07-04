@@ -485,3 +485,106 @@ async def test_denied_folder_emits_structured_log_line(_restore_logging) -> None
     assert record["required_level"] == "write"
     assert record["granted_level"] is None
     assert record["matched_rule"] is None
+
+
+# ---------------------------------------------------------------------------
+# Per-rule delete_only_session_messages override
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_only_override_absent_inherits_default() -> None:
+    # No rule sets the override -> the policy-level default flows through
+    # unchanged for both values.
+    resolver = FakeResolver({"@client": 555})
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(chat="@client", permission="delete")]),
+        resolver=resolver,
+    )
+    assert await auth.delete_only_session_messages(555, default=True) is True
+    assert await auth.delete_only_session_messages(555, default=False) is False
+
+
+@pytest.mark.asyncio
+async def test_delete_only_chat_rule_overrides_default() -> None:
+    # A chat rule opting out (false) relaxes the safe default only for that
+    # chat; an uncovered chat still inherits the default.
+    resolver = FakeResolver({"me": 241225329})
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(
+                    chat="me",
+                    permissions=["write", "delete"],
+                    delete_only_session_messages=False,
+                )
+            ]
+        ),
+        resolver=resolver,
+    )
+    assert await auth.delete_only_session_messages(241225329, default=True) is False
+    # A different chat is untouched by the override.
+    assert await auth.delete_only_session_messages(999, default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_delete_only_chat_override_beats_all_rule() -> None:
+    # Specificity: a chat rule (false) wins over an `all` rule (true), which in
+    # turn wins over the policy default.
+    resolver = FakeResolver({7: 7})
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(all=True, permission="delete", delete_only_session_messages=True),
+                AccessRule(chat=7, permission="delete", delete_only_session_messages=False),
+            ]
+        ),
+        resolver=resolver,
+    )
+    # chat 7 -> chat override false; chat 8 -> all override true (not default false)
+    assert await auth.delete_only_session_messages(7, default=False) is False
+    assert await auth.delete_only_session_messages(8, default=False) is True
+
+
+@pytest.mark.asyncio
+async def test_delete_only_folder_override_applies_to_members() -> None:
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(
+                    folder="Clients",
+                    permission="delete",
+                    delete_only_session_messages=False,
+                )
+            ]
+        ),
+        folder_backend=FakeFolderBackend([_clients_folder()]),
+    )
+    # chats 10/11 are in the Clients folder -> folder override false
+    assert await auth.delete_only_session_messages(10, default=True) is False
+    # a non-member inherits the default
+    assert await auth.delete_only_session_messages(99, default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_delete_only_conflicting_same_level_is_restrictive() -> None:
+    # Two chat rules for the same chat set conflicting overrides; the
+    # restrictive True wins.
+    resolver = FakeResolver({5: 5})
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(chat=5, permission="delete", delete_only_session_messages=False),
+                AccessRule(chat=5, permission="read", delete_only_session_messages=True),
+            ]
+        ),
+        resolver=resolver,
+    )
+    assert await auth.delete_only_session_messages(5, default=False) is True
+
+
+@pytest.mark.asyncio
+async def test_delete_only_none_config_returns_default() -> None:
+    auth = Authorizer(None)
+    assert await auth.delete_only_session_messages(1, default=True) is True
+    assert await auth.delete_only_session_messages(1, default=False) is False

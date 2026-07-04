@@ -48,6 +48,23 @@ def test_delete_only_session_messages_round_trips_false() -> None:
     assert cfg.telegram.access.delete_only_session_messages is False
 
 
+def test_access_rule_delete_only_override_defaults_none() -> None:
+    from telegram_assistant.config.models import AccessRule
+
+    assert AccessRule(chat=1).delete_only_session_messages is None
+
+
+def test_access_rule_delete_only_override_round_trips_false() -> None:
+    cfg = load_config_from_text(
+        _config_with_access(
+            "access:\n  rules:\n    - chat: 123\n      permission: delete\n"
+            "      delete_only_session_messages: false\n"
+        )
+    )
+    assert cfg.telegram.access is not None
+    assert cfg.telegram.access.rules[0].delete_only_session_messages is False
+
+
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
@@ -212,6 +229,52 @@ def test_http_delete_flag_off_allows_arbitrary_ids() -> None:
     assert backend.calls == [
         {"chat_id": -100123, "message_ids": (42,), "revoke": False}
     ]
+
+
+def test_http_delete_rule_level_override_allows_arbitrary_ids() -> None:
+    # Policy default stays true (safe), but the matching rule opts out via a
+    # per-rule delete_only_session_messages: false, so an unsent id goes through.
+    backend = FakeDeleteBackend()
+    client = _http_client(
+        access_block=(
+            "access:\n  rules:\n    - all: true\n      permission: delete\n"
+            "      delete_only_session_messages: false\n"
+        ),
+        delete_backend=backend,
+    )
+    resp = client.post(
+        "/telegram/messages/delete",
+        json={"telegram_chat_id": -100123, "message_ids": [42], "revoke": False},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["deleted"] == 1
+    assert backend.calls == [
+        {"chat_id": -100123, "message_ids": (42,), "revoke": False}
+    ]
+
+
+def test_http_delete_rule_level_override_restricts_over_policy_default() -> None:
+    # Policy default false (would allow arbitrary ids), but the matching rule
+    # re-imposes the session limit via a per-rule override — the unsent id is
+    # rejected with 403.
+    backend = FakeDeleteBackend()
+    client = _http_client(
+        access_block=(
+            "access:\n  rules:\n    - all: true\n      permission: delete\n"
+            "      delete_only_session_messages: true\n"
+            "  delete_only_session_messages: false\n"
+        ),
+        delete_backend=backend,
+    )
+    resp = client.post(
+        "/telegram/messages/delete",
+        json={"telegram_chat_id": -100123, "message_ids": [999]},
+        headers=AUTH,
+    )
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["error"] == "delete_forbidden"
+    assert backend.calls == []
 
 
 def test_http_delete_dry_run_does_not_call_backend() -> None:

@@ -217,7 +217,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
 | `messages` | `forward` | Forward one or more messages (`--message-id`, repeatable) from a source to a target chat (READ-gated source, WRITE-gated target). | `telegram-assistant messages forward ...` |
-| `messages` | `delete` | Delete one or more messages (`--message-id`, repeatable) from a chat (DELETE-gated; `--revoke`/`--no-revoke`, `--dry-run`, `--force`). Honors `telegram.access.delete_only_session_messages` (default true). | `telegram-assistant messages delete ...` |
+| `messages` | `delete` | Delete one or more messages (`--message-id`, repeatable) from a chat (DELETE-gated; `--revoke`/`--no-revoke`, `--dry-run`, `--force`). Honors `telegram.access.delete_only_session_messages` (default true, overridable per access rule). | `telegram-assistant messages delete ...` |
 | `notifications` | `mute` | Mute a chat/contact's notifications, forever or for `--duration` hours. | `telegram-assistant notifications mute ...` |
 | `notifications` | `unmute` | Restore normal notifications for a chat/contact. | `telegram-assistant notifications unmute ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
@@ -610,7 +610,10 @@ never silently to get a blocked command through.
 - Required flags: exactly one chat reference and at least one `--message-id`.
 - From config: `--folder-name` default when resolving `--chat-name`. The
   `telegram.access.delete_only_session_messages` flag (default `true`) limits
-  deletes to messages this server process sent.
+  deletes to messages this server process sent; it can be overridden per
+  access rule (chat > folder > `all` > policy default), so a chat like `me`
+  may set `delete_only_session_messages: false` while the global default
+  stays `true`.
 - Temp file: no.
 - Automation: none — DELETE-gated destructive change. Run `--dry-run` first
   (resolves + authorizes + runs the session-limit check without deleting),

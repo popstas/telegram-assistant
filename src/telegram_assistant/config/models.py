@@ -80,6 +80,18 @@ class AccessRule(BaseModel):
     all: bool = False
     permission: AccessPermission = "write"
     permissions: list[AccessPermission] = Field(default_factory=list)
+    delete_only_session_messages: bool | None = Field(
+        default=None,
+        description=(
+            "Per-rule override of the policy-level "
+            "``AccessConfig.delete_only_session_messages`` for the chats/folders "
+            "this rule targets. ``None`` (default) inherits the policy value; "
+            "``true``/``false`` overrides it. When several levels match a chat "
+            "the most specific override wins (chat rule > folder rule > all rule "
+            "> policy default); within one level a restrictive ``true`` wins "
+            "over ``false`` on conflict."
+        ),
+    )
 
     @property
     def chat_refs(self) -> list[str | int]:

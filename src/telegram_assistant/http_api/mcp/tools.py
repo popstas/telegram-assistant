@@ -51,7 +51,7 @@ from telegram_assistant.groups import (
 from telegram_assistant.health import collect_health
 from telegram_assistant.http_api.access import (
     build_authorizer,
-    delete_only_session_messages,
+    delete_only_session_messages_default,
     resolve_entity_chat_id,
     sent_message_registry,
     translate_access_error,
@@ -812,6 +812,10 @@ async def _resolve_delete(request: _McpRequest, body: DeleteBody) -> dict[str, A
     authorizer = build_authorizer(
         request, folder_backend=_message_folder_backend_optional(request)  # type: ignore[arg-type]
     )
+    only_session = await authorizer.delete_only_session_messages(
+        telegram_chat_id,
+        default=delete_only_session_messages_default(request),  # type: ignore[arg-type]
+    )
     result = await delete_messages(
         backend,
         request=DeleteMessagesRequest(
@@ -824,7 +828,7 @@ async def _resolve_delete(request: _McpRequest, body: DeleteBody) -> dict[str, A
         ),
         authorizer=authorizer,
         sent_registry=sent_message_registry(request),  # type: ignore[arg-type]
-        only_session_messages=delete_only_session_messages(request),  # type: ignore[arg-type]
+        only_session_messages=only_session,
     )
     return result.to_dict()
 

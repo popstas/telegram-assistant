@@ -97,12 +97,15 @@ def translate_access_error(exc: Exception) -> HTTPException | None:
     return translate_entity_error(exc)
 
 
-def delete_only_session_messages(request: Request) -> bool:
-    """Whether message delete is restricted to this process's sent messages.
+def delete_only_session_messages_default(request: Request) -> bool:
+    """The policy-level ``delete_only_session_messages`` default.
 
     Reads ``config.telegram.access.delete_only_session_messages``. When the
     access policy is omitted (allow-all) the safe default ``True`` still applies
-    so out of the box delete only touches messages this process sent.
+    so out of the box delete only touches messages this process sent. Per-rule
+    overrides are resolved separately via
+    :meth:`Authorizer.delete_only_session_messages`, which takes this value as
+    its ``default``.
     """
     config = getattr(request.app.state, "config", None)
     access = None
@@ -141,7 +144,7 @@ async def resolve_entity_chat_id(request: Request, entity: str | int) -> int:
 
 __all__ = [
     "build_authorizer",
-    "delete_only_session_messages",
+    "delete_only_session_messages_default",
     "resolve_entity_chat_id",
     "resolver_optional",
     "sent_message_registry",

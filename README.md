@@ -92,7 +92,7 @@ Top-level:
 - `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5, optional `--minutes N` keeps only messages newer than `now - N` minutes).
 - `messages react` — set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated).
 - `messages forward` — forward one or more messages (`--message-id`, repeatable) from a source (`--from-chat-id`/`--from-entity`) to a target (`--to-chat-id`/`--to-entity`, or the usual target aliases `--chat-id`/`--chat-name`/`--entity`); READ-gated on the source, WRITE-gated on the target.
-- `messages delete` — delete one or more messages (`--message-id`, repeatable) from a chat (DELETE-gated). `--revoke`/`--no-revoke` toggles delete-for-everyone (default revoke); `--dry-run` resolves + authorizes without deleting; `--force` is carried for surface consistency. Honors `telegram.access.delete_only_session_messages` (default `true`): when active, only messages this server process sent may be deleted.
+- `messages delete` — delete one or more messages (`--message-id`, repeatable) from a chat (DELETE-gated). `--revoke`/`--no-revoke` toggles delete-for-everyone (default revoke); `--dry-run` resolves + authorizes without deleting; `--force` is carried for surface consistency. Honors `telegram.access.delete_only_session_messages` (default `true`, overridable per access rule): when active, only messages this server process sent may be deleted.
 
 `notifications` — mute and unmute chat/contact notifications:
 
@@ -128,7 +128,12 @@ telegram:
         permissions: [read, write]
       - chats: ["@some_chat", -1001234567890]
         permissions: [read, write, delete]
+      - chat: me                          # per-rule exception: prune your own Saved Messages
+        permissions: [write, delete]
+        delete_only_session_messages: false
 ```
+
+`delete_only_session_messages` also accepts a **per-rule override**: any rule may set it to `true`/`false` for the chats/folders it targets, keeping the safe global default while relaxing (or tightening) a specific target. The effective value for a delete is resolved by specificity — chat rule > folder rule > `all` rule > policy default — and a restrictive `true` wins over `false` when rules at the same level conflict.
 
 Config edits are hot-reloaded: a `watchdog` observer on `data/config.yml` re-runs the loader with a 2s debounce and atomically swaps the live config on success (a parse/validation error keeps the last-good config), so access-rule changes apply within ~2s without restarting the server.
 

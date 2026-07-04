@@ -11,6 +11,10 @@
 
 - Pin bump-my-version to 1.x to fix release bump crash
 
+### Task
+
+- Add slow-send investigation (folder-rule list_folders)
+
 ## v0.7.0 - 2026-06-21
 
 ### Features
