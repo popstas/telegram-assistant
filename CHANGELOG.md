@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Documentation
+
+- Add Features section to README
+
 ### Miscellaneous
 
 - Pin bump-my-version to 1.x to fix release bump crash
