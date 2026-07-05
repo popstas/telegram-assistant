@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- access: Per-rule delete-only override
+
 ### Documentation
 
 - Add Features section to README

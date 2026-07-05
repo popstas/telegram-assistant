@@ -11,3 +11,23 @@
   - **Вариант A (устранить корень):** для построения membership-карты не нужен `get_entity` — `InputPeer*` из dialog-фильтра уже содержит id (`channel_id`/`chat_id`/`user_id`). Сетевой запрос нужен только ради `title`, который для проверки членства не используется. Сделать в authorizer «дешёвый» путь построения membership, читающий id прямо из peer; `list_folders()` для CLI-инспекции (где title нужен) оставить как есть. → отправка станет ~1с, семантика доступа не меняется.
   - **Вариант C (кэш, дополняет A):** persist-кэш карты членства (чат→папки), чтобы не перечислять папки на каждый вызов. Для CLI один процесс = один вызов, поэтому нужен именно persist-cache (на диске) с инвалидацией. Требует продумывания: где хранить, TTL/инвалидация при изменении папок, консистентность с hot-reload. Полезно и серверу.
   - **Решение:** делать A + C (persist cache). Требует обсуждения деталей C перед реализацией.
+- [ ] Добавить операцию `messages edit` (редактирование текста/подписи отправленного сообщения) с gate `edit_only_session_messages: true`
+  - **Scope:** новая доменная операция по образцу `react`/`forward` — `messages/service.py` (edit-функция с идемпотентностью через `OperationStore`) + адаптер в `messages/telethon_backend.py` (`client.edit_message(chat_id, message_id, text)`, трансляция `FloodWaitError`) + CLI-команда `messages edit` + HTTP-эндпоинт + MCP-инструмент + backend-factory (`edit_backend_factory`, 503 когда клиент не подключён).
+  - **Access-гейт:** редактирование — WRITE-операция на резолвнутый чат (как send/react). Плюс новый policy-флаг `edit_only_session_messages` (по аналогии с `delete_only_session_messages`, default **true**): ограничивает `messages edit` сообщениями, которые отправил сам этот процесс (трекинг через существующий `SentMessageRegistry`); `false` — разрешает править произвольные сообщения. Флаг должен переопределяться **per-rule** (`AccessRule.edit_only_session_messages`) с той же логикой специфичности (chat > folder > all > policy default) и restrictive-`true`-wins, что и у delete.
+  - **Обвязка:** `--dry-run` для CLI; обновить `AccessConfig`/`AccessRule` в `config/models.py`; обновить `skills/telegram-assistant/SKILL.md` (+ ресинк в `~/.claude/...`), README (Commands + MCP tool catalog), `EXPECTED_TOOL_NAMES` в `tests/test_mcp_mount.py`; тесты по образцу delete-гейта.
+  - **Заметка:** Telegram позволяет редактировать только свои сообщения и в пределах окна (обычно 48ч) — учесть в обработке ошибок.
+- [ ] Добавить операцию `messages pin` / `messages unpin` (закрепить/открепить сообщение в чате или топике)
+  - **Scope:** доменный `service` + `telethon_backend` (`client.pin_message` / `client.unpin_message`, либо `messages.updatePinnedMessage`; трансляция `FloodWaitError`) + CLI `messages pin`/`unpin` + HTTP + MCP + backend-factory (503 когда клиент не подключён).
+  - **Access-гейт:** WRITE на резолвнутый чат (как send/react). `--dry-run` для CLI.
+  - **Опции:** флаги вроде `--silent` (не слать уведомление о закреплении) и `--pm-oneside`; для unpin — конкретный `message_id` либо открепить все.
+  - **Обвязка:** обновить SKILL.md (+ ресинк), README (Commands + MCP-каталог), `EXPECTED_TOOL_NAMES` в `tests/test_mcp_mount.py`, тесты по образцу `react`.
+- [ ] Добавить операцию `messages download` (скачать медиа/документ/голос **из** сообщения в локальный файл)
+  - **Scope:** доменный `service` + `telethon_backend` (`client.download_media` по chat_id + message_id → путь/файл; трансляция `FloodWaitError`) + CLI `messages download` (`--out`/`--dir`) + HTTP + MCP + backend-factory. Отличать от существующего `messages/downloads.py`, который качает URL→temp **для отправки**, а не из сообщения.
+  - **Access-гейт:** READ на резолвнутый чат (как `recent`).
+  - **Заметка:** ограничение размера/типа, обработка сообщений без медиа; для HTTP/MCP продумать отдачу (путь на диске vs base64/поток). `--dry-run` где применимо.
+  - **Обвязка:** SKILL.md (+ ресинк), README, `EXPECTED_TOOL_NAMES`, тесты.
+- [ ] Добавить операцию `messages search` (поиск сообщений по тексту внутри чата)
+  - **Scope:** доменный `service` + `telethon_backend` (`messages.search` / `client.iter_messages(search=...)`; трансляция `FloodWaitError`) + CLI `messages search` + HTTP + MCP + backend-factory. Возвращать по образцу `recent` (`RecentMessage`-ряды), newest-first.
+  - **Фильтры:** `--query` (обязательно), опционально `--from` (отправитель), `--limit`, окно по времени `--minutes` (как в `recent`), возможно `--topic-id`.
+  - **Access-гейт:** READ на резолвнутый чат (как `recent`).
+  - **Обвязка:** SKILL.md (+ ресинк), README, `EXPECTED_TOOL_NAMES`, тесты.
