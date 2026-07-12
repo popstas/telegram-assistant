@@ -17,6 +17,7 @@
 
 ### Task
 
+- Queue messages edit/pin/download/search tasks
 - Add slow-send investigation (folder-rule list_folders)
 
 ## v0.7.0 - 2026-06-21
