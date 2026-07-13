@@ -50,6 +50,7 @@ from telegram_assistant.messages import (
 )
 from telegram_assistant.notifications import NotificationBackend
 from telegram_assistant.observability.logging import configure_logging
+from telegram_assistant.persistence.folder_cache import FolderMembershipCache
 from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.plugins import build_registry
 from telegram_assistant.telegram_client.session import (
@@ -539,6 +540,16 @@ def create_app(
                     # automatically; the MCP tool surface is registered once, so
                     # re-apply `mcp.disabled_tools` explicitly here.
                     app.state.plugin_registry = build_registry(new_config)
+                    # Access rules (including folder targets) may have changed;
+                    # drop the persistent membership cache so the next gated op
+                    # rebuilds it under the new policy instead of serving a map
+                    # keyed to the old one.
+                    fmc = getattr(app.state, "folder_membership_cache", None)
+                    if fmc is not None:
+                        try:
+                            fmc.clear()
+                        except Exception:
+                            pass
                     if mcp_fastmcp_server is not None and new_config.mcp is not None:
                         configure_mcp_tools(
                             mcp_fastmcp_server,
@@ -668,6 +679,25 @@ def create_app(
             # smoke test) leave the slot empty — the groups router will return
             # 503 on demand rather than failing at app startup.
             app.state.operation_store = None
+
+    # Persistent folder-membership cache shared by every per-request Authorizer
+    # (read-through with TTL + stale fallback). Cleared on hot-reload so
+    # access-rule edits apply cleanly. Only built when an access policy is
+    # active — with allow-all there are no folder rules, so the cache is never
+    # consulted and building the DB would only create stray files. Best-effort:
+    # leave the slot empty when the DB can't be opened so the authorizer falls
+    # back to live fetches.
+    app.state.folder_membership_cache = None
+    if getattr(config.telegram, "access", None) is not None:
+        fmc_db_path = (
+            database_path
+            if database_path is not None
+            else default_database_path(config)
+        )
+        try:
+            app.state.folder_membership_cache = FolderMembershipCache(fmc_db_path)
+        except Exception:
+            app.state.folder_membership_cache = None
 
     app.state.mcp_oauth_server = mcp_oauth_server
     app.state.mcp_fastmcp_server = mcp_fastmcp_server

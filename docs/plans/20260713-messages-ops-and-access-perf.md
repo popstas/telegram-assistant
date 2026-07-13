@@ -144,21 +144,21 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 3: Wire cache into authorizer (read-through, stale fallback, invalidation)
 
-- [ ] inject optional cache into `Authorizer` (new ctor arg, default `None` — no behavior
+- [x] inject optional cache into `Authorizer` (new ctor arg, default `None` — no behavior
       change when absent); `_folder_memberships()` becomes: cache fresh (age < ttl) → use it;
       expired/missing → fetch via Task-1 path and `save()`; fetch raises → fall back to stale
       cached map, log a warning (propagate only when no cache exists at all)
-- [ ] HTTP wiring: build the cache from the app's existing SQLite path and pass it through
+- [x] HTTP wiring: build the cache from the app's existing SQLite path and pass it through
       `build_authorizer` (`http_api/access.py`); clear the cache in the hot-reload `on_swap`
       (`http_api/app.py`) so access-rule edits apply cleanly
-- [ ] CLI wiring: `_cli_authorizer` (`cli/main.py`) constructs the cache from the config DB
+- [x] CLI wiring: `_cli_authorizer` (`cli/main.py`) constructs the cache from the config DB
       path so a fresh CLI process reuses the persisted map (this is the main win: CLI = one
       process per call)
-- [ ] MCP path inherits HTTP wiring (verify no extra changes needed)
-- [ ] write tests: fresh-cache hit skips backend entirely, expired cache refetches and
+- [x] MCP path inherits HTTP wiring (verify no extra changes needed)
+- [x] write tests: fresh-cache hit skips backend entirely, expired cache refetches and
       rewrites, backend error serves stale map, `folder_cache_ttl: 0` bypasses cache,
       hot-reload/`clear()` invalidation
-- [ ] run tests — must pass before task 4
+- [x] run tests — must pass before task 4
 
 ### Task 4: `messages edit` domain op + `edit_only_session_messages` gate
 
