@@ -28,7 +28,9 @@ from typer.testing import CliRunner
 from telegram_assistant.cli import main as cli_main
 from telegram_assistant.config import load_config_from_text
 from telegram_assistant.http_api import create_app
+from telegram_assistant.messages.editing import MessageEditRejected
 from telegram_assistant.persistence import OperationStore
+from telegram_assistant.worker.queue import FloodWaitError
 
 AUTH = {"Authorization": "Bearer secret_token"}
 
@@ -39,13 +41,16 @@ AUTH = {"Authorization": "Bearer secret_token"}
 
 
 class FakeEditBackend:
-    def __init__(self) -> None:
+    def __init__(self, *, error: Exception | None = None) -> None:
         self.calls: list[dict[str, Any]] = []
+        self._error = error
 
     async def edit_message(self, *, chat_id: int, message_id: int, text: str) -> int:
         self.calls.append(
             {"chat_id": chat_id, "message_id": message_id, "text": text}
         )
+        if self._error is not None:
+            raise self._error
         return message_id
 
 
@@ -301,6 +306,49 @@ def test_http_edit_422_empty_text() -> None:
     assert backend.calls == []
 
 
+def test_http_edit_400_on_edit_rejected() -> None:
+    # A Telegram-side rejection (own-message / window / not-modified) surfaces as
+    # a 400 carrying the reason slug. The session gate is disabled so the request
+    # reaches the backend.
+    backend = FakeEditBackend(
+        error=MessageEditRejected("window expired", reason="edit_window_expired")
+    )
+    client = _http_client(
+        access_block=(
+            "access:\n  rules:\n    - all: true\n      permission: write\n"
+            "  edit_only_session_messages: false\n"
+        ),
+        edit_backend=backend,
+    )
+    resp = client.post(
+        "/telegram/messages/edit",
+        json={"telegram_chat_id": -100123, "message_id": 42, "text": "x"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 400, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "edit_rejected"
+    assert detail["reason"] == "edit_window_expired"
+
+
+def test_http_edit_502_on_flood_wait() -> None:
+    backend = FakeEditBackend(error=FloodWaitError(7.0))
+    client = _http_client(
+        access_block=(
+            "access:\n  rules:\n    - all: true\n      permission: write\n"
+            "  edit_only_session_messages: false\n"
+        ),
+        edit_backend=backend,
+    )
+    resp = client.post(
+        "/telegram/messages/edit",
+        json={"telegram_chat_id": -100123, "message_id": 42, "text": "x"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["detail"]["error"] == "needs_review"
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -410,6 +458,36 @@ def test_cli_edit_real_with_flag_off(
     assert backend.calls == [
         {"chat_id": -100123, "message_id": 5, "text": "updated"}
     ]
+
+
+def test_cli_edit_rejected_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Telegram-side rejection surfaces as exit code 2 (like a ValueError),
+    # distinct from the session-gate's exit 3.
+    config_file = _write_config(tmp_path, _cli_config(False))
+    backend = FakeEditBackend(
+        error=MessageEditRejected("not your message", reason="not_own_message")
+    )
+    _patch_cli_edit_backends(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "edit",
+            "--chat-id",
+            "-100123",
+            "--message-id",
+            "5",
+            "--text",
+            "updated",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 2, result.stdout
 
 
 def test_cli_edit_session_limit_blocks_by_default(
