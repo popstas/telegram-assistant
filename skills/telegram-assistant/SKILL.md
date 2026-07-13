@@ -635,6 +635,108 @@ never silently to get a blocked command through.
   (exit code 3 — chat lacks the `delete` capability), entity not-found /
   ambiguous (exit code 2).
 
+#### `messages` / `edit`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  `--message-id` (the message to edit), `--text` (the new text/caption).
+- Required flags: exactly one chat reference, `--message-id`, and `--text`.
+- From config: `--folder-name` default when resolving `--chat-name`. The
+  `telegram.access.edit_only_session_messages` flag (default `true`) limits
+  edits to messages this server process sent; it can be overridden per access
+  rule (chat > folder > `all` > policy default), so a chat may set
+  `edit_only_session_messages: false` while the global default stays `true`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first (resolves
+  + authorizes + runs the session-limit check without editing), show the plan,
+  wait for confirmation, then run without `--dry-run`. Map «поправь сообщение N
+  в чате X на "новый текст"» → `--entity X --message-id N --text "новый текст"`.
+- Confirmation: required (bucket 2).
+- Typical errors: `messages edit requires non-empty --text`, `--message-id must
+  be a positive integer`, `message edit forbidden ...` (id not sent by this
+  process while `edit_only_session_messages` is on), Telegram edit-limit errors
+  surfaced as clear domain messages (not own message, ~48h edit window elapsed,
+  text unmodified), `access denied ...` (exit code 3 — chat lacks the `write`
+  capability), entity not-found / ambiguous (exit code 2).
+
+#### `messages` / `pin`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  `--message-id` (the message to pin), optional `--silent` (no notification),
+  optional `--pm-oneside` (pin only on your side in a private chat).
+- Required flags: exactly one chat reference and `--message-id`.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first, show the
+  plan, wait for confirmation, then run without `--dry-run`. Map «закрепи
+  сообщение N в чате X» → `--entity X --message-id N`; add `--silent` when the
+  human asks to pin without pinging members.
+- Confirmation: required (bucket 2).
+- Typical errors: `--message-id must be a positive integer`, `exactly one of
+  --chat-id, --chat-name, or --entity must be supplied`, `access denied ...`
+  (exit code 3 — chat lacks the `write` capability), entity not-found /
+  ambiguous (exit code 2).
+
+#### `messages` / `unpin`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`), and
+  either `--message-id` (unpin one) or `--all` (unpin every pinned message).
+- Required flags: exactly one chat reference and exactly one of `--message-id`
+  / `--all`.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first, show the
+  plan, wait for confirmation, then run without `--dry-run`. Map «открепи
+  сообщение N в чате X» → `--entity X --message-id N`; «открепи всё» → `--all`.
+- Confirmation: required (bucket 2).
+- Typical errors: `provide either --message-id or --all, not both`,
+  `--message-id must be a positive integer`, `exactly one of --chat-id,
+  --chat-name, or --entity must be supplied`, `access denied ...` (exit code 3),
+  entity not-found / ambiguous (exit code 2).
+
+#### `messages` / `download`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  `--message-id` (the message whose media to download), and exactly one of
+  `--out` (target file path) / `--dir` (target directory, original filename is
+  kept); optional `--max-bytes` (reject media larger than this).
+- Required flags: exactly one chat reference, `--message-id`, and exactly one
+  of `--out` / `--dir`.
+- From config: `--folder-name` default when resolving `--chat-name`. Paths are
+  server-side — the file is written on the machine running the CLI.
+- Temp file: no (the download target is chosen by the human, not `/tmp` scratch).
+- Automation: READ-gated — it reads the message and writes a local file. Run
+  `--dry-run` first (resolves + authorizes + reports the planned target path
+  without downloading), then run without `--dry-run`. Map «скачай файл из
+  сообщения N чата X в /srv/out/» → `--entity X --message-id N --dir /srv/out/`.
+- Confirmation: not strictly a Telegram state change, but it writes to disk —
+  show the resolved target path in the plan before the real run.
+- Typical errors: `provide exactly one of --out or --dir`, `--message-id must be
+  a positive integer`, message has no downloadable media, media exceeds
+  `--max-bytes`, `access denied ...` (exit code 3 — chat lacks the `read`
+  capability), entity not-found / ambiguous (exit code 2).
+
+#### `messages` / `search`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
+  `--query` (the required non-empty search text), optional `--from` (restrict
+  to a sender), optional `--limit` (count), optional `--minutes` (only messages
+  newer than `now - minutes`), optional `--topic-id` (search inside one forum
+  topic).
+- Required flags: exactly one chat reference and `--query`.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: read-only — run immediately when the human asks «найди в чате X
+  сообщения про "..."». No `--dry-run`. Uses Telegram server-side search;
+  `--minutes` is applied client-side for parity with `recent`. Results are
+  newest-first.
+- Confirmation: not required (read-only). Still READ-gated by the
+  `telegram.access` policy — if the chat is not permitted the CLI exits with
+  `access denied`; surface that and stop.
+- Typical errors: `messages search requires a non-empty --query`, `--limit must
+  be a positive integer`, `--minutes must be a positive integer`, `exactly one
+  of --chat-id, --chat-name, or --entity must be supplied`, `access denied ...`
+  (exit code 3), entity not-found / ambiguous (exit code 2).
+
 #### `notifications` / `mute`
 
 - Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),

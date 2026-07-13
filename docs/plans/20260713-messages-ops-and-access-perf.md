@@ -298,14 +298,14 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 13: [Final] Update documentation
 
-- [ ] SKILL.md: per-command deep-dive sections for `edit`/`pin`/`unpin`/`download`/`search`
+- [x] SKILL.md: per-command deep-dive sections for `edit`/`pin`/`unpin`/`download`/`search`
       (catalog rows were added in surface tasks); re-sync to
       `~/.claude/skills/telegram-assistant/SKILL.md`
-- [ ] README.md: Commands bullets + MCP tool catalog rows for the 5 new tools; note
+- [x] README.md: Commands bullets + MCP tool catalog rows for the 5 new tools; note
       `edit_only_session_messages` and `folder_cache_ttl` in the access-config docs
-- [ ] CLAUDE.md: extend the access section with `edit_only_session_messages` and the
+- [x] CLAUDE.md: extend the access section with `edit_only_session_messages` and the
       membership cache/TTL behavior
-- [ ] update `docs/TODO.md`: check off the five implemented items
+- [x] update `docs/TODO.md`: check off the five implemented items
 
 ## Technical Details
 
