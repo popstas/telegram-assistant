@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 from collections.abc import Callable
 from datetime import datetime
 from types import SimpleNamespace
@@ -104,6 +103,7 @@ from telegram_assistant.http_api.messages import (
     _pin_backend_or_503,
     _reaction_backend_or_503,
     _read_backend_or_503,
+    _resolve_download_dir,
     _search_backend_or_503,
 )
 from telegram_assistant.http_api.messages import (
@@ -1006,7 +1006,7 @@ async def _resolve_download(
     authorizer = build_authorizer(
         request, folder_backend=_message_folder_backend_optional(request)  # type: ignore[arg-type]
     )
-    out_dir = body.out_dir if body.out_dir is not None else tempfile.gettempdir()
+    out_dir = _resolve_download_dir(request, body.out_dir)  # type: ignore[arg-type]
     result = await download_media(
         backend,
         request=MediaDownloadRequest(
@@ -1421,9 +1421,11 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
 
         Reading the source message is READ-gated, but the tool writes a local
         file (a non-destructive side effect), so it is not annotated read-only.
-        ``out_dir`` is an optional server-side directory (defaults to the system
-        temp directory); the response reports the saved path plus size/mime. No
-        bytes are streamed back in this iteration.
+        ``out_dir`` is an optional server-side directory confined to
+        ``telegram.download_root`` (defaults to the system temp directory) — a
+        value escaping the root is rejected, so a READ-only identity cannot pick
+        an arbitrary write location; the response reports the saved path plus
+        size/mime. No bytes are streamed back in this iteration.
         """
         request = _request(provider)
         try:

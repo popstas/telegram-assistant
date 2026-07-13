@@ -207,7 +207,34 @@ async def test_download_size_limit_allows_unknown_size() -> None:
         ),
     )
     assert result.dry_run is False
-    assert backend.download_calls  # transfer proceeded
+    assert backend.download_calls  # transfer proceeded (written size under cap)
+
+
+async def test_download_size_limit_enforced_after_transfer_when_size_unknown(
+    tmp_path: Any,
+) -> None:
+    # Probe reports no size, so the pre-transfer guard can't fire; the written
+    # file turns out to be over the cap and must be rejected + removed.
+    dest = tmp_path / "big.bin"
+    dest.write_bytes(b"x" * 5000)
+    backend = FakeMediaDownloadBackend(
+        info=MediaInfo(filename="big.bin", size=None, mime=None),
+        downloaded=DownloadedMedia(path=str(dest), size=5000, mime=None),
+    )
+    with pytest.raises(MediaTooLargeError) as exc:
+        await download_media(
+            backend,
+            request=MediaDownloadRequest(
+                telegram_chat_id=-100,
+                message_id=42,
+                out_path=str(dest),
+                max_bytes=1000,
+            ),
+        )
+    assert exc.value.size == 5000
+    assert exc.value.max_bytes == 1000
+    assert backend.download_calls  # transfer happened before the cap check
+    assert not dest.exists()  # oversized file was removed
 
 
 async def test_download_rejects_non_positive_message_id() -> None:

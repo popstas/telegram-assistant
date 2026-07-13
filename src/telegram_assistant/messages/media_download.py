@@ -44,8 +44,10 @@ class MediaTooLargeError(ValueError):
     """The media exceeds the requested ``max_bytes`` guard.
 
     Raised before the transfer starts when the probed size is known and over
-    the caller-supplied limit. A :class:`ValueError` so surfaces map it to a
-    400-style error.
+    the caller-supplied limit, and again *after* the transfer when the probe
+    reported no size (``size=None``) but the written file turned out to be over
+    the limit — in that case the oversized file is deleted first. A
+    :class:`ValueError` so surfaces map it to a 400-style error.
     """
 
     def __init__(self, *, size: int, max_bytes: int) -> None:
@@ -194,8 +196,12 @@ async def download_media(
     The message is probed for metadata first: a message with no downloadable
     media raises :class:`NoDownloadableMediaError`, and a known size over
     ``max_bytes`` raises :class:`MediaTooLargeError` — both before any transfer.
-    ``dry_run`` runs the access check, the probe, the size guard, and the
-    path resolution, then returns without writing anything.
+    When the probe reports no size the transfer proceeds, but the actual byte
+    count is re-checked against ``max_bytes`` afterwards; an oversized file is
+    deleted and :class:`MediaTooLargeError` raised, so the guard cannot be
+    silently bypassed by missing metadata. ``dry_run`` runs the access check,
+    the probe, the size guard, and the path resolution, then returns without
+    writing anything.
     """
     if request.message_id <= 0:
         raise ValueError("message_id must be a positive integer")
@@ -245,6 +251,14 @@ async def download_media(
         message_id=request.message_id,
         target_path=target_path,
     )
+    if request.max_bytes is not None and downloaded.size > request.max_bytes:
+        # The probe reported no size (or under-reported); enforce the cap on the
+        # bytes actually written so a missing-metadata download can't bypass it.
+        try:
+            os.remove(downloaded.path)
+        except OSError:
+            pass
+        raise MediaTooLargeError(size=downloaded.size, max_bytes=request.max_bytes)
     return MediaDownloadResult(
         telegram_chat_id=request.telegram_chat_id,
         telegram_message_id=request.message_id,

@@ -326,6 +326,14 @@ Two workstreams from `docs/TODO.md`:
 - **Download response** (HTTP/MCP): server-side file path + metadata; no base64/streaming in
   this iteration (YAGNI — CLI is the primary consumer; revisit if a remote MCP client needs
   bytes).
+- **Download path confinement** (added post-review): the remote surfaces (HTTP/MCP) must not
+  let a READ-only caller choose an arbitrary server write location via `out_dir`. Both call
+  `_resolve_download_dir` (`http_api/messages.py`), which confines `out_dir` to
+  `telegram.download_root` (default: system temp dir) — relative values join into the root,
+  values escaping it are rejected with 400. The CLI (local, trusted) passes `--out`/`--dir`
+  straight to the domain and is not confined. Basename-only filename sanitisation in
+  `media_download._resolve_target_path` still blocks filename traversal; the root confinement
+  is the directory-side complement.
 - **Search**: Telethon `iter_messages(search=...)` uses Telegram server-side search;
   `minutes` filtering client-side in the service for parity with `recent`.
 - **Error taxonomy** unchanged: `AccessDenied` → CLI exit 3 / HTTP 403; entity-not-found →

@@ -208,6 +208,17 @@ class TelegramConfig(BaseModel):
             "or http://host:8080. Supported schemes: socks5, socks4, http, https."
         ),
     )
+    download_root: str | None = Field(
+        default=None,
+        description=(
+            "Server-side root directory that remote (HTTP/MCP) `messages "
+            "download` calls are confined to. None (default) means the system "
+            "temp directory. A caller-supplied out_dir is resolved against this "
+            "root and rejected if it escapes it, so a READ-only remote identity "
+            "cannot pick an arbitrary write location. The CLI (local, trusted) "
+            "is not confined."
+        ),
+    )
 
     @field_validator("proxy_url")
     @classmethod

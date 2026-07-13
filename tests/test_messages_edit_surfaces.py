@@ -349,6 +349,47 @@ def test_http_edit_502_on_flood_wait() -> None:
     assert resp.json()["detail"]["error"] == "needs_review"
 
 
+class _FloodFolderBackend:
+    """Folder backend whose membership fetch always floods.
+
+    Resolving ``edit_only_session_messages`` for a folder-scoped policy consults
+    folder memberships; this stands in to make that lookup raise FloodWaitError.
+    """
+
+    async def list_folder_chat_ids(self) -> dict[str, set[int]]:
+        raise FloodWaitError(9.0)
+
+
+def test_http_edit_502_when_folder_membership_fetch_floods() -> None:
+    # A folder-scoped rule makes edit_only_session_messages resolution fetch
+    # folder memberships. That fetch raising FloodWaitError must map to 502, not
+    # bubble up as an unhandled 500 (regression: the resolution ran outside the
+    # route's try/except).
+    backend = FakeEditBackend()
+    config = load_config_from_text(
+        _config_with_access(
+            'access:\n  rules:\n    - folder: "Planfix clients"\n'
+            "      permission: write\n"
+        )
+    )
+    app = create_app(
+        config,
+        session_manager=None,
+        edit_backend_factory=lambda _r: backend,
+        folder_backend_factory=lambda _r: _FloodFolderBackend(),
+        resolver_factory=lambda _r: None,
+        operation_store=_make_store(),
+    )
+    client = TestClient(app)
+    resp = client.post(
+        "/telegram/messages/edit",
+        json={"telegram_chat_id": -100123, "message_id": 42, "text": "x"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 502, resp.text
+    assert backend.calls == []  # never reached the backend
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------

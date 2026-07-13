@@ -56,7 +56,12 @@ class FakeDownloadBackend:
         return DownloadedMedia(path=target_path, size=100, mime="image/jpeg")
 
 
-def _config_with_access(access_block: str | None) -> str:
+def _config_with_access(
+    access_block: str | None, *, download_root: str | None = None
+) -> str:
+    root_line = (
+        f'  download_root: "{download_root}"\n' if download_root is not None else ""
+    )
     base = textwrap.dedent(
         """
         telegram:
@@ -66,7 +71,7 @@ def _config_with_access(access_block: str | None) -> str:
           default_chat_folder:
             folder_id: 2
             folder_name: "Planfix clients"
-        {access}
+        {root}{access}
         http:
           host: "0.0.0.0"
           port: 8085
@@ -78,7 +83,7 @@ def _config_with_access(access_block: str | None) -> str:
     indented = ""
     if access_block is not None:
         indented = textwrap.indent(access_block, "  ")
-    return base.format(access=indented).strip()
+    return base.format(root=root_line, access=indented).strip()
 
 
 def _make_store() -> OperationStore:
@@ -101,8 +106,11 @@ def _http_client(
     access_block: str | None = None,
     download_backend: FakeDownloadBackend | None = None,
     has_download_factory: bool = True,
+    download_root: str | None = None,
 ) -> TestClient:
-    config = load_config_from_text(_config_with_access(access_block))
+    config = load_config_from_text(
+        _config_with_access(access_block, download_root=download_root)
+    )
     app = create_app(
         config,
         session_manager=None,
@@ -157,6 +165,90 @@ def test_http_download_defaults_out_dir_to_tempdir() -> None:
     body = resp.json()
     assert body["path"].endswith("photo.jpg")
     assert body["path"] == str(Path(tempfile.gettempdir()) / "photo.jpg")
+
+
+def test_http_download_rejects_out_dir_outside_default_root() -> None:
+    # Default root is the system temp dir; an absolute path outside it (a
+    # READ-only caller trying to write elsewhere) is rejected with 400.
+    backend = FakeDownloadBackend()
+    client = _http_client(access_block=_READ_ACCESS, download_backend=backend)
+    resp = client.post(
+        "/telegram/messages/download",
+        json={
+            "telegram_chat_id": -100123,
+            "message_id": 7,
+            "out_dir": "/etc/cron.d",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 400, resp.text
+    assert "download root" in resp.json()["detail"]
+    assert backend.download_calls == []
+
+
+def test_http_download_rejects_out_dir_escaping_configured_root(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "downloads"
+    root.mkdir()
+    backend = FakeDownloadBackend()
+    client = _http_client(
+        access_block=_READ_ACCESS,
+        download_backend=backend,
+        download_root=str(root),
+    )
+    # A traversal that resolves to the parent of the configured root is denied.
+    resp = client.post(
+        "/telegram/messages/download",
+        json={
+            "telegram_chat_id": -100123,
+            "message_id": 7,
+            "out_dir": str(root / ".." ),
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 400, resp.text
+    assert backend.download_calls == []
+
+
+def test_http_download_relative_out_dir_joins_into_root(tmp_path: Path) -> None:
+    root = tmp_path / "downloads"
+    root.mkdir()
+    backend = FakeDownloadBackend()
+    client = _http_client(
+        access_block=_READ_ACCESS,
+        download_backend=backend,
+        download_root=str(root),
+    )
+    resp = client.post(
+        "/telegram/messages/download",
+        json={
+            "telegram_chat_id": -100123,
+            "message_id": 7,
+            "out_dir": "sub",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["path"] == str(root / "sub" / "photo.jpg")
+
+
+def test_http_download_configured_root_default_out_dir(tmp_path: Path) -> None:
+    root = tmp_path / "downloads"
+    root.mkdir()
+    backend = FakeDownloadBackend()
+    client = _http_client(
+        access_block=_READ_ACCESS,
+        download_backend=backend,
+        download_root=str(root),
+    )
+    resp = client.post(
+        "/telegram/messages/download",
+        json={"telegram_chat_id": -100123, "message_id": 7},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["path"] == str(root / "photo.jpg")
 
 
 def test_http_download_dry_run_skips_transfer(tmp_path: Path) -> None:

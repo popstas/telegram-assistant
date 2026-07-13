@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from datetime import datetime
 from typing import Any
@@ -441,10 +442,13 @@ class DownloadBody(BaseModel):
     The target is one of ``telegram_chat_id`` / ``entity`` / ``chat_name`` +
     ``folder_name`` (same shape as ``recent``). ``message_id`` must be a
     positive id. ``out_dir`` is an optional server-side directory the original
-    filename is joined into; when omitted the system temp directory is used.
-    The response returns the saved path + size/mime (no bytes are streamed in
-    this iteration). ``max_bytes`` optionally caps the download; ``dry_run``
-    resolves + authorizes + probes the media without transferring.
+    filename is joined into; it is confined to ``telegram.download_root``
+    (default: the system temp directory) — a relative value is resolved inside
+    the root and one escaping it is rejected (400), so a READ-only caller
+    cannot pick an arbitrary write location. When omitted the root itself is
+    used. The response returns the saved path + size/mime (no bytes are
+    streamed in this iteration). ``max_bytes`` optionally caps the download;
+    ``dry_run`` resolves + authorizes + probes the media without transferring.
     """
 
     message_id: int
@@ -589,6 +593,30 @@ def _download_backend_or_503(request: Request) -> MediaDownloadBackend:
             detail="Telegram download backend is not available",
         )
     return backend
+
+
+def _resolve_download_dir(request: Request, out_dir: str | None) -> str:
+    """Confine a remote ``messages download`` target dir to the download root.
+
+    Remote callers (HTTP/MCP) only need READ on the source chat; they must not
+    be able to pick an arbitrary write location on the server. The allowed root
+    is ``telegram.download_root`` (default: the system temp dir). ``None`` lands
+    directly in the root; an explicit ``out_dir`` is joined into the root when
+    relative, resolved to an absolute path, and must stay inside the root, else
+    :class:`ValueError` (→ 400). The CLI is not routed through this helper.
+    """
+    config = getattr(request.app.state, "config", None)
+    configured = getattr(getattr(config, "telegram", None), "download_root", None)
+    root_abs = os.path.abspath(configured or tempfile.gettempdir())
+    if out_dir is None:
+        return root_abs
+    candidate = out_dir if os.path.isabs(out_dir) else os.path.join(root_abs, out_dir)
+    candidate_abs = os.path.abspath(candidate)
+    if candidate_abs != root_abs and not candidate_abs.startswith(root_abs + os.sep):
+        raise ValueError(
+            "out_dir must be within the configured download root"
+        )
+    return candidate_abs
 
 
 def _topic_backend_optional(request: Request) -> TopicBackend | None:
@@ -1017,11 +1045,14 @@ def build_router() -> APIRouter:
         authorizer = build_authorizer(
             request, folder_backend=_folder_backend_optional(request)
         )
-        only_session = await authorizer.delete_only_session_messages(
-            telegram_chat_id,
-            default=delete_only_session_messages_default(request),
-        )
         try:
+            # Resolving the delete-only flag may consult folder memberships,
+            # which can raise FloodWaitError; keep it inside the try so it maps
+            # to 502.
+            only_session = await authorizer.delete_only_session_messages(
+                telegram_chat_id,
+                default=delete_only_session_messages_default(request),
+            )
             result = await delete_messages(
                 backend,
                 request=DeleteMessagesRequest(
@@ -1088,11 +1119,13 @@ def build_router() -> APIRouter:
         authorizer = build_authorizer(
             request, folder_backend=_folder_backend_optional(request)
         )
-        only_session = await authorizer.edit_only_session_messages(
-            telegram_chat_id,
-            default=edit_only_session_messages_default(request),
-        )
         try:
+            # Resolving the edit-only flag may consult folder memberships, which
+            # can raise FloodWaitError; keep it inside the try so it maps to 502.
+            only_session = await authorizer.edit_only_session_messages(
+                telegram_chat_id,
+                default=edit_only_session_messages_default(request),
+            )
             result = await edit_message(
                 backend,
                 request=MessageEditRequest(
@@ -1219,8 +1252,8 @@ def build_router() -> APIRouter:
         authorizer = build_authorizer(
             request, folder_backend=_folder_backend_optional(request)
         )
-        out_dir = body.out_dir if body.out_dir is not None else tempfile.gettempdir()
         try:
+            out_dir = _resolve_download_dir(request, body.out_dir)
             result = await download_media(
                 backend,
                 request=MediaDownloadRequest(

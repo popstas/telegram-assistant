@@ -20,6 +20,10 @@
 - Build folder membership without get_entity (variant A)
 - access: Per-rule delete-only override
 
+### Bug Fixes
+
+- review: Rebuild membership cache on access hot-add + cover error/edge paths
+
 ### Documentation
 
 - Add Features section to README

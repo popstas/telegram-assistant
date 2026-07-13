@@ -767,6 +767,37 @@ def test_mcp_download_media_denied_without_read(
     assert backend.probe_calls == []
 
 
+def test_mcp_download_rejects_out_dir_outside_root(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    # A READ-scoped MCP identity cannot direct the write to an arbitrary
+    # server directory: an out_dir outside the (default temp) root is a 400.
+    backend = FakeDownloadBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"read\"\n",
+    )
+    with _client(config_yaml, tmp_path, download_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_download",
+            {
+                "telegram_chat_id": -100123,
+                "message_id": 9,
+                "out_dir": "/etc/cron.d",
+            },
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert "download root" in text
+    assert backend.download_calls == []
+
+
 def test_mcp_tool_maps_access_denied_to_actionable_error(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:

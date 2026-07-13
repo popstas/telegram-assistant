@@ -175,7 +175,7 @@ All `/telegram/*` endpoints require `Authorization: Bearer <token>` and use the 
 - `POST /telegram/messages/delete` deletes `message_ids` from a target chat (DELETE-gated). Optional `revoke` (default `true`), `dry_run`, and `force`. Honors `telegram.access.delete_only_session_messages`; the backend factory returns `503` when the session is not connected.
 - `POST /telegram/messages/edit` edits the text/caption of a sent message (`message_id`, `text`, WRITE-gated). Optional `dry_run`. Honors `telegram.access.edit_only_session_messages`; Telegram edit-limit errors map to `400`, access denial to `403`, and the backend factory returns `503` when the session is not connected.
 - `POST /telegram/messages/pin` pins a message (`message_id`, WRITE-gated) with optional `silent` and `pm_oneside`; `POST /telegram/messages/unpin` unpins one `message_id` or, with `unpin_all: true`, every pinned message. Both accept `dry_run` and return `503` when the session is not connected.
-- `POST /telegram/messages/download` downloads an existing message's media to a **server-side** file (READ-gated). Body carries `message_id` plus optional `out_dir` (defaults to a temp dir) and `max_bytes`; the response returns the saved path, size, and mime (no base64/streaming in this iteration). Returns `503` when the session is not connected.
+- `POST /telegram/messages/download` downloads an existing message's media to a **server-side** file (READ-gated). Body carries `message_id` plus optional `out_dir` and `max_bytes`; `out_dir` is confined to `telegram.download_root` (default: the system temp dir) — a relative value is resolved inside the root, one escaping it is rejected with `400`, and omitting it uses the root — so a READ-only caller cannot pick an arbitrary write location. The response returns the saved path, size, and mime (no base64/streaming in this iteration). Returns `503` when the session is not connected.
 - `GET /telegram/messages/search` text-searches a chat newest-first (READ-gated); query params mirror `recent` (`query` required, plus `from_user`, `limit`, `minutes`, `topic_id`). Returns `503` when the session is not connected.
 - `POST /telegram/notifications/mute` and `/telegram/notifications/unmute` mute or unmute a target chat/contact; mute accepts positive `duration_hours`.
 - `DELETE /telegram/folders/{folder_name}/chats` removes `chat_id`, `chat_name`, or `entity` from a folder and returns `already_absent` when no change was needed.
@@ -222,7 +222,7 @@ MCP tool catalog:
 | `telegram_messages_edit` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `text`, `dry_run`; WRITE-gated, honors `edit_only_session_messages` |
 | `telegram_messages_pin` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `silent`, `pm_oneside`, `dry_run`; WRITE-gated |
 | `telegram_messages_unpin` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id` or `unpin_all`, `dry_run`; WRITE-gated |
-| `telegram_messages_download` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `out_dir`, `max_bytes`, `dry_run`; READ-gated, writes a server-side file (returns saved path/size/mime, no byte streaming) |
+| `telegram_messages_download` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `out_dir` (confined to `telegram.download_root`), `max_bytes`, `dry_run`; READ-gated, writes a server-side file (returns saved path/size/mime, no byte streaming) |
 | `telegram_messages_search` | `chat_id`/`entity`, `query`, `from_user`, `limit`, `minutes`, `topic_id`; READ-gated, newest-first |
 | `telegram_messages_react` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `emoji` or `clear` |
 | `telegram_groups_create` | `title`, `about`, `admins`, `members`, `managers` (alias of `members`), `contacts` (`[{phone, name}]` — imported to contacts then added), `folder_name`/`folder_id`, `external_ref`, `topics_layout`, reserve/skip flags |
@@ -314,6 +314,13 @@ telegram:
 ```
 
 Leave it unset (or remove the line) to connect directly.
+
+`telegram.download_root` confines where remote (HTTP/MCP) `messages download` calls may write. It defaults to the system temp directory; a caller-supplied `out_dir` is resolved against this root and rejected when it escapes, so a READ-only remote identity cannot pick an arbitrary write location. The CLI (local, trusted) is not confined.
+
+```yaml
+telegram:
+  download_root: "/data/downloads"   # default: the system temp dir
+```
 
 Defaults applied to new supergroups live under `telegram.defaults`:
 
