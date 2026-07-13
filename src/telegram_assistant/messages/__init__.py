@@ -31,6 +31,15 @@ from telegram_assistant.messages.forwarding import (
     ForwardMessagesResult,
     forward_messages,
 )
+from telegram_assistant.messages.pinning import (
+    PinBackend,
+    PinMessageRequest,
+    PinMessageResult,
+    UnpinMessageRequest,
+    UnpinMessageResult,
+    pin_message,
+    unpin_message,
+)
 from telegram_assistant.messages.reactions import (
     ReactionBackend,
     SendReactionRequest,
@@ -97,6 +106,13 @@ __all__ = [
     "MessageSendFailed",
     "MessageSendNeedsReview",
     "MessageSendPending",
+    "PinBackend",
+    "PinMessageRequest",
+    "PinMessageResult",
+    "UnpinMessageRequest",
+    "UnpinMessageResult",
+    "pin_message",
+    "unpin_message",
     "ReactionBackend",
     "RecentMessage",
     "ScheduleError",

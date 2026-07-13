@@ -274,6 +274,43 @@ class TelethonReactionBackend:
             raise translate_flood_wait(exc) from exc
 
 
+class TelethonPinBackend:
+    """Adapter from the Telethon ``TelegramClient`` to :class:`PinBackend`.
+
+    Resolves the peer then calls ``pin_message`` / ``unpin_message``. ``silent``
+    suppresses the pin service notification and ``pm_oneside`` pins only on the
+    acting side of a private chat. ``unpin_message`` with ``message_id=None``
+    unpins every pinned message. ``FloodWaitError`` is translated so the worker
+    queue can pause-and-retry rather than mark a generic failure.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def pin_message(
+        self, *, chat_id: int, message_id: int, silent: bool, pm_oneside: bool
+    ) -> None:
+        try:
+            entity = await self._client.get_input_entity(chat_id)
+            await self._client.pin_message(
+                entity,
+                message_id,
+                notify=not silent,
+                pm_oneside=pm_oneside,
+            )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+
+    async def unpin_message(
+        self, *, chat_id: int, message_id: int | None
+    ) -> None:
+        try:
+            entity = await self._client.get_input_entity(chat_id)
+            await self._client.unpin_message(entity, message_id)
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+
+
 class TelethonForwardBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`ForwardBackend`.
 
@@ -313,5 +350,6 @@ __all__ = [
     "TelethonDeleteBackend",
     "TelethonEditBackend",
     "TelethonReactionBackend",
+    "TelethonPinBackend",
     "TelethonForwardBackend",
 ]
