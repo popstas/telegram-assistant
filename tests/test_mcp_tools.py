@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from telegram_assistant.config import load_config_from_text
 from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.http_api import create_app
-from telegram_assistant.messages import RecentMessage
+from telegram_assistant.messages import DownloadedMedia, MediaInfo, RecentMessage
 from telegram_assistant.persistence import OperationStore
 from telegram_assistant.topics import TopicSummary
 from tests.test_mcp_mount import (
@@ -222,6 +222,26 @@ class FakePinBackend:
         self.unpins.append({"chat_id": chat_id, "message_id": message_id})
 
 
+class FakeDownloadBackend:
+    def __init__(self) -> None:
+        self.probe_calls: list[dict[str, Any]] = []
+        self.download_calls: list[dict[str, Any]] = []
+
+    async def probe_media(
+        self, *, chat_id: int, message_id: int
+    ) -> MediaInfo | None:
+        self.probe_calls.append({"chat_id": chat_id, "message_id": message_id})
+        return MediaInfo(filename="photo.jpg", size=100, mime="image/jpeg")
+
+    async def download_media(
+        self, *, chat_id: int, message_id: int, target_path: str
+    ) -> DownloadedMedia:
+        self.download_calls.append(
+            {"chat_id": chat_id, "message_id": message_id, "target_path": target_path}
+        )
+        return DownloadedMedia(path=target_path, size=100, mime="image/jpeg")
+
+
 def _client(
     config_yaml: str,
     tmp_path: Path,
@@ -231,6 +251,7 @@ def _client(
     delete_backend: FakeDeleteBackend | None = None,
     edit_backend: FakeEditBackend | None = None,
     pin_backend: FakePinBackend | None = None,
+    download_backend: FakeDownloadBackend | None = None,
     group_backend: FakeLayoutBackend | None = None,
     topic_backend: FakeTopicBackend | None = None,
     member_backend: FakeMemberBackend | None = None,
@@ -281,6 +302,11 @@ def _client(
         pin_backend_factory=(
             (lambda _r: pin_backend)
             if pin_backend is not None
+            else (lambda _r: None)
+        ),
+        download_backend_factory=(
+            (lambda _r: download_backend)
+            if download_backend is not None
             else (lambda _r: None)
         ),
         operation_store=OperationStore(tmp_path / "state.db"),
@@ -558,6 +584,68 @@ def test_mcp_unpin_requires_id_or_all(
 
     assert result["isError"] is True
     assert backend.unpins == []
+
+
+def test_mcp_download_media_via_backend(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeDownloadBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"read\"\n",
+    )
+    with _client(config_yaml, tmp_path, download_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_download",
+            {
+                "telegram_chat_id": -100123,
+                "message_id": 9,
+                "out_dir": str(tmp_path),
+            },
+        )
+
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload["telegram_message_id"] == 9
+    assert payload["path"] == str(tmp_path / "photo.jpg")
+    assert payload["size"] == 100
+    assert backend.download_calls == [
+        {
+            "chat_id": -100123,
+            "message_id": 9,
+            "target_path": str(tmp_path / "photo.jpg"),
+        }
+    ]
+
+
+def test_mcp_download_media_denied_without_read(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeDownloadBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"write\"\n",
+    )
+    with _client(config_yaml, tmp_path, download_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_download",
+            {"telegram_chat_id": -100123, "message_id": 9, "out_dir": str(tmp_path)},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "access_denied"' in text
+    assert backend.probe_calls == []
 
 
 def test_mcp_tool_maps_access_denied_to_actionable_error(

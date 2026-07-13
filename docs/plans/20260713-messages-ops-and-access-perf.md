@@ -242,17 +242,17 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 9: download surfaces (CLI + HTTP + MCP)
 
-- [ ] CLI `messages download`: `--message-id`, `--out` (file) / `--dir` (directory,
+- [x] CLI `messages download`: `--message-id`, `--out` (file) / `--dir` (directory,
       mutually exclusive), target selector, `--dry-run`
-- [ ] HTTP `POST /telegram/messages/download`: body with `message_id` + optional
+- [x] HTTP `POST /telegram/messages/download`: body with `message_id` + optional
       `out_dir`; response returns the **server-side saved path** + size/mime (no
       base64/streaming in this iteration — documented in Technical Details); factory +
       `_download_backend_or_503` + `app.state` wiring
-- [ ] MCP tool `telegram_messages_download` (read-only annotation is wrong — it writes a
+- [x] MCP tool `telegram_messages_download` (read-only annotation is wrong — it writes a
       local file; use non-destructive write hints) + `EXPECTED_TOOL_NAMES`
-- [ ] SKILL.md catalog row for `messages download`
-- [ ] write tests: CLI/HTTP/MCP surfaces, 503 path, invalid flag combos (exit 2 / 400)
-- [ ] run tests — must pass before task 10
+- [x] SKILL.md catalog row for `messages download`
+- [x] write tests: CLI/HTTP/MCP surfaces, 503 path, invalid flag combos (exit 2 / 400)
+- [x] run tests — must pass before task 10
 
 ### Task 10: `messages search` domain op + adapter (READ gate)
 

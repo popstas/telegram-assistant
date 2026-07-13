@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import tempfile
 from collections.abc import Callable
 from datetime import datetime
 from types import SimpleNamespace
@@ -88,6 +89,7 @@ from telegram_assistant.http_api.members import (
 )
 from telegram_assistant.http_api.messages import (
     DeleteBody,
+    DownloadBody,
     EditBody,
     ForwardBody,
     MessageSendBody,
@@ -95,6 +97,7 @@ from telegram_assistant.http_api.messages import (
     ReactionBody,
     UnpinBody,
     _delete_backend_or_503,
+    _download_backend_or_503,
     _edit_backend_or_503,
     _forward_backend_or_503,
     _message_backend_or_503,
@@ -168,6 +171,7 @@ from telegram_assistant.messages import (
     DeleteMessagesRequest,
     ForwardMessagesRequest,
     MassSendRequest,
+    MediaDownloadRequest,
     MessageDeleteForbidden,
     MessageEditForbidden,
     MessageEditRejected,
@@ -181,6 +185,7 @@ from telegram_assistant.messages import (
     SendReactionRequest,
     UnpinMessageRequest,
     delete_messages,
+    download_media,
     edit_message,
     forward_messages,
     get_recent_messages,
@@ -975,6 +980,46 @@ async def _resolve_unpin(request: _McpRequest, body: UnpinBody) -> dict[str, Any
     return result.to_dict()
 
 
+async def _resolve_download(
+    request: _McpRequest, body: DownloadBody
+) -> dict[str, Any]:
+    backend = _download_backend_or_503(request)  # type: ignore[arg-type]
+    if body.entity is not None:
+        telegram_chat_id = await resolve_entity_chat_id(request, body.entity)  # type: ignore[arg-type]
+        chat_name_for_log: str | None = None
+    elif body.telegram_chat_id is not None:
+        telegram_chat_id = body.telegram_chat_id
+        chat_name_for_log = None
+    else:
+        folder_backend = _message_folder_backend_or_503(request)  # type: ignore[arg-type]
+        chat = await resolve_chat_in_folder(
+            folder_backend,
+            folder_name=body.folder_name or "",
+            chat_name=body.chat_name or "",
+            folder_id=body.folder_id,
+        )
+        telegram_chat_id = chat.chat_id
+        chat_name_for_log = chat.title
+
+    authorizer = build_authorizer(
+        request, folder_backend=_message_folder_backend_optional(request)  # type: ignore[arg-type]
+    )
+    out_dir = body.out_dir if body.out_dir is not None else tempfile.gettempdir()
+    result = await download_media(
+        backend,
+        request=MediaDownloadRequest(
+            telegram_chat_id=telegram_chat_id,
+            message_id=body.message_id,
+            out_dir=out_dir,
+            max_bytes=body.max_bytes,
+            dry_run=body.dry_run,
+            chat_name=chat_name_for_log,
+        ),
+        authorizer=authorizer,
+    )
+    return result.to_dict()
+
+
 def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) -> None:
     """Register all telegram_-prefixed tools on ``server``."""
 
@@ -1293,6 +1338,47 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 dry_run=dry_run,
             )
             return await _resolve_unpin(request, body)
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_messages_download",
+        annotations=WRITE_NONDESTRUCTIVE,
+        structured_output=True,
+    )
+    async def telegram_messages_download(
+        message_id: int,
+        out_dir: str | None = None,
+        max_bytes: int | None = None,
+        telegram_chat_id: int | None = None,
+        entity: str | int | None = None,
+        chat_name: str | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Download the media of an existing message to a server-side file (READ).
+
+        Reading the source message is READ-gated, but the tool writes a local
+        file (a non-destructive side effect), so it is not annotated read-only.
+        ``out_dir`` is an optional server-side directory (defaults to the system
+        temp directory); the response reports the saved path plus size/mime. No
+        bytes are streamed back in this iteration.
+        """
+        request = _request(provider)
+        try:
+            body = DownloadBody(
+                message_id=message_id,
+                out_dir=out_dir,
+                max_bytes=max_bytes,
+                telegram_chat_id=telegram_chat_id,
+                entity=entity,
+                chat_name=chat_name,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                dry_run=dry_run,
+            )
+            return await _resolve_download(request, body)
         except Exception as exc:
             _raise_from_exception(exc)
 

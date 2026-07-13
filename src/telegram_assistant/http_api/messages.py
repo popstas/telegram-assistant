@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from datetime import datetime
 from typing import Any
 
@@ -36,6 +37,8 @@ from telegram_assistant.messages import (
     ForwardBackend,
     ForwardMessagesRequest,
     MassSendRequest,
+    MediaDownloadBackend,
+    MediaDownloadRequest,
     MessageBackend,
     MessageDeleteForbidden,
     MessageEditForbidden,
@@ -53,6 +56,7 @@ from telegram_assistant.messages import (
     SendReactionRequest,
     UnpinMessageRequest,
     delete_messages,
+    download_media,
     edit_message,
     forward_messages,
     get_recent_messages,
@@ -429,6 +433,50 @@ class UnpinBody(BaseModel):
         return self
 
 
+class DownloadBody(BaseModel):
+    """Download the media of one existing message to a server-side file (READ).
+
+    The target is one of ``telegram_chat_id`` / ``entity`` / ``chat_name`` +
+    ``folder_name`` (same shape as ``recent``). ``message_id`` must be a
+    positive id. ``out_dir`` is an optional server-side directory the original
+    filename is joined into; when omitted the system temp directory is used.
+    The response returns the saved path + size/mime (no bytes are streamed in
+    this iteration). ``max_bytes`` optionally caps the download; ``dry_run``
+    resolves + authorizes + probes the media without transferring.
+    """
+
+    message_id: int
+    out_dir: str | None = None
+    max_bytes: int | None = None
+    dry_run: bool = False
+    telegram_chat_id: int | None = None
+    entity: str | int | None = None
+    chat_name: str | None = None
+    folder_name: str | None = None
+    folder_id: int | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> DownloadBody:
+        if self.message_id <= 0:
+            raise ValueError("message_id must be a positive integer")
+        if self.max_bytes is not None and self.max_bytes <= 0:
+            raise ValueError("max_bytes must be a positive integer")
+        refs = sum(
+            [
+                self.telegram_chat_id is not None,
+                self.entity is not None,
+                self.chat_name is not None,
+            ]
+        )
+        if refs != 1:
+            raise ValueError(
+                "provide exactly one of telegram_chat_id, entity, or chat_name"
+            )
+        if self.chat_name is not None and self.folder_name is None:
+            raise ValueError("chat_name requires folder_name")
+        return self
+
+
 def _message_backend_or_503(request: Request) -> MessageBackend:
     factory = getattr(request.app.state, "message_backend_factory", None)
     if factory is None:
@@ -521,6 +569,22 @@ def _pin_backend_or_503(request: Request) -> PinBackend:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram pin backend is not available",
+        )
+    return backend
+
+
+def _download_backend_or_503(request: Request) -> MediaDownloadBackend:
+    factory = getattr(request.app.state, "download_backend_factory", None)
+    if factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram download backend is not configured (session may be unauthorized)",
+        )
+    backend = factory(request)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram download backend is not available",
         )
     return backend
 
@@ -1089,6 +1153,63 @@ def build_router() -> APIRouter:
                     message_id=body.message_id,
                     silent=body.silent,
                     pm_oneside=body.pm_oneside,
+                    dry_run=body.dry_run,
+                    chat_name=chat_name_for_log,
+                ),
+                authorizer=authorizer,
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except FloodWaitError as exc:
+            raise _translate_flood_wait(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        return result.to_dict()
+
+    @router.post("/messages/download")
+    async def download(body: DownloadBody, request: Request) -> dict[str, Any]:
+        """Download the media of an existing message to a server-side file (READ).
+
+        The response reports the server-side saved path plus size/mime; no
+        bytes are streamed back in this iteration.
+        """
+        backend = _download_backend_or_503(request)
+
+        if body.entity is not None:
+            telegram_chat_id = await resolve_entity_chat_id(request, body.entity)
+            chat_name_for_log: str | None = None
+        elif body.telegram_chat_id is not None:
+            telegram_chat_id = body.telegram_chat_id
+            chat_name_for_log = None
+        else:
+            folder_backend = _folder_backend_or_503(request)
+            try:
+                chat = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=body.folder_name or "",
+                    chat_name=body.chat_name or "",
+                    folder_id=body.folder_id,
+                )
+            except FolderError as exc:
+                raise _translate_folder_error(exc) from exc
+            telegram_chat_id = chat.chat_id
+            chat_name_for_log = chat.title
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        out_dir = body.out_dir if body.out_dir is not None else tempfile.gettempdir()
+        try:
+            result = await download_media(
+                backend,
+                request=MediaDownloadRequest(
+                    telegram_chat_id=telegram_chat_id,
+                    message_id=body.message_id,
+                    out_dir=out_dir,
+                    max_bytes=body.max_bytes,
                     dry_run=body.dry_run,
                     chat_name=chat_name_for_log,
                 ),
