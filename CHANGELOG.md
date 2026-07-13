@@ -5,6 +5,7 @@
 
 ### Features
 
+- Messages search surfaces (CLI + HTTP + MCP)
 - Messages search domain op + Telethon adapter (READ gate)
 - Messages download surfaces (CLI + HTTP + MCP)
 - Messages download domain op + Telethon adapter (READ gate)

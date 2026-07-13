@@ -281,14 +281,20 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 12: Verify acceptance criteria
 
-- [ ] verify all Overview requirements implemented (perf path never calls `get_entity` for
+- [x] verify all Overview requirements implemented (perf path never calls `get_entity` for
       membership; all four ops gated correctly; per-rule edit override resolution matches
-      delete's)
-- [ ] verify edge cases: access config absent (allow-all + gates default from policy),
-      `folder_cache_ttl: 0`, marked vs bare chat ids across all new ops
-- [ ] run full test suite `pytest`
-- [ ] run `ruff check src tests` — all issues fixed
-- [ ] verify test coverage of new modules is in line with the project standard
+      delete's) — `_fetch_folder_map` prefers `list_folder_chat_ids()` (bare peer ids, no
+      `get_entity`); edit=WRITE, pin/unpin=WRITE, download=READ, search=READ; edit and delete
+      share `_resolve_session_only`
+- [x] verify edge cases: access config absent (allow-all + gates default from policy),
+      `folder_cache_ttl: 0`, marked vs bare chat ids across all new ops — covered by
+      `test_folder_membership_ids.py`, `test_folder_membership_cache.py`,
+      `test_access_folder_cache.py`, `test_access.py`
+- [x] run full test suite `pytest` — 1382 passed
+- [x] run `ruff check src tests` — all issues fixed (No issues found)
+- [x] verify test coverage of new modules is in line with the project standard — dedicated
+      test files per new module (edit/pin/download/search domain + surfaces, membership
+      ids/cache) covering success + error scenarios; project ships no coverage tooling
 
 ### Task 13: [Final] Update documentation
 
