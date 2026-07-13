@@ -125,6 +125,25 @@ def delete_only_session_messages_default(request: Request) -> bool:
     return access.delete_only_session_messages
 
 
+def edit_only_session_messages_default(request: Request) -> bool:
+    """The policy-level ``edit_only_session_messages`` default.
+
+    Mirror of :func:`delete_only_session_messages_default`: reads
+    ``config.telegram.access.edit_only_session_messages``. When the access
+    policy is omitted (allow-all) the safe default ``True`` still applies so out
+    of the box edit only touches messages this process sent. Per-rule overrides
+    are resolved separately via :meth:`Authorizer.edit_only_session_messages`,
+    which takes this value as its ``default``.
+    """
+    config = getattr(request.app.state, "config", None)
+    access = None
+    if config is not None:
+        access = getattr(config.telegram, "access", None)
+    if access is None:
+        return True
+    return access.edit_only_session_messages
+
+
 def sent_message_registry(request: Request):
     """Return the process-global sent-message registry, or ``None``."""
     return getattr(request.app.state, "sent_message_registry", None)
@@ -154,6 +173,7 @@ async def resolve_entity_chat_id(request: Request, entity: str | int) -> int:
 __all__ = [
     "build_authorizer",
     "delete_only_session_messages_default",
+    "edit_only_session_messages_default",
     "resolve_entity_chat_id",
     "resolver_optional",
     "sent_message_registry",

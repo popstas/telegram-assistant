@@ -188,6 +188,17 @@ class FakeDeleteBackend:
         return len(message_ids)
 
 
+class FakeEditBackend:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    async def edit_message(self, *, chat_id: int, message_id: int, text: str) -> int:
+        self.calls.append(
+            {"chat_id": chat_id, "message_id": message_id, "text": text}
+        )
+        return message_id
+
+
 def _client(
     config_yaml: str,
     tmp_path: Path,
@@ -195,6 +206,7 @@ def _client(
     read_backend: FakeReadBackend | None = None,
     message_backend: FakeMessageBackend | None = None,
     delete_backend: FakeDeleteBackend | None = None,
+    edit_backend: FakeEditBackend | None = None,
     group_backend: FakeLayoutBackend | None = None,
     topic_backend: FakeTopicBackend | None = None,
     member_backend: FakeMemberBackend | None = None,
@@ -235,6 +247,11 @@ def _client(
         delete_backend_factory=(
             (lambda _r: delete_backend)
             if delete_backend is not None
+            else (lambda _r: None)
+        ),
+        edit_backend_factory=(
+            (lambda _r: edit_backend)
+            if edit_backend is not None
             else (lambda _r: None)
         ),
         operation_store=OperationStore(tmp_path / "state.db"),
@@ -356,6 +373,60 @@ def test_mcp_send_message_drops_server_local_files_arg(
     assert result["isError"] is False
     assert len(backend.sent) == 1
     assert backend.sent[0]["files"] == ()
+
+
+def test_mcp_edit_message_edits_via_backend(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    # A wildcard write rule plus edit_only_session_messages: false lets the
+    # tool edit an arbitrary id through the backend.
+    backend = FakeEditBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"write\"\n"
+        "    edit_only_session_messages: false\n",
+    )
+    with _client(config_yaml, tmp_path, edit_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_edit",
+            {"telegram_chat_id": -100123, "message_id": 5, "text": "patched"},
+        )
+
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload["telegram_message_id"] == 5
+    assert payload["text"] == "patched"
+    assert backend.calls == [
+        {"chat_id": -100123, "message_id": 5, "text": "patched"}
+    ]
+
+
+def test_mcp_edit_message_session_limit_blocks_unsent(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    # Default edit_only_session_messages (true) + fresh registry -> the unsent
+    # id is rejected as edit_forbidden.
+    backend = FakeEditBackend()
+    with _client(minimal_config_yaml, tmp_path, edit_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_edit",
+            {"telegram_chat_id": -100123, "message_id": 999, "text": "x"},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "edit_forbidden"' in text
+    assert backend.calls == []
 
 
 def test_mcp_tool_maps_access_denied_to_actionable_error(

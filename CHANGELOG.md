@@ -5,6 +5,7 @@
 
 ### Features
 
+- Messages edit domain op + edit_only_session_messages gate
 - Wire folder-membership cache into authorizer (read-through, stale fallback)
 - Membership cache table + store (variant C storage)
 - Build folder membership without get_entity (variant A)
