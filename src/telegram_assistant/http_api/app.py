@@ -659,6 +659,23 @@ def create_app(
                             fmc.clear()
                         except Exception:
                             pass
+                    elif getattr(new_config.telegram, "access", None) is not None:
+                        # An access policy was added via hot-reload after a
+                        # startup with `telegram.access` omitted; build the
+                        # persistent membership cache now so gated ops reuse it
+                        # instead of falling back to live fetches for the whole
+                        # process lifetime.
+                        fmc_path = (
+                            database_path
+                            if database_path is not None
+                            else default_database_path(new_config)
+                        )
+                        try:
+                            app.state.folder_membership_cache = FolderMembershipCache(
+                                fmc_path
+                            )
+                        except Exception:
+                            app.state.folder_membership_cache = None
                     if mcp_fastmcp_server is not None and new_config.mcp is not None:
                         configure_mcp_tools(
                             mcp_fastmcp_server,

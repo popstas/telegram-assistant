@@ -166,6 +166,39 @@ async def test_search_minutes_excludes_messages_without_date() -> None:
 
 
 @pytest.mark.asyncio
+async def test_search_minutes_excludes_messages_with_unparseable_date() -> None:
+    now = dt.datetime(2026, 6, 6, 12, 0, 0, tzinfo=dt.UTC)
+    backend = FakeSearchBackend(
+        [
+            _msg_at(2, now - dt.timedelta(minutes=1)),
+            RecentMessage(
+                id=1, sender="x", date="not-a-timestamp", reply_to=None, text="bad date"
+            ),
+        ]
+    )
+    out = await search_messages(
+        backend=backend, chat_id=42, query="needle", minutes=10, now=now
+    )
+    assert [m.id for m in out] == [2]
+
+
+@pytest.mark.asyncio
+async def test_search_minutes_treats_naive_now_as_utc() -> None:
+    naive_now = dt.datetime(2026, 6, 6, 12, 0, 0)  # noqa: DTZ001 — naive on purpose
+    aware_now = naive_now.replace(tzinfo=dt.UTC)
+    backend = FakeSearchBackend(
+        [
+            _msg_at(3, aware_now - dt.timedelta(minutes=2)),  # inside window
+            _msg_at(1, aware_now - dt.timedelta(minutes=30)),  # outside
+        ]
+    )
+    out = await search_messages(
+        backend=backend, chat_id=42, query="needle", minutes=10, now=naive_now
+    )
+    assert [m.id for m in out] == [3]
+
+
+@pytest.mark.asyncio
 async def test_search_minutes_none_returns_all() -> None:
     backend = FakeSearchBackend(_messages(3))
     out = await search_messages(backend=backend, chat_id=42, query="needle", minutes=None)
