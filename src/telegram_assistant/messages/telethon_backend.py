@@ -14,10 +14,16 @@ imports. Two adapters live here:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from telegram_assistant.messages.service import RecentMessage
 from telegram_assistant.telegram_client.errors import translate_flood_wait
+
+if TYPE_CHECKING:
+    from telegram_assistant.messages.media_download import (
+        DownloadedMedia,
+        MediaInfo,
+    )
 
 
 def _media_summary(media: Any) -> str:
@@ -311,6 +317,70 @@ class TelethonPinBackend:
             raise translate_flood_wait(exc) from exc
 
 
+class TelethonMediaDownloadBackend:
+    """Adapter from the Telethon ``TelegramClient`` to :class:`MediaDownloadBackend`.
+
+    ``probe_media`` fetches the message and reports its media metadata (name,
+    size, MIME) via Telethon's ``message.file`` without transferring bytes;
+    ``None`` is returned for a text-only or missing message. ``download_media``
+    fetches the message then calls ``download_media(msg, file=target_path)`` and
+    reports the actually-written path/size/MIME. ``FloodWaitError`` is translated
+    so the worker queue can pause-and-retry rather than mark a generic failure.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def _get_message(self, chat_id: int, message_id: int) -> Any:
+        entity = await self._client.get_input_entity(chat_id)
+        return await self._client.get_messages(entity, ids=message_id)
+
+    async def probe_media(
+        self, *, chat_id: int, message_id: int
+    ) -> MediaInfo | None:
+        from telegram_assistant.messages.media_download import MediaInfo
+
+        try:
+            msg = await self._get_message(chat_id, message_id)
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        if msg is None or getattr(msg, "media", None) is None:
+            return None
+        file = getattr(msg, "file", None)
+        return MediaInfo(
+            filename=getattr(file, "name", None) if file is not None else None,
+            size=getattr(file, "size", None) if file is not None else None,
+            mime=getattr(file, "mime_type", None) if file is not None else None,
+        )
+
+    async def download_media(
+        self, *, chat_id: int, message_id: int, target_path: str
+    ) -> DownloadedMedia:
+        from telegram_assistant.messages.media_download import DownloadedMedia
+
+        try:
+            msg = await self._get_message(chat_id, message_id)
+            if msg is None or getattr(msg, "media", None) is None:
+                raise ValueError(
+                    f"message {message_id} in chat {chat_id} has no downloadable media"
+                )
+            saved = await self._client.download_media(msg, file=target_path)
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        if saved is None:
+            raise ValueError(
+                f"download of message {message_id} in chat {chat_id} produced no file"
+            )
+        import os
+
+        file = getattr(msg, "file", None)
+        return DownloadedMedia(
+            path=str(saved),
+            size=os.path.getsize(saved),
+            mime=getattr(file, "mime_type", None) if file is not None else None,
+        )
+
+
 class TelethonForwardBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`ForwardBackend`.
 
@@ -351,5 +421,6 @@ __all__ = [
     "TelethonEditBackend",
     "TelethonReactionBackend",
     "TelethonPinBackend",
+    "TelethonMediaDownloadBackend",
     "TelethonForwardBackend",
 ]
