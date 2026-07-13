@@ -199,6 +199,29 @@ class FakeEditBackend:
         return message_id
 
 
+class FakePinBackend:
+    def __init__(self) -> None:
+        self.pins: list[dict[str, Any]] = []
+        self.unpins: list[dict[str, Any]] = []
+
+    async def pin_message(
+        self, *, chat_id: int, message_id: int, silent: bool, pm_oneside: bool
+    ) -> None:
+        self.pins.append(
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "silent": silent,
+                "pm_oneside": pm_oneside,
+            }
+        )
+
+    async def unpin_message(
+        self, *, chat_id: int, message_id: int | None
+    ) -> None:
+        self.unpins.append({"chat_id": chat_id, "message_id": message_id})
+
+
 def _client(
     config_yaml: str,
     tmp_path: Path,
@@ -207,6 +230,7 @@ def _client(
     message_backend: FakeMessageBackend | None = None,
     delete_backend: FakeDeleteBackend | None = None,
     edit_backend: FakeEditBackend | None = None,
+    pin_backend: FakePinBackend | None = None,
     group_backend: FakeLayoutBackend | None = None,
     topic_backend: FakeTopicBackend | None = None,
     member_backend: FakeMemberBackend | None = None,
@@ -252,6 +276,11 @@ def _client(
         edit_backend_factory=(
             (lambda _r: edit_backend)
             if edit_backend is not None
+            else (lambda _r: None)
+        ),
+        pin_backend_factory=(
+            (lambda _r: pin_backend)
+            if pin_backend is not None
             else (lambda _r: None)
         ),
         operation_store=OperationStore(tmp_path / "state.db"),
@@ -427,6 +456,108 @@ def test_mcp_edit_message_session_limit_blocks_unsent(
     text = result["content"][0]["text"]
     assert '"error": "edit_forbidden"' in text
     assert backend.calls == []
+
+
+def test_mcp_pin_message_pins_via_backend(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakePinBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"write\"\n",
+    )
+    with _client(config_yaml, tmp_path, pin_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_pin",
+            {"telegram_chat_id": -100123, "message_id": 5, "silent": True},
+        )
+
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload["telegram_message_id"] == 5
+    assert payload["silent"] is True
+    assert backend.pins == [
+        {"chat_id": -100123, "message_id": 5, "silent": True, "pm_oneside": False}
+    ]
+
+
+def test_mcp_pin_message_denied_without_write(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakePinBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"read\"\n",
+    )
+    with _client(config_yaml, tmp_path, pin_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_pin",
+            {"telegram_chat_id": -100123, "message_id": 5},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "access_denied"' in text
+    assert backend.pins == []
+
+
+def test_mcp_unpin_all_via_backend(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakePinBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"write\"\n",
+    )
+    with _client(config_yaml, tmp_path, pin_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_unpin",
+            {"telegram_chat_id": -100123, "unpin_all": True},
+        )
+
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload["unpinned_all"] is True
+    assert payload["telegram_message_id"] is None
+    assert backend.unpins == [{"chat_id": -100123, "message_id": None}]
+
+
+def test_mcp_unpin_requires_id_or_all(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakePinBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"write\"\n",
+    )
+    with _client(config_yaml, tmp_path, pin_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_unpin",
+            {"telegram_chat_id": -100123},
+        )
+
+    assert result["isError"] is True
+    assert backend.unpins == []
 
 
 def test_mcp_tool_maps_access_denied_to_actionable_error(

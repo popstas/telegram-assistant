@@ -215,15 +215,15 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 7: pin/unpin surfaces (CLI + HTTP + MCP)
 
-- [ ] CLI `messages pin` (`--message-id`, `--silent`, `--pm-oneside`, `--dry-run`) and
+- [x] CLI `messages pin` (`--message-id`, `--silent`, `--pm-oneside`, `--dry-run`) and
       `messages unpin` (`--message-id` optional, `--all` for unpin-all, `--dry-run`) with the
       standard target selector; `_build_pin_backends(config_path)`
-- [ ] HTTP `POST /telegram/messages/pin` and `/telegram/messages/unpin` with bodies +
+- [x] HTTP `POST /telegram/messages/pin` and `/telegram/messages/unpin` with bodies +
       `_pin_backend_or_503`; factory + `create_app` param + `app.state.pin_backend_factory`
-- [ ] MCP tools `telegram_messages_pin` / `telegram_messages_unpin` + `EXPECTED_TOOL_NAMES`
-- [ ] SKILL.md catalog rows for `messages pin` and `messages unpin`
-- [ ] write tests: CLI/HTTP/MCP surface tests incl. dry-run and 503 path
-- [ ] run tests — must pass before task 8
+- [x] MCP tools `telegram_messages_pin` / `telegram_messages_unpin` + `EXPECTED_TOOL_NAMES`
+- [x] SKILL.md catalog rows for `messages pin` and `messages unpin`
+- [x] write tests: CLI/HTTP/MCP surface tests incl. dry-run and 503 path
+- [x] run tests — must pass before task 8
 
 ### Task 8: `messages download` domain op + adapter (READ gate)
 
