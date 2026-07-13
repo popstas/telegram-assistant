@@ -162,26 +162,26 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 4: `messages edit` domain op + `edit_only_session_messages` gate
 
-- [ ] create `messages/editing.py` modeled on `reactions.py`: `EditBackend` Protocol
+- [x] create `messages/editing.py` modeled on `reactions.py`: `EditBackend` Protocol
       (`edit_message(chat_id, message_id, text) -> EditResult` data), frozen
       `MessageEditRequest`/`MessageEditResult` (+`to_dict()`), service fn
       `edit_message(backend, *, request, authorizer, sent_registry, only_session_messages)`
       — validate → `authorizer.require(chat_id, WRITE)` → session-gate via
       `sent_registry.contains(chat_id, message_id)` raising `MessageEditForbidden` → dry_run
       short-circuit → backend
-- [ ] config: `AccessConfig.edit_only_session_messages: bool = True` and per-rule
+- [x] config: `AccessConfig.edit_only_session_messages: bool = True` and per-rule
       `AccessRule.edit_only_session_messages: bool | None` in `config/models.py`
-- [ ] authorizer: `edit_only_session_messages(chat_id, *, default, folder_memberships)`
+- [x] authorizer: `edit_only_session_messages(chat_id, *, default, folder_memberships)`
       mirroring the delete resolution exactly (chat > folder > all > policy default,
       restrictive-`true` wins on same level; extend `_ensure_index` with edit-only maps)
-- [ ] adapter `TelethonEditBackend` in `messages/telethon_backend.py` using
+- [x] adapter `TelethonEditBackend` in `messages/telethon_backend.py` using
       `client.edit_message`; wrap in `translate_flood_wait`; surface Telegram edit
       restrictions (not-own-message, ~48h edit window, unmodified text) as clear domain errors
-- [ ] write tests: service success/dry-run, WRITE denial, session-gate forbidden (registry
+- [x] write tests: service success/dry-run, WRITE denial, session-gate forbidden (registry
       miss) and pass (registry hit), `edit_only_session_messages: false` policy and per-rule
       override precedence + restrictive-wins (mirror `test_messages_delete.py` /
       `test_access.py` cases), adapter error translation
-- [ ] run tests — must pass before task 5
+- [x] run tests — must pass before task 5
 
 ### Task 5: `messages edit` surfaces (CLI + HTTP + MCP)
 

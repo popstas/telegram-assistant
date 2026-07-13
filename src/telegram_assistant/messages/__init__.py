@@ -17,6 +17,14 @@ from telegram_assistant.messages.downloads import (
     download_url_to_temp,
     make_url_downloader,
 )
+from telegram_assistant.messages.editing import (
+    EditBackend,
+    MessageEditForbidden,
+    MessageEditRejected,
+    MessageEditRequest,
+    MessageEditResult,
+    edit_message,
+)
 from telegram_assistant.messages.forwarding import (
     ForwardBackend,
     ForwardMessagesRequest,
@@ -71,6 +79,12 @@ __all__ = [
     "Fetcher",
     "DeleteMessagesRequest",
     "DeleteMessagesResult",
+    "EditBackend",
+    "MessageEditForbidden",
+    "MessageEditRejected",
+    "MessageEditRequest",
+    "MessageEditResult",
+    "edit_message",
     "ForwardBackend",
     "ForwardMessagesRequest",
     "ForwardMessagesResult",

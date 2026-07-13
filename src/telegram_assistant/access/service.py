@@ -174,6 +174,11 @@ class Authorizer:
         self._default_delete_only: bool | None = None
         self._chat_delete_only: dict[int, bool] = {}
         self._folder_delete_only: dict[str, bool] = {}
+        # Per-level ``edit_only_session_messages`` overrides, resolved with the
+        # exact same specificity/restrictive-wins rules as the delete maps above.
+        self._default_edit_only: bool | None = None
+        self._chat_edit_only: dict[int, bool] = {}
+        self._folder_edit_only: dict[str, bool] = {}
         self._memberships: dict[int, set[str]] | None = None
 
     @property
@@ -190,8 +195,11 @@ class Authorizer:
         default_delete_only: bool | None = None
         chat_delete_only: dict[int, bool] = {}
         folder_delete_only: dict[str, bool] = {}
+        default_edit_only: bool | None = None
+        chat_edit_only: dict[int, bool] = {}
+        folder_edit_only: dict[str, bool] = {}
 
-        def _merge_delete_only(existing: bool | None, new: bool) -> bool:
+        def _merge_only(existing: bool | None, new: bool) -> bool:
             # Restrictive (True) wins on conflict within a level.
             return new if existing is None else (existing or new)
 
@@ -199,18 +207,25 @@ class Authorizer:
             levels = {
                 _PERMISSION_TO_LEVEL[perm] for perm in rule.effective_permissions
             }
-            override = rule.delete_only_session_messages
+            delete_override = rule.delete_only_session_messages
+            edit_override = rule.edit_only_session_messages
             if rule.all:
                 default_caps |= levels
-                if override is not None:
-                    default_delete_only = _merge_delete_only(
-                        default_delete_only, override
+                if delete_override is not None:
+                    default_delete_only = _merge_only(
+                        default_delete_only, delete_override
                     )
+                if edit_override is not None:
+                    default_edit_only = _merge_only(default_edit_only, edit_override)
             elif rule.folder is not None:
                 folder_caps.setdefault(rule.folder, set()).update(levels)
-                if override is not None:
-                    folder_delete_only[rule.folder] = _merge_delete_only(
-                        folder_delete_only.get(rule.folder), override
+                if delete_override is not None:
+                    folder_delete_only[rule.folder] = _merge_only(
+                        folder_delete_only.get(rule.folder), delete_override
+                    )
+                if edit_override is not None:
+                    folder_edit_only[rule.folder] = _merge_only(
+                        folder_edit_only.get(rule.folder), edit_override
                     )
             else:
                 refs = rule.chat_refs
@@ -222,9 +237,13 @@ class Authorizer:
                 for ref in refs:
                     resolved = await self._resolver.resolve(ref)
                     chat_caps.setdefault(resolved.chat_id, set()).update(levels)
-                    if override is not None:
-                        chat_delete_only[resolved.chat_id] = _merge_delete_only(
-                            chat_delete_only.get(resolved.chat_id), override
+                    if delete_override is not None:
+                        chat_delete_only[resolved.chat_id] = _merge_only(
+                            chat_delete_only.get(resolved.chat_id), delete_override
+                        )
+                    if edit_override is not None:
+                        chat_edit_only[resolved.chat_id] = _merge_only(
+                            chat_edit_only.get(resolved.chat_id), edit_override
                         )
         self._default_caps = default_caps
         self._chat_caps = chat_caps
@@ -232,6 +251,9 @@ class Authorizer:
         self._default_delete_only = default_delete_only
         self._chat_delete_only = chat_delete_only
         self._folder_delete_only = folder_delete_only
+        self._default_edit_only = default_edit_only
+        self._chat_edit_only = chat_edit_only
+        self._folder_edit_only = folder_edit_only
         self._built = True
 
     async def _folder_memberships(self, chat_id: int) -> set[str]:
@@ -393,6 +415,51 @@ class Authorizer:
         )
         return frozenset(caps), matched
 
+    async def _resolve_session_only(
+        self,
+        chat_id: int,
+        *,
+        which: str,
+        default: bool,
+        folder_memberships: Iterable[str] | None,
+    ) -> bool:
+        """Resolve a ``*_only_session_messages`` flag by specificity.
+
+        ``which`` selects the override maps (``"delete"`` or ``"edit"``). Starts
+        from the policy-level ``default`` and applies the most specific matching
+        rule override (chat rule > folder rule > all rule). Within one level a
+        restrictive ``True`` already won at index-build time. The override maps
+        are read *after* :meth:`_ensure_index` populates them.
+        """
+        await self._ensure_index()
+        if which == "delete":
+            default_override = self._default_delete_only
+            folder_overrides_map = self._folder_delete_only
+            chat_overrides_map = self._chat_delete_only
+        else:
+            default_override = self._default_edit_only
+            folder_overrides_map = self._folder_edit_only
+            chat_overrides_map = self._chat_edit_only
+        lookup_id = _canonical_chat_id(chat_id)
+        if folder_memberships is None:
+            memberships: Iterable[str] = await self._folder_memberships(lookup_id)
+        else:
+            memberships = set(folder_memberships)
+        effective = default
+        if default_override is not None:
+            effective = default_override
+        folder_overrides = [
+            folder_overrides_map[folder]
+            for folder in memberships
+            if folder in folder_overrides_map
+        ]
+        if folder_overrides:
+            # Multiple folders may match; restrictive (True) wins.
+            effective = any(folder_overrides)
+        if lookup_id in chat_overrides_map:
+            effective = chat_overrides_map[lookup_id]
+        return effective
+
     async def delete_only_session_messages(
         self,
         chat_id: int,
@@ -409,26 +476,34 @@ class Authorizer:
         """
         if self._config is None:
             return default
-        await self._ensure_index()
-        lookup_id = _canonical_chat_id(chat_id)
-        if folder_memberships is None:
-            memberships: Iterable[str] = await self._folder_memberships(lookup_id)
-        else:
-            memberships = set(folder_memberships)
-        effective = default
-        if self._default_delete_only is not None:
-            effective = self._default_delete_only
-        folder_overrides = [
-            self._folder_delete_only[folder]
-            for folder in memberships
-            if folder in self._folder_delete_only
-        ]
-        if folder_overrides:
-            # Multiple folders may match; restrictive (True) wins.
-            effective = any(folder_overrides)
-        if lookup_id in self._chat_delete_only:
-            effective = self._chat_delete_only[lookup_id]
-        return effective
+        return await self._resolve_session_only(
+            chat_id,
+            which="delete",
+            default=default,
+            folder_memberships=folder_memberships,
+        )
+
+    async def edit_only_session_messages(
+        self,
+        chat_id: int,
+        *,
+        default: bool,
+        folder_memberships: Iterable[str] | None = None,
+    ) -> bool:
+        """Resolve the effective ``edit_only_session_messages`` for a chat.
+
+        Mirror of :meth:`delete_only_session_messages`: chat rule > folder rule
+        > all rule > policy ``default``, restrictive ``True`` wins on same-level
+        conflict. With no active policy the ``default`` is returned unchanged.
+        """
+        if self._config is None:
+            return default
+        return await self._resolve_session_only(
+            chat_id,
+            which="edit",
+            default=default,
+            folder_memberships=folder_memberships,
+        )
 
     async def require(
         self,

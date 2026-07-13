@@ -203,6 +203,45 @@ class TelethonDeleteBackend:
         return len(message_ids)
 
 
+_EDIT_REJECTION_REASONS = {
+    "MessageAuthorRequiredError": "not_own_message",
+    "MessageEditTimeExpiredError": "edit_window_expired",
+    "MessageNotModifiedError": "not_modified",
+}
+
+
+class TelethonEditBackend:
+    """Adapter from the Telethon ``TelegramClient`` to :class:`EditBackend`.
+
+    Resolves the peer then calls ``edit_message(entity, message_id, text)``.
+    Telegram's edit restrictions — editing another user's message
+    (``MessageAuthorRequiredError``), the ~48h edit window having expired
+    (``MessageEditTimeExpiredError``), or the text being unchanged
+    (``MessageNotModifiedError``) — are translated into
+    :class:`MessageEditRejected` so surfaces map them to 4xx rather than 500.
+    ``FloodWaitError`` is translated so the worker queue can pause-and-retry.
+    Returns the (stable) edited message id.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def edit_message(
+        self, *, chat_id: int, message_id: int, text: str
+    ) -> int:
+        from telegram_assistant.messages.editing import MessageEditRejected
+
+        try:
+            entity = await self._client.get_input_entity(chat_id)
+            await self._client.edit_message(entity, message_id, text)
+        except Exception as exc:
+            reason = _EDIT_REJECTION_REASONS.get(type(exc).__name__)
+            if reason is not None:
+                raise MessageEditRejected(str(exc), reason=reason) from exc
+            raise translate_flood_wait(exc) from exc
+        return message_id
+
+
 class TelethonReactionBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`ReactionBackend`.
 
@@ -272,6 +311,7 @@ __all__ = [
     "TelethonMessageReadBackend",
     "TelethonMessageBackend",
     "TelethonDeleteBackend",
+    "TelethonEditBackend",
     "TelethonReactionBackend",
     "TelethonForwardBackend",
 ]
