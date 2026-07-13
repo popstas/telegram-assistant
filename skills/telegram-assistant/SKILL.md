@@ -702,7 +702,10 @@ never silently to get a blocked command through.
 - Required flags: exactly one chat reference, `--message-id`, and exactly one
   of `--out` / `--dir`.
 - From config: `--folder-name` default when resolving `--chat-name`. Paths are
-  server-side — the file is written on the machine running the CLI.
+  server-side — the file is written on the machine running the CLI. (The CLI is
+  local/trusted and picks the path freely; the HTTP/MCP `out_dir` is instead
+  confined to `telegram.download_root`, default the system temp dir, so a
+  remote READ-only caller cannot write to an arbitrary directory.)
 - Temp file: no (the download target is chosen by the human, not `/tmp` scratch).
 - Automation: READ-gated — it reads the message and writes a local file. Run
   `--dry-run` first (resolves + authorizes + reports the planned target path
