@@ -27,6 +27,7 @@ Following the service/backend split, the authorizer depends only on protocols
 from __future__ import annotations
 
 import enum
+import time
 from typing import TYPE_CHECKING
 
 from telegram_assistant.config.models import AccessConfig
@@ -37,6 +38,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only, avoids import cycles
 
     from telegram_assistant.entities.service import EntityResolver
     from telegram_assistant.folders.service import FolderBackend
+    from telegram_assistant.persistence.folder_cache import (
+        FolderMembershipCache,
+        MembershipMap,
+    )
 
 _log = get_logger(__name__)
 
@@ -138,6 +143,13 @@ class Authorizer:
     ids) and a ``FolderBackend`` (to discover which folders a chat belongs to).
     The rule index and the folder-membership map are built lazily and cached for
     the lifetime of the authorizer (i.e. one request).
+
+    An optional persistent :class:`FolderMembershipCache` makes the
+    folder-membership lookup read-through: when the injected policy sets
+    ``folder_cache_ttl > 0`` a still-fresh cached map is reused without any
+    Telegram round-trip (the big win for the CLI, which is one process per
+    call), an expired/missing entry is refetched and rewritten, and a fetch
+    error falls back to the stale cached map when one exists.
     """
 
     def __init__(
@@ -146,10 +158,12 @@ class Authorizer:
         *,
         resolver: EntityResolver | None = None,
         folder_backend: FolderBackend | None = None,
+        cache: FolderMembershipCache | None = None,
     ) -> None:
         self._config = config
         self._resolver = resolver
         self._folder_backend = folder_backend
+        self._cache = cache
         self._built = False
         self._default_caps: set[AccessLevel] = set()
         self._chat_caps: dict[int, set[AccessLevel]] = {}
@@ -225,36 +239,83 @@ class Authorizer:
         if not self._folder_caps:
             return set()
         if self._memberships is None:
-            self._memberships = await self._build_memberships()
+            self._memberships = await self._resolve_memberships()
         return self._memberships.get(chat_id, set())
 
-    async def _build_memberships(self) -> dict[int, set[str]]:
-        """Build the ``chat_id -> {folder_name}`` map from the folder backend.
+    async def _resolve_memberships(self) -> dict[int, set[str]]:
+        """Resolve the ``chat_id -> {folder_name}`` map, read-through the cache.
+
+        When a persistent cache is injected and the policy sets
+        ``folder_cache_ttl > 0``:
+
+        * a cached row younger than the TTL is used verbatim — no backend
+          round-trip (the CLI win: one process per call reuses the last fetch);
+        * an expired/missing entry is refetched via the folder backend and
+          written back with the current epoch;
+        * a fetch failure serves the stale cached map (logging a warning); the
+          error only propagates when nothing is cached to fall back to.
+
+        With no cache (or ``folder_cache_ttl == 0``) it always fetches, matching
+        the pre-cache behaviour.
+        """
+        ttl = self._config.folder_cache_ttl if self._config is not None else 0
+        cache = self._cache if ttl > 0 else None
+        cached: tuple[MembershipMap, float] | None = (
+            cache.load() if cache is not None else None
+        )
+        if cached is not None and (time.time() - cached[1]) < ttl:
+            return self._invert_folder_map(cached[0])
+        try:
+            folder_map = await self._fetch_folder_map()
+        except Exception as exc:
+            if cached is not None:
+                _log.warning(
+                    "folder_membership_fetch_failed_serving_stale",
+                    error=str(exc),
+                    cached_age_seconds=time.time() - cached[1],
+                )
+                return self._invert_folder_map(cached[0])
+            raise
+        if cache is not None:
+            cache.save(folder_map, time.time())
+        return self._invert_folder_map(folder_map)
+
+    async def _fetch_folder_map(self) -> MembershipMap:
+        """Fetch the ``folder_name -> {bare chat id}`` map from the backend.
 
         Prefers the fast ``list_folder_chat_ids()`` path (bare peer ids, no
         ``get_entity`` round-trips) when the injected backend exposes it, and
         falls back to scanning ``list_folders()`` for simple/fake backends that
         only implement the title-resolving surface. Ids are canonicalised to the
-        same bare form the rule index and request lookups use.
+        same bare form the rule index, request lookups, and the cache use.
         """
-        memberships: dict[int, set[str]] = {}
+        folder_map: MembershipMap = {}
         backend = self._folder_backend
         if backend is None:
-            return memberships
+            return folder_map
         list_ids = getattr(backend, "list_folder_chat_ids", None)
         if callable(list_ids):
-            folder_map = await list_ids()
-            for folder_name, chat_ids in folder_map.items():
-                for cid in chat_ids:
-                    memberships.setdefault(
-                        _canonical_chat_id(cid), set()
-                    ).add(folder_name)
+            raw = await list_ids()
+            for folder_name, chat_ids in raw.items():
+                folder_map.setdefault(folder_name, set()).update(
+                    _canonical_chat_id(cid) for cid in chat_ids
+                )
         else:
             for snapshot in await backend.list_folders():
-                for chat in snapshot.chats:
-                    memberships.setdefault(
-                        _canonical_chat_id(chat.chat_id), set()
-                    ).add(snapshot.folder_name)
+                folder_map.setdefault(snapshot.folder_name, set()).update(
+                    _canonical_chat_id(chat.chat_id) for chat in snapshot.chats
+                )
+        return folder_map
+
+    @staticmethod
+    def _invert_folder_map(folder_map: MembershipMap) -> dict[int, set[str]]:
+        """Invert ``folder_name -> {chat id}`` to ``chat id -> {folder_name}``."""
+        memberships: dict[int, set[str]] = {}
+        for folder_name, chat_ids in folder_map.items():
+            for cid in chat_ids:
+                memberships.setdefault(
+                    _canonical_chat_id(cid), set()
+                ).add(folder_name)
         return memberships
 
     def _effective_chat_caps(

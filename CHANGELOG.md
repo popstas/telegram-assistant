@@ -5,6 +5,7 @@
 
 ### Features
 
+- Membership cache table + store (variant C storage)
 - Build folder membership without get_entity (variant A)
 - access: Per-rule delete-only override
 

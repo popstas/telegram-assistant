@@ -49,14 +49,23 @@ def build_authorizer(
 
     When ``config.telegram.access`` is ``None`` this yields the allow-all no-op
     sentinel; the resolver/folder backend are only consulted lazily when the
-    policy actually references ``chat`` / ``folder`` targets.
+    policy actually references ``chat`` / ``folder`` targets. The process-global
+    :class:`FolderMembershipCache` (``app.state.folder_membership_cache``, may be
+    ``None``) is threaded in so folder-membership lookups are read-through the
+    persistent cache.
     """
     config = getattr(request.app.state, "config", None)
     access = None
     if config is not None:
         access = getattr(config.telegram, "access", None)
     resolver = resolver_optional(request)
-    return Authorizer(access, resolver=resolver, folder_backend=folder_backend)
+    cache = getattr(request.app.state, "folder_membership_cache", None)
+    return Authorizer(
+        access,
+        resolver=resolver,
+        folder_backend=folder_backend,
+        cache=cache,
+    )
 
 
 def translate_entity_error(exc: Exception) -> HTTPException | None:

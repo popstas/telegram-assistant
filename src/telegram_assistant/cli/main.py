@@ -158,17 +158,43 @@ def _raise_for_access_or_entity_error(exc: BaseException) -> None:
         raise typer.Exit(code=2) from exc
 
 
+def _cli_folder_membership_cache(config):
+    """Build the persistent folder-membership cache for a CLI invocation.
+
+    The CLI is one process per call, so without persistence every folder-gated
+    command pays for the ``GetDialogFiltersRequest`` fetch again. Returns a
+    :class:`FolderMembershipCache` on the config DB path so a fresh process
+    reuses a still-fresh map. Returns ``None`` when there is no access policy
+    (folder rules can't exist, so the cache is never consulted) or when the DB
+    can't be opened (best-effort: fall back to live fetches).
+    """
+    access = getattr(config.telegram, "access", None) if config is not None else None
+    if access is None:
+        return None
+    from telegram_assistant.persistence.folder_cache import FolderMembershipCache
+
+    try:
+        return FolderMembershipCache(default_database_path(config))
+    except Exception:
+        return None
+
+
 def _cli_authorizer(config, *, resolver=None, folder_backend=None):
     """Build an :class:`Authorizer` from loaded config for a CLI invocation.
 
     No-op sentinel when ``telegram.access`` is unset (allow-all). When a policy
     is present the caller must supply a resolver (for ``chat`` rules) and/or a
-    folder backend (for ``folder`` rules) as needed.
+    folder backend (for ``folder`` rules) as needed. A persistent
+    :class:`FolderMembershipCache` (on the config DB path) is wired in so folder
+    membership survives across CLI processes.
     """
     from telegram_assistant.access import Authorizer
 
     return Authorizer(
-        config.telegram.access, resolver=resolver, folder_backend=folder_backend
+        config.telegram.access,
+        resolver=resolver,
+        folder_backend=folder_backend,
+        cache=_cli_folder_membership_cache(config),
     )
 
 
@@ -5280,7 +5306,14 @@ def folders_add_chat(
                 )
                 chat_ref = resolved.chat_id
             authorizer = Authorizer(
-                access_cfg, resolver=resolver, folder_backend=backend
+                access_cfg,
+                resolver=resolver,
+                folder_backend=backend,
+                cache=(
+                    _cli_folder_membership_cache(_config)
+                    if _config is not None
+                    else None
+                ),
             )
             return await add_chat_to_folder(
                 backend,
@@ -5489,7 +5522,14 @@ def folders_remove_chat(
                 )
                 chat_ref = resolved.chat_id
             authorizer = Authorizer(
-                access_cfg, resolver=resolver, folder_backend=backend
+                access_cfg,
+                resolver=resolver,
+                folder_backend=backend,
+                cache=(
+                    _cli_folder_membership_cache(_config)
+                    if _config is not None
+                    else None
+                ),
             )
             return await remove_chat_from_folder(
                 backend,
