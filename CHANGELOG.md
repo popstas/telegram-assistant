@@ -22,6 +22,7 @@
 
 ### Bug Fixes
 
+- Address codex review findings
 - review: Rebuild membership cache on access hot-add + cover error/edge paths
 
 ### Documentation
