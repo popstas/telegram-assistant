@@ -227,18 +227,18 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 8: `messages download` domain op + adapter (READ gate)
 
-- [ ] create `messages/media_download.py` (name avoids clashing with existing
+- [x] create `messages/media_download.py` (name avoids clashing with existing
       `downloads.py` URL-fetcher): `MediaDownloadBackend` Protocol
       (`download_media(chat_id, message_id, target_path) -> saved path/size/mime`), frozen
       Request/Result, service fn with `authorizer.require(chat_id, READ)`, target-path
       resolution (`out` file vs `dir` + original filename), clear error when the message has
       no downloadable media, optional max-size guard (reuse limits pattern from
       `messages/attachments.py`), dry-run support
-- [ ] adapter `TelethonMediaDownloadBackend` using `client.get_messages` +
+- [x] adapter `TelethonMediaDownloadBackend` using `client.get_messages` +
       `client.download_media`; `translate_flood_wait`
-- [ ] write tests: success (file written path returned), no-media error, READ denial,
+- [x] write tests: success (file written path returned), no-media error, READ denial,
       dry-run, size-limit rejection, adapter translation
-- [ ] run tests — must pass before task 9
+- [x] run tests — must pass before task 9
 
 ### Task 9: download surfaces (CLI + HTTP + MCP)
 

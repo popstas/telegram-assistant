@@ -31,6 +31,16 @@ from telegram_assistant.messages.forwarding import (
     ForwardMessagesResult,
     forward_messages,
 )
+from telegram_assistant.messages.media_download import (
+    DownloadedMedia,
+    MediaDownloadBackend,
+    MediaDownloadRequest,
+    MediaDownloadResult,
+    MediaInfo,
+    MediaTooLargeError,
+    NoDownloadableMediaError,
+    download_media,
+)
 from telegram_assistant.messages.pinning import (
     PinBackend,
     PinMessageRequest,
@@ -97,6 +107,14 @@ __all__ = [
     "ForwardBackend",
     "ForwardMessagesRequest",
     "ForwardMessagesResult",
+    "DownloadedMedia",
+    "MediaDownloadBackend",
+    "MediaDownloadRequest",
+    "MediaDownloadResult",
+    "MediaInfo",
+    "MediaTooLargeError",
+    "NoDownloadableMediaError",
+    "download_media",
     "MassSendItemResult",
     "MassSendRequest",
     "MassSendResult",
