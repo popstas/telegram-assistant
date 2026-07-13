@@ -148,6 +148,17 @@ class AccessConfig(BaseModel):
             "the delete permission covers."
         ),
     )
+    folder_cache_ttl: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "TTL in seconds for the persistent folder-membership cache used by "
+            "folder-scoped access rules. The membership map (chat -> folders) is "
+            "read from SQLite when fresh (age < ttl) and refetched otherwise, "
+            "avoiding a full folder scan on every gated operation. Set 0 to "
+            "disable persistent caching (always fetch)."
+        ),
+    )
 
 
 class TelegramConfig(BaseModel):

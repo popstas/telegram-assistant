@@ -1,6 +1,7 @@
 """SQLite persistence and idempotency layer."""
 
 from telegram_assistant.persistence import idempotency
+from telegram_assistant.persistence.folder_cache import FolderMembershipCache
 from telegram_assistant.persistence.models import (
     TERMINAL_STATUSES,
     BeginResult,
@@ -23,6 +24,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "TERMINAL_STATUSES",
     "BeginResult",
+    "FolderMembershipCache",
     "IdempotencyConflictError",
     "OperationItemRecord",
     "OperationNotFoundError",
