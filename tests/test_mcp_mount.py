@@ -228,6 +228,7 @@ EXPECTED_TOOL_NAMES = {
     "telegram_messages_pin",
     "telegram_messages_react",
     "telegram_messages_recent",
+    "telegram_messages_search",
     "telegram_messages_send",
     "telegram_messages_unpin",
     "telegram_notifications_mute",

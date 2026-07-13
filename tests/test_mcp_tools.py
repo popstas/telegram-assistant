@@ -35,6 +35,32 @@ class FakeReadBackend:
         return self._messages[:limit]
 
 
+class FakeSearchBackend:
+    def __init__(self, messages: list[RecentMessage]) -> None:
+        self._messages = messages
+        self.calls: list[dict[str, Any]] = []
+
+    async def search_messages(
+        self,
+        *,
+        chat_id: int,
+        query: str,
+        from_user: str | int | None = None,
+        limit: int = 20,
+        topic_id: int | None = None,
+    ) -> list[RecentMessage]:
+        self.calls.append(
+            {
+                "chat_id": chat_id,
+                "query": query,
+                "from_user": from_user,
+                "limit": limit,
+                "topic_id": topic_id,
+            }
+        )
+        return self._messages[:limit]
+
+
 class FakeMessageBackend:
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
@@ -247,6 +273,7 @@ def _client(
     tmp_path: Path,
     *,
     read_backend: FakeReadBackend | None = None,
+    search_backend: FakeSearchBackend | None = None,
     message_backend: FakeMessageBackend | None = None,
     delete_backend: FakeDeleteBackend | None = None,
     edit_backend: FakeEditBackend | None = None,
@@ -283,6 +310,9 @@ def _client(
         ),
         message_read_backend_factory=(
             (lambda _r: read_backend) if read_backend is not None else (lambda _r: None)
+        ),
+        search_backend_factory=(
+            (lambda _r: search_backend) if search_backend is not None else (lambda _r: None)
         ),
         message_backend_factory=(
             (lambda _r: message_backend)
@@ -365,6 +395,95 @@ def test_mcp_recent_messages_reads_via_backend(
     assert payload["count"] == 1
     assert payload["messages"][0]["text"] == "one"
     assert backend.calls == [{"chat_id": -100123, "limit": 1}]
+
+
+def test_mcp_search_messages_via_backend(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeSearchBackend(_messages())
+    with _client(minimal_config_yaml, tmp_path, search_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_search",
+            {"chat_id": -100123, "query": "two", "limit": 5, "from_user": "@bob"},
+        )
+
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload["telegram_chat_id"] == -100123
+    assert payload["query"] == "two"
+    assert payload["count"] == 2
+    assert backend.calls == [
+        {
+            "chat_id": -100123,
+            "query": "two",
+            "from_user": "@bob",
+            "limit": 5,
+            "topic_id": None,
+        }
+    ]
+
+
+def test_mcp_search_denied_without_read(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeSearchBackend(_messages())
+    config_yaml = _with_access(
+        minimal_config_yaml, "    rules:\n      - all: true\n        permission: write\n"
+    )
+    with _client(config_yaml, tmp_path, search_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_search",
+            {"chat_id": -100123, "query": "two"},
+        )
+
+    assert result["isError"] is True
+    assert backend.calls == []
+
+
+def test_mcp_search_requires_exactly_one_ref(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeSearchBackend(_messages())
+    with _client(minimal_config_yaml, tmp_path, search_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_search",
+            {"query": "two"},
+        )
+
+    assert result["isError"] is True
+    assert backend.calls == []
+
+
+def test_mcp_search_503_without_backend(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    with _client(minimal_config_yaml, tmp_path) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_search",
+            {"chat_id": -100123, "query": "two"},
+        )
+
+    assert result["isError"] is True
 
 
 def test_mcp_send_message_uses_operation_store_idempotency(

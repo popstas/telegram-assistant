@@ -3935,6 +3935,193 @@ def messages_recent(
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
 
 
+def _build_search_backends(config_path: Path | None):
+    """Open the Telethon-backed search + folder backends + resolver for searches.
+
+    Mirrors :func:`_build_message_read_backends` but returns the search backend
+    used by the search op plus a shared entity resolver so ``--entity`` works.
+    Tests monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.entities import TelethonEntityResolver
+        from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonSearchBackend,
+        )
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonSearchBackend(client),
+            TelethonFolderBackend(client),
+            TelethonEntityResolver(client),
+        )
+
+    return config, manager, _open
+
+
+@messages_app.command("search")
+def messages_search(
+    query: str = typer.Option(
+        ...,
+        "--query",
+        help="Text to search for inside the chat (server-side search).",
+    ),
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id to search.",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, t.me/invite link, "
+        "phone, or exact title) resolved via the shared resolver.",
+    ),
+    from_user: str | None = typer.Option(
+        None,
+        "--from",
+        help="Optional sender reference to narrow the search to one user.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    limit: int = typer.Option(
+        20,
+        "--limit",
+        help="Maximum number of matches to return (default 20).",
+    ),
+    minutes: int | None = typer.Option(
+        None,
+        "--minutes",
+        help="Only return matches newer than now - MINUTES (composed with --limit).",
+    ),
+    topic_id: int | None = typer.Option(
+        None,
+        "--topic-id",
+        help="Scope the search to one forum topic id.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Text-search a chat's messages, newest-first (READ-gated)."""
+    from telegram_assistant.folders import (
+        FolderError,
+        resolve_chat_in_folder,
+    )
+    from telegram_assistant.messages import search_messages
+
+    refs = sum([chat_id is not None, chat_name is not None, entity is not None])
+    if refs != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if not query or not query.strip():
+        typer.echo("--query must be a non-empty string", err=True)
+        raise typer.Exit(code=2)
+    if limit <= 0:
+        typer.echo("--limit must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+    if minutes is not None and minutes <= 0:
+        typer.echo("--minutes must be a positive integer", err=True)
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_search_backends(config_path)
+
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _run() -> dict[str, object]:
+        try:
+            search_backend, folder_backend, resolver = await open_backends()
+            if entity is not None:
+                resolved_chat_id = (await resolver.resolve(entity)).chat_id
+            elif chat_id is not None:
+                resolved_chat_id = chat_id
+            else:
+                resolved = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=resolved_folder_name or "",
+                    chat_name=chat_name or "",
+                    folder_id=effective_folder_id,
+                )
+                resolved_chat_id = resolved.chat_id
+
+            authorizer = _cli_authorizer(
+                config, resolver=resolver, folder_backend=folder_backend
+            )
+            messages = await search_messages(
+                backend=search_backend,
+                chat_id=resolved_chat_id,
+                query=query,
+                from_user=from_user,
+                limit=limit,
+                minutes=minutes,
+                topic_id=topic_id,
+                authorizer=authorizer,
+            )
+            return {
+                "telegram_chat_id": resolved_chat_id,
+                "query": query,
+                "from_user": from_user,
+                "limit": limit,
+                "minutes": minutes,
+                "topic_id": topic_id,
+                "count": len(messages),
+                "messages": [m.to_dict() for m in messages],
+            }
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"messages search failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
 def _build_reaction_backends(config_path: Path | None):
     """Open the Telethon-backed reaction + folder backends.
 

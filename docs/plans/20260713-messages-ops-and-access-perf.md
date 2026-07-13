@@ -269,15 +269,15 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 11: search surfaces (CLI + HTTP + MCP)
 
-- [ ] CLI `messages search`: `--query` (required), `--from`, `--limit`, `--minutes`,
+- [x] CLI `messages search`: `--query` (required), `--from`, `--limit`, `--minutes`,
       `--topic-id`, target selector (no `--dry-run`: read-only like `recent`)
-- [ ] HTTP `GET /telegram/messages/search` (query params mirroring `recent`) +
+- [x] HTTP `GET /telegram/messages/search` (query params mirroring `recent`) +
       `_search_backend_or_503` + factory + `app.state` wiring
-- [ ] MCP tool `telegram_messages_search` (read-only annotations like recent) +
+- [x] MCP tool `telegram_messages_search` (read-only annotations like recent) +
       `EXPECTED_TOOL_NAMES`
-- [ ] SKILL.md catalog row for `messages search`
-- [ ] write tests: CLI/HTTP/MCP surfaces incl. 503 and validation errors
-- [ ] run tests — must pass before task 12
+- [x] SKILL.md catalog row for `messages search`
+- [x] write tests: CLI/HTTP/MCP surfaces incl. 503 and validation errors
+- [x] run tests — must pass before task 12
 
 ### Task 12: Verify acceptance criteria
 
