@@ -17,6 +17,7 @@
 
 ### Task
 
+- Clear completed items from TODO
 - Queue messages edit/pin/download/search tasks
 - Add slow-send investigation (folder-rule list_folders)
 
