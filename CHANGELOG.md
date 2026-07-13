@@ -5,6 +5,7 @@
 
 ### Features
 
+- Messages download domain op + Telethon adapter (READ gate)
 - Messages pin/unpin surfaces (CLI + HTTP + MCP)
 - Messages pin/unpin domain op + Telethon adapter
 - Messages edit surfaces (CLI + HTTP + MCP)

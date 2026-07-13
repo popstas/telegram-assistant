@@ -44,6 +44,7 @@ from telegram_assistant.messages import (
     DeleteBackend,
     EditBackend,
     ForwardBackend,
+    MediaDownloadBackend,
     MessageBackend,
     MessageReadBackend,
     PinBackend,
@@ -72,6 +73,7 @@ ForwardBackendFactory = Callable[[Request], ForwardBackend | None]
 DeleteBackendFactory = Callable[[Request], DeleteBackend | None]
 EditBackendFactory = Callable[[Request], EditBackend | None]
 PinBackendFactory = Callable[[Request], PinBackend | None]
+DownloadBackendFactory = Callable[[Request], MediaDownloadBackend | None]
 NotificationBackendFactory = Callable[[Request], NotificationBackend | None]
 ResolverFactory = Callable[[Request], EntityResolver | None]
 
@@ -381,6 +383,31 @@ def _default_pin_backend_factory(
     return _factory
 
 
+def _default_download_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> DownloadBackendFactory:
+    """Build a Telethon-backed message media-download backend factory.
+
+    Mirrors :func:`_default_message_read_backend_factory`: returns ``None``
+    until a Telethon client is available so the download endpoint can return
+    503.
+    """
+
+    def _factory(_request: Request) -> MediaDownloadBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonMediaDownloadBackend,
+        )
+
+        return TelethonMediaDownloadBackend(client)
+
+    return _factory
+
+
 def _default_notification_backend_factory(
     session_manager: TelethonSessionManager | None,
 ) -> NotificationBackendFactory:
@@ -445,6 +472,7 @@ def create_app(
     delete_backend_factory: DeleteBackendFactory | None = None,
     edit_backend_factory: EditBackendFactory | None = None,
     pin_backend_factory: PinBackendFactory | None = None,
+    download_backend_factory: DownloadBackendFactory | None = None,
     notification_backend_factory: NotificationBackendFactory | None = None,
     resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
@@ -722,6 +750,11 @@ def create_app(
         pin_backend_factory
         if pin_backend_factory is not None
         else _default_pin_backend_factory(session_manager)
+    )
+    app.state.download_backend_factory = (
+        download_backend_factory
+        if download_backend_factory is not None
+        else _default_download_backend_factory(session_manager)
     )
     app.state.notification_backend_factory = (
         notification_backend_factory
