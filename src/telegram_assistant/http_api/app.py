@@ -42,6 +42,7 @@ from telegram_assistant.http_api.topics import build_router as build_topics_rout
 from telegram_assistant.members import MemberAddBackend, MemberRemoveBackend
 from telegram_assistant.messages import (
     DeleteBackend,
+    EditBackend,
     ForwardBackend,
     MessageBackend,
     MessageReadBackend,
@@ -68,6 +69,7 @@ MessageReadBackendFactory = Callable[[Request], MessageReadBackend | None]
 ReactionBackendFactory = Callable[[Request], ReactionBackend | None]
 ForwardBackendFactory = Callable[[Request], ForwardBackend | None]
 DeleteBackendFactory = Callable[[Request], DeleteBackend | None]
+EditBackendFactory = Callable[[Request], EditBackend | None]
 NotificationBackendFactory = Callable[[Request], NotificationBackend | None]
 ResolverFactory = Callable[[Request], EntityResolver | None]
 
@@ -329,6 +331,30 @@ def _default_delete_backend_factory(
     return _factory
 
 
+def _default_edit_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> EditBackendFactory:
+    """Build a Telethon-backed message-edit backend factory.
+
+    Mirrors :func:`_default_delete_backend_factory`: returns ``None`` until a
+    Telethon client is available so the edit endpoint can return 503.
+    """
+
+    def _factory(_request: Request) -> EditBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonEditBackend,
+        )
+
+        return TelethonEditBackend(client)
+
+    return _factory
+
+
 def _default_notification_backend_factory(
     session_manager: TelethonSessionManager | None,
 ) -> NotificationBackendFactory:
@@ -391,6 +417,7 @@ def create_app(
     reaction_backend_factory: ReactionBackendFactory | None = None,
     forward_backend_factory: ForwardBackendFactory | None = None,
     delete_backend_factory: DeleteBackendFactory | None = None,
+    edit_backend_factory: EditBackendFactory | None = None,
     notification_backend_factory: NotificationBackendFactory | None = None,
     resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
@@ -658,6 +685,11 @@ def create_app(
         delete_backend_factory
         if delete_backend_factory is not None
         else _default_delete_backend_factory(session_manager)
+    )
+    app.state.edit_backend_factory = (
+        edit_backend_factory
+        if edit_backend_factory is not None
+        else _default_edit_backend_factory(session_manager)
     )
     app.state.notification_backend_factory = (
         notification_backend_factory

@@ -185,20 +185,20 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 5: `messages edit` surfaces (CLI + HTTP + MCP)
 
-- [ ] CLI `messages edit` in `cli/main.py`: `--message-id`, `--text`, target selector
+- [x] CLI `messages edit` in `cli/main.py`: `--message-id`, `--text`, target selector
       (exactly one of `--chat-id`/`--chat-name`/`--entity`), `--dry-run`;
       `_build_edit_backends(config_path)`; `AccessDenied`/forbidden → exit 3
-- [ ] HTTP `POST /telegram/messages/edit` in `http_api/messages.py`: `EditBody`,
+- [x] HTTP `POST /telegram/messages/edit` in `http_api/messages.py`: `EditBody`,
       `_edit_backend_or_503`, error mapping (403/404/409/400/502) like delete
-- [ ] factory: `_default_edit_backend_factory` + `create_app` param +
+- [x] factory: `_default_edit_backend_factory` + `create_app` param +
       `app.state.edit_backend_factory` in `http_api/app.py`
-- [ ] MCP tool `telegram_messages_edit` in `http_api/mcp/tools.py` (WRITE_IDEMPOTENT,
+- [x] MCP tool `telegram_messages_edit` in `http_api/mcp/tools.py` (WRITE_IDEMPOTENT,
       structured_output) + add to `EXPECTED_TOOL_NAMES` in `tests/test_mcp_mount.py`
-- [ ] add `messages | edit` row to the SKILL.md catalog table (keeps
+- [x] add `messages | edit` row to the SKILL.md catalog table (keeps
       `test_skill_inventory.py` green)
-- [ ] write tests: CLI (happy, dry-run, exit codes), HTTP (200/403/503/400), MCP tool
+- [x] write tests: CLI (happy, dry-run, exit codes), HTTP (200/403/503/400), MCP tool
       registration + call — follow `test_messages_delete_surfaces.py`
-- [ ] run tests — must pass before task 6
+- [x] run tests — must pass before task 6
 
 ### Task 6: `messages pin` / `messages unpin` domain op + adapter
 

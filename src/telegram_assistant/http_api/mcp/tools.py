@@ -52,6 +52,7 @@ from telegram_assistant.health import collect_health
 from telegram_assistant.http_api.access import (
     build_authorizer,
     delete_only_session_messages_default,
+    edit_only_session_messages_default,
     resolve_entity_chat_id,
     sent_message_registry,
     translate_access_error,
@@ -87,10 +88,12 @@ from telegram_assistant.http_api.members import (
 )
 from telegram_assistant.http_api.messages import (
     DeleteBody,
+    EditBody,
     ForwardBody,
     MessageSendBody,
     ReactionBody,
     _delete_backend_or_503,
+    _edit_backend_or_503,
     _forward_backend_or_503,
     _message_backend_or_503,
     _reaction_backend_or_503,
@@ -163,6 +166,9 @@ from telegram_assistant.messages import (
     ForwardMessagesRequest,
     MassSendRequest,
     MessageDeleteForbidden,
+    MessageEditForbidden,
+    MessageEditRejected,
+    MessageEditRequest,
     MessageSendFailed,
     MessageSendNeedsReview,
     MessageSendPending,
@@ -170,6 +176,7 @@ from telegram_assistant.messages import (
     SendMessageRequest,
     SendReactionRequest,
     delete_messages,
+    edit_message,
     forward_messages,
     get_recent_messages,
     make_url_downloader,
@@ -477,6 +484,20 @@ def _raise_from_exception(exc: Exception) -> NoReturn:
             status_code=status.HTTP_403_FORBIDDEN,
             message=str(exc),
             detail={"message_ids": exc.message_ids},
+        )
+    if isinstance(exc, MessageEditForbidden):
+        _raise_tool_error(
+            code="edit_forbidden",
+            status_code=status.HTTP_403_FORBIDDEN,
+            message=str(exc),
+            detail={"message_id": exc.message_id},
+        )
+    if isinstance(exc, MessageEditRejected):
+        _raise_tool_error(
+            code="edit_rejected",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            message=str(exc),
+            detail={"reason": exc.reason},
         )
     if isinstance(exc, AttachmentError | ScheduleError | ValueError):
         _raise_tool_error(
@@ -833,6 +854,48 @@ async def _resolve_delete(request: _McpRequest, body: DeleteBody) -> dict[str, A
     return result.to_dict()
 
 
+async def _resolve_edit(request: _McpRequest, body: EditBody) -> dict[str, Any]:
+    backend = _edit_backend_or_503(request)  # type: ignore[arg-type]
+    if body.entity is not None:
+        telegram_chat_id = await resolve_entity_chat_id(request, body.entity)  # type: ignore[arg-type]
+        chat_name_for_log: str | None = None
+    elif body.telegram_chat_id is not None:
+        telegram_chat_id = body.telegram_chat_id
+        chat_name_for_log = None
+    else:
+        folder_backend = _message_folder_backend_or_503(request)  # type: ignore[arg-type]
+        chat = await resolve_chat_in_folder(
+            folder_backend,
+            folder_name=body.folder_name or "",
+            chat_name=body.chat_name or "",
+            folder_id=body.folder_id,
+        )
+        telegram_chat_id = chat.chat_id
+        chat_name_for_log = chat.title
+
+    authorizer = build_authorizer(
+        request, folder_backend=_message_folder_backend_optional(request)  # type: ignore[arg-type]
+    )
+    only_session = await authorizer.edit_only_session_messages(
+        telegram_chat_id,
+        default=edit_only_session_messages_default(request),  # type: ignore[arg-type]
+    )
+    result = await edit_message(
+        backend,
+        request=MessageEditRequest(
+            telegram_chat_id=telegram_chat_id,
+            message_id=body.message_id,
+            text=body.text,
+            dry_run=body.dry_run,
+            chat_name=chat_name_for_log,
+        ),
+        authorizer=authorizer,
+        sent_registry=sent_message_registry(request),  # type: ignore[arg-type]
+        only_session_messages=only_session,
+    )
+    return result.to_dict()
+
+
 def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) -> None:
     """Register all telegram_-prefixed tools on ``server``."""
 
@@ -1041,6 +1104,42 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 force=force,
             )
             return await _resolve_delete(request, body)
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_messages_edit",
+        annotations=WRITE_IDEMPOTENT,
+        structured_output=True,
+    )
+    async def telegram_messages_edit(
+        message_id: int,
+        text: str,
+        telegram_chat_id: int | None = None,
+        entity: str | int | None = None,
+        chat_name: str | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Edit the text/caption of a sent message (WRITE-gated).
+
+        Honors ``telegram.access.edit_only_session_messages`` (default true):
+        when active, only messages this server process sent can be edited.
+        """
+        request = _request(provider)
+        try:
+            body = EditBody(
+                message_id=message_id,
+                text=text,
+                telegram_chat_id=telegram_chat_id,
+                entity=entity,
+                chat_name=chat_name,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                dry_run=dry_run,
+            )
+            return await _resolve_edit(request, body)
         except Exception as exc:
             _raise_from_exception(exc)
 
