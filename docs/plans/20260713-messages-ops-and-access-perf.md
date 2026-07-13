@@ -129,18 +129,18 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 2: Membership cache table + store (variant C storage)
 
-- [ ] add `folder_membership_cache` storage to `persistence/schema.py`: single-row table
+- [x] add `folder_membership_cache` storage to `persistence/schema.py`: single-row table
       (`id INTEGER PRIMARY KEY CHECK (id = 1)`, `payload TEXT` JSON of
       `{folder_name: [chat_id, ...]}`, `fetched_at REAL`); bump `SCHEMA_VERSION`, keep
       `bootstrap()` idempotent for existing DBs
-- [ ] add a small store class (e.g. `FolderMembershipCache` in `persistence/`) with
+- [x] add a small store class (e.g. `FolderMembershipCache` in `persistence/`) with
       `load() -> (map, fetched_at) | None`, `save(map, fetched_at)`, `clear()`, reusing
       `connect()` (WAL, busy_timeout); thread-safe like `OperationStore`
-- [ ] add config knob `telegram.access.folder_cache_ttl` (seconds, int, default `300`,
+- [x] add config knob `telegram.access.folder_cache_ttl` (seconds, int, default `300`,
       `0` disables persistent caching) to `AccessConfig` in `config/models.py`
-- [ ] write tests: save/load round-trip, clear, schema bootstrap on existing v1 DB,
+- [x] write tests: save/load round-trip, clear, schema bootstrap on existing v1 DB,
       ttl field validation/default
-- [ ] run tests — must pass before task 3
+- [x] run tests — must pass before task 3
 
 ### Task 3: Wire cache into authorizer (read-through, stale fallback, invalidation)
 

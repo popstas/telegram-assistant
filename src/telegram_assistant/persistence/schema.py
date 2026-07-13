@@ -11,7 +11,7 @@ import contextlib
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _OPERATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS operations (
@@ -58,6 +58,18 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 )
 """
 
+# Single-row cache of the folder-membership map used by folder-scoped access
+# rules. One Telegram account per deployment ⇒ one row suffices; the CHECK keeps
+# it that way. `payload` is JSON of {folder_name: [chat_id, ...]}; `fetched_at`
+# is a caller-supplied epoch used for the TTL check.
+_FOLDER_MEMBERSHIP_CACHE_DDL = """
+CREATE TABLE IF NOT EXISTS folder_membership_cache (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    payload TEXT NOT NULL,
+    fetched_at REAL NOT NULL
+)
+"""
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status)",
     "CREATE INDEX IF NOT EXISTS idx_operations_type ON operations(type)",
@@ -94,6 +106,7 @@ def bootstrap(database_path: Path) -> None:
         conn.execute(_OPERATION_ITEMS_DDL)
         conn.execute(_IDEMPOTENCY_INDEX_DDL)
         conn.execute(_META_DDL)
+        conn.execute(_FOLDER_MEMBERSHIP_CACHE_DDL)
         for stmt in _INDEXES:
             conn.execute(stmt)
         conn.execute(

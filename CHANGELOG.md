@@ -5,6 +5,7 @@
 
 ### Features
 
+- Build folder membership without get_entity (variant A)
 - access: Per-rule delete-only override
 
 ### Documentation
