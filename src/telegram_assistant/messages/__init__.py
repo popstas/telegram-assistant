@@ -56,6 +56,10 @@ from telegram_assistant.messages.reactions import (
     SendReactionResult,
     set_message_reaction,
 )
+from telegram_assistant.messages.search import (
+    SearchBackend,
+    search_messages,
+)
 from telegram_assistant.messages.sent_registry import SentMessageRegistry
 from telegram_assistant.messages.service import (
     DeleteBackend,
@@ -133,6 +137,8 @@ __all__ = [
     "unpin_message",
     "ReactionBackend",
     "RecentMessage",
+    "SearchBackend",
+    "search_messages",
     "ScheduleError",
     "SentMessageRegistry",
     "SendMessageRequest",

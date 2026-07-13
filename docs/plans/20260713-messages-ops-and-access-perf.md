@@ -256,16 +256,16 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 10: `messages search` domain op + adapter (READ gate)
 
-- [ ] create `messages/search.py`: `SearchBackend` Protocol
+- [x] create `messages/search.py`: `SearchBackend` Protocol
       (`search_messages(chat_id, query, *, from_user, limit, topic_id) -> list[RecentMessage]`),
       service fn `search_messages(...)` with `authorizer.require(chat_id, READ)`, required
       non-empty `query`, optional `minutes` time-window filtering done in the service like
       `get_recent_messages`, newest-first ordering, reuse the `RecentMessage` row shape
-- [ ] adapter `TelethonSearchBackend` using `client.iter_messages(chat, search=query,
+- [x] adapter `TelethonSearchBackend` using `client.iter_messages(chat, search=query,
       from_user=..., limit=..., reply_to=topic_id)`; `translate_flood_wait`
-- [ ] write tests: query matching via fake backend, empty-query rejection, minutes window,
+- [x] write tests: query matching via fake backend, empty-query rejection, minutes window,
       limit, READ denial, adapter arg passthrough + translation
-- [ ] run tests — must pass before task 11
+- [x] run tests — must pass before task 11
 
 ### Task 11: search surfaces (CLI + HTTP + MCP)
 

@@ -381,6 +381,63 @@ class TelethonMediaDownloadBackend:
         )
 
 
+class TelethonSearchBackend:
+    """Adapter from the Telethon ``TelegramClient`` to :class:`SearchBackend`.
+
+    Delegates to Telegram's server-side search via
+    ``iter_messages(entity, search=query, from_user=..., reply_to=topic_id,
+    limit=...)`` and maps each hit into a :class:`RecentMessage` row (newest
+    first, the Telethon default). ``FloodWaitError`` is translated so the worker
+    queue can pause-and-retry rather than mark a generic failure.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def search_messages(
+        self,
+        *,
+        chat_id: int,
+        query: str,
+        from_user: str | int | None = None,
+        limit: int = 20,
+        topic_id: int | None = None,
+    ) -> list[RecentMessage]:
+        try:
+            entity = await self._client.get_input_entity(chat_id)
+            out: list[RecentMessage] = []
+            async for msg in self._client.iter_messages(
+                entity,
+                search=query,
+                from_user=from_user,
+                reply_to=topic_id,
+                limit=limit,
+            ):
+                sender = getattr(msg, "sender", None)
+                username = (
+                    getattr(sender, "username", None) if sender is not None else None
+                )
+                reply_to = getattr(msg, "reply_to_msg_id", None)
+                date = getattr(msg, "date", None)
+                text = getattr(msg, "message", "") or ""
+                if not text:
+                    media = getattr(msg, "media", None)
+                    if media is not None:
+                        text = _media_summary(media)
+                out.append(
+                    RecentMessage(
+                        id=int(getattr(msg, "id", 0)),
+                        sender=username,
+                        date=date.isoformat() if date is not None else None,
+                        reply_to=int(reply_to) if reply_to else None,
+                        text=text,
+                    )
+                )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        return out
+
+
 class TelethonForwardBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`ForwardBackend`.
 
@@ -422,5 +479,6 @@ __all__ = [
     "TelethonReactionBackend",
     "TelethonPinBackend",
     "TelethonMediaDownloadBackend",
+    "TelethonSearchBackend",
     "TelethonForwardBackend",
 ]
