@@ -92,6 +92,18 @@ class AccessRule(BaseModel):
             "over ``false`` on conflict."
         ),
     )
+    edit_only_session_messages: bool | None = Field(
+        default=None,
+        description=(
+            "Per-rule override of the policy-level "
+            "``AccessConfig.edit_only_session_messages`` for the chats/folders "
+            "this rule targets. ``None`` (default) inherits the policy value; "
+            "``true``/``false`` overrides it. Resolution mirrors "
+            "``delete_only_session_messages`` exactly: chat rule > folder rule > "
+            "all rule > policy default, and within one level a restrictive "
+            "``true`` wins over ``false`` on conflict."
+        ),
+    )
 
     @property
     def chat_refs(self) -> list[str | int]:
@@ -146,6 +158,15 @@ class AccessConfig(BaseModel):
             "messages this server process sent (tracked in-memory for the "
             "process lifetime). Set false to allow deleting arbitrary messages "
             "the delete permission covers."
+        ),
+    )
+    edit_only_session_messages: bool = Field(
+        default=True,
+        description=(
+            "When true (the safe default), message edit is restricted to "
+            "messages this server process sent (tracked in-memory for the "
+            "process lifetime). Set false to allow editing arbitrary messages "
+            "the write permission covers."
         ),
     )
     folder_cache_ttl: int = Field(

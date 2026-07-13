@@ -588,3 +588,115 @@ async def test_delete_only_none_config_returns_default() -> None:
     auth = Authorizer(None)
     assert await auth.delete_only_session_messages(1, default=True) is True
     assert await auth.delete_only_session_messages(1, default=False) is False
+
+
+# ---------------------------------------------------------------------------
+# Per-rule edit_only_session_messages override (mirror of delete resolution)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_edit_only_override_absent_inherits_default() -> None:
+    resolver = FakeResolver({"@client": 555})
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(chat="@client", permission="write")]),
+        resolver=resolver,
+    )
+    assert await auth.edit_only_session_messages(555, default=True) is True
+    assert await auth.edit_only_session_messages(555, default=False) is False
+
+
+@pytest.mark.asyncio
+async def test_edit_only_chat_rule_overrides_default() -> None:
+    resolver = FakeResolver({"me": 241225329})
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(
+                    chat="me",
+                    permission="write",
+                    edit_only_session_messages=False,
+                )
+            ]
+        ),
+        resolver=resolver,
+    )
+    assert await auth.edit_only_session_messages(241225329, default=True) is False
+    assert await auth.edit_only_session_messages(999, default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_edit_only_chat_override_beats_all_rule() -> None:
+    resolver = FakeResolver({7: 7})
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(all=True, permission="write", edit_only_session_messages=True),
+                AccessRule(chat=7, permission="write", edit_only_session_messages=False),
+            ]
+        ),
+        resolver=resolver,
+    )
+    assert await auth.edit_only_session_messages(7, default=False) is False
+    assert await auth.edit_only_session_messages(8, default=False) is True
+
+
+@pytest.mark.asyncio
+async def test_edit_only_folder_override_applies_to_members() -> None:
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(
+                    folder="Clients",
+                    permission="write",
+                    edit_only_session_messages=False,
+                )
+            ]
+        ),
+        folder_backend=FakeFolderBackend([_clients_folder()]),
+    )
+    assert await auth.edit_only_session_messages(10, default=True) is False
+    assert await auth.edit_only_session_messages(99, default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_edit_only_conflicting_same_level_is_restrictive() -> None:
+    resolver = FakeResolver({5: 5})
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(chat=5, permission="write", edit_only_session_messages=False),
+                AccessRule(chat=5, permission="read", edit_only_session_messages=True),
+            ]
+        ),
+        resolver=resolver,
+    )
+    assert await auth.edit_only_session_messages(5, default=False) is True
+
+
+@pytest.mark.asyncio
+async def test_edit_only_independent_of_delete_only() -> None:
+    # A rule setting only the edit override leaves delete on the policy default,
+    # and vice versa — the two flags resolve independently.
+    resolver = FakeResolver({3: 3})
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(
+                    chat=3,
+                    permission="write",
+                    edit_only_session_messages=False,
+                )
+            ]
+        ),
+        resolver=resolver,
+    )
+    assert await auth.edit_only_session_messages(3, default=True) is False
+    assert await auth.delete_only_session_messages(3, default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_edit_only_none_config_returns_default() -> None:
+    auth = Authorizer(None)
+    assert await auth.edit_only_session_messages(1, default=True) is True
+    assert await auth.edit_only_session_messages(1, default=False) is False
