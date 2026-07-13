@@ -5,6 +5,7 @@
 
 ### Features
 
+- Messages pin/unpin domain op + Telethon adapter
 - Messages edit surfaces (CLI + HTTP + MCP)
 - Messages edit domain op + edit_only_session_messages gate
 - Wire folder-membership cache into authorizer (read-through, stale fallback)

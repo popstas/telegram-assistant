@@ -45,19 +45,24 @@ from telegram_assistant.messages import (
     MessageSendFailed,
     MessageSendNeedsReview,
     MessageSendPending,
+    PinBackend,
+    PinMessageRequest,
     ReactionBackend,
     ScheduleError,
     SendMessageRequest,
     SendReactionRequest,
+    UnpinMessageRequest,
     delete_messages,
     edit_message,
     forward_messages,
     get_recent_messages,
     make_url_downloader,
     mass_send_message,
+    pin_message,
     resolve_schedule_at,
     send_message,
     set_message_reaction,
+    unpin_message,
     validate_file_urls,
 )
 from telegram_assistant.persistence.store import OperationStore
@@ -342,6 +347,88 @@ class EditBody(BaseModel):
         return self
 
 
+class PinBody(BaseModel):
+    """Pin one message in a target chat (WRITE-gated).
+
+    The target is one of ``telegram_chat_id`` / ``entity`` / ``chat_name`` +
+    ``folder_name`` (same shape as a targeted send). ``silent`` suppresses the
+    pin service notification; ``pm_oneside`` pins only on the acting side of a
+    private chat. ``dry_run`` resolves + authorizes without pinning.
+    """
+
+    message_id: int
+    silent: bool = False
+    pm_oneside: bool = False
+    dry_run: bool = False
+    telegram_chat_id: int | None = None
+    entity: str | int | None = None
+    chat_name: str | None = None
+    folder_name: str | None = None
+    folder_id: int | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> PinBody:
+        if self.message_id <= 0:
+            raise ValueError("message_id must be a positive integer")
+        refs = sum(
+            [
+                self.telegram_chat_id is not None,
+                self.entity is not None,
+                self.chat_name is not None,
+            ]
+        )
+        if refs != 1:
+            raise ValueError(
+                "provide exactly one of telegram_chat_id, entity, or chat_name"
+            )
+        if self.chat_name is not None and self.folder_name is None:
+            raise ValueError("chat_name requires folder_name")
+        return self
+
+
+class UnpinBody(BaseModel):
+    """Unpin one message (or all) in a target chat (WRITE-gated).
+
+    The target is one of ``telegram_chat_id`` / ``entity`` / ``chat_name`` +
+    ``folder_name``. Provide either a positive ``message_id`` (unpin one) or
+    ``unpin_all=true`` (unpin every pinned message), not both. ``dry_run``
+    resolves + authorizes without unpinning.
+    """
+
+    message_id: int | None = None
+    unpin_all: bool = False
+    dry_run: bool = False
+    telegram_chat_id: int | None = None
+    entity: str | int | None = None
+    chat_name: str | None = None
+    folder_name: str | None = None
+    folder_id: int | None = None
+
+    @model_validator(mode="after")
+    def _shape(self) -> UnpinBody:
+        has_id = self.message_id is not None
+        if has_id and self.unpin_all:
+            raise ValueError("provide either message_id or unpin_all, not both")
+        if not has_id and not self.unpin_all:
+            raise ValueError("provide a message_id to unpin or unpin_all=true")
+        if has_id and self.message_id <= 0:  # type: ignore[operator]
+            raise ValueError("message_id must be a positive integer")
+        refs = sum(
+            [
+                self.telegram_chat_id is not None,
+                self.entity is not None,
+                self.chat_name is not None,
+            ]
+        )
+        if refs != 1:
+            raise ValueError(
+                "provide exactly one of telegram_chat_id, entity, or chat_name"
+            )
+        if self.chat_name is not None and self.folder_name is None:
+            raise ValueError("chat_name requires folder_name")
+        return self
+
+
 def _message_backend_or_503(request: Request) -> MessageBackend:
     factory = getattr(request.app.state, "message_backend_factory", None)
     if factory is None:
@@ -418,6 +505,22 @@ def _edit_backend_or_503(request: Request) -> EditBackend:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram edit backend is not available",
+        )
+    return backend
+
+
+def _pin_backend_or_503(request: Request) -> PinBackend:
+    factory = getattr(request.app.state, "pin_backend_factory", None)
+    if factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram pin backend is not configured (session may be unauthorized)",
+        )
+    backend = factory(request)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram pin backend is not available",
         )
     return backend
 
@@ -941,6 +1044,108 @@ def build_router() -> APIRouter:
                     "message": str(exc),
                 },
             ) from exc
+        except FloodWaitError as exc:
+            raise _translate_flood_wait(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        return result.to_dict()
+
+    @router.post("/messages/pin")
+    async def pin(body: PinBody, request: Request) -> dict[str, Any]:
+        """Pin a message in a target chat (WRITE-gated)."""
+        backend = _pin_backend_or_503(request)
+
+        if body.entity is not None:
+            telegram_chat_id = await resolve_entity_chat_id(request, body.entity)
+            chat_name_for_log: str | None = None
+        elif body.telegram_chat_id is not None:
+            telegram_chat_id = body.telegram_chat_id
+            chat_name_for_log = None
+        else:
+            folder_backend = _folder_backend_or_503(request)
+            try:
+                chat = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=body.folder_name or "",
+                    chat_name=body.chat_name or "",
+                    folder_id=body.folder_id,
+                )
+            except FolderError as exc:
+                raise _translate_folder_error(exc) from exc
+            telegram_chat_id = chat.chat_id
+            chat_name_for_log = chat.title
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        try:
+            result = await pin_message(
+                backend,
+                request=PinMessageRequest(
+                    telegram_chat_id=telegram_chat_id,
+                    message_id=body.message_id,
+                    silent=body.silent,
+                    pm_oneside=body.pm_oneside,
+                    dry_run=body.dry_run,
+                    chat_name=chat_name_for_log,
+                ),
+                authorizer=authorizer,
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except FloodWaitError as exc:
+            raise _translate_flood_wait(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        return result.to_dict()
+
+    @router.post("/messages/unpin")
+    async def unpin(body: UnpinBody, request: Request) -> dict[str, Any]:
+        """Unpin a message (or all pinned messages) in a chat (WRITE-gated)."""
+        backend = _pin_backend_or_503(request)
+
+        if body.entity is not None:
+            telegram_chat_id = await resolve_entity_chat_id(request, body.entity)
+            chat_name_for_log: str | None = None
+        elif body.telegram_chat_id is not None:
+            telegram_chat_id = body.telegram_chat_id
+            chat_name_for_log = None
+        else:
+            folder_backend = _folder_backend_or_503(request)
+            try:
+                chat = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=body.folder_name or "",
+                    chat_name=body.chat_name or "",
+                    folder_id=body.folder_id,
+                )
+            except FolderError as exc:
+                raise _translate_folder_error(exc) from exc
+            telegram_chat_id = chat.chat_id
+            chat_name_for_log = chat.title
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        try:
+            result = await unpin_message(
+                backend,
+                request=UnpinMessageRequest(
+                    telegram_chat_id=telegram_chat_id,
+                    message_id=None if body.unpin_all else body.message_id,
+                    dry_run=body.dry_run,
+                    chat_name=chat_name_for_log,
+                ),
+                authorizer=authorizer,
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
         except FloodWaitError as exc:
             raise _translate_flood_wait(exc) from exc
         except ValueError as exc:

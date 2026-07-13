@@ -91,11 +91,14 @@ from telegram_assistant.http_api.messages import (
     EditBody,
     ForwardBody,
     MessageSendBody,
+    PinBody,
     ReactionBody,
+    UnpinBody,
     _delete_backend_or_503,
     _edit_backend_or_503,
     _forward_backend_or_503,
     _message_backend_or_503,
+    _pin_backend_or_503,
     _reaction_backend_or_503,
     _read_backend_or_503,
 )
@@ -172,18 +175,22 @@ from telegram_assistant.messages import (
     MessageSendFailed,
     MessageSendNeedsReview,
     MessageSendPending,
+    PinMessageRequest,
     ScheduleError,
     SendMessageRequest,
     SendReactionRequest,
+    UnpinMessageRequest,
     delete_messages,
     edit_message,
     forward_messages,
     get_recent_messages,
     make_url_downloader,
     mass_send_message,
+    pin_message,
     resolve_schedule_at,
     send_message,
     set_message_reaction,
+    unpin_message,
     validate_file_urls,
 )
 from telegram_assistant.notifications import MuteRequest, mute_chat, unmute_chat
@@ -896,6 +903,78 @@ async def _resolve_edit(request: _McpRequest, body: EditBody) -> dict[str, Any]:
     return result.to_dict()
 
 
+async def _resolve_pin(request: _McpRequest, body: PinBody) -> dict[str, Any]:
+    backend = _pin_backend_or_503(request)  # type: ignore[arg-type]
+    if body.entity is not None:
+        telegram_chat_id = await resolve_entity_chat_id(request, body.entity)  # type: ignore[arg-type]
+        chat_name_for_log: str | None = None
+    elif body.telegram_chat_id is not None:
+        telegram_chat_id = body.telegram_chat_id
+        chat_name_for_log = None
+    else:
+        folder_backend = _message_folder_backend_or_503(request)  # type: ignore[arg-type]
+        chat = await resolve_chat_in_folder(
+            folder_backend,
+            folder_name=body.folder_name or "",
+            chat_name=body.chat_name or "",
+            folder_id=body.folder_id,
+        )
+        telegram_chat_id = chat.chat_id
+        chat_name_for_log = chat.title
+
+    authorizer = build_authorizer(
+        request, folder_backend=_message_folder_backend_optional(request)  # type: ignore[arg-type]
+    )
+    result = await pin_message(
+        backend,
+        request=PinMessageRequest(
+            telegram_chat_id=telegram_chat_id,
+            message_id=body.message_id,
+            silent=body.silent,
+            pm_oneside=body.pm_oneside,
+            dry_run=body.dry_run,
+            chat_name=chat_name_for_log,
+        ),
+        authorizer=authorizer,
+    )
+    return result.to_dict()
+
+
+async def _resolve_unpin(request: _McpRequest, body: UnpinBody) -> dict[str, Any]:
+    backend = _pin_backend_or_503(request)  # type: ignore[arg-type]
+    if body.entity is not None:
+        telegram_chat_id = await resolve_entity_chat_id(request, body.entity)  # type: ignore[arg-type]
+        chat_name_for_log: str | None = None
+    elif body.telegram_chat_id is not None:
+        telegram_chat_id = body.telegram_chat_id
+        chat_name_for_log = None
+    else:
+        folder_backend = _message_folder_backend_or_503(request)  # type: ignore[arg-type]
+        chat = await resolve_chat_in_folder(
+            folder_backend,
+            folder_name=body.folder_name or "",
+            chat_name=body.chat_name or "",
+            folder_id=body.folder_id,
+        )
+        telegram_chat_id = chat.chat_id
+        chat_name_for_log = chat.title
+
+    authorizer = build_authorizer(
+        request, folder_backend=_message_folder_backend_optional(request)  # type: ignore[arg-type]
+    )
+    result = await unpin_message(
+        backend,
+        request=UnpinMessageRequest(
+            telegram_chat_id=telegram_chat_id,
+            message_id=None if body.unpin_all else body.message_id,
+            dry_run=body.dry_run,
+            chat_name=chat_name_for_log,
+        ),
+        authorizer=authorizer,
+    )
+    return result.to_dict()
+
+
 def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) -> None:
     """Register all telegram_-prefixed tools on ``server``."""
 
@@ -1140,6 +1219,80 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 dry_run=dry_run,
             )
             return await _resolve_edit(request, body)
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_messages_pin",
+        annotations=WRITE_IDEMPOTENT,
+        structured_output=True,
+    )
+    async def telegram_messages_pin(
+        message_id: int,
+        silent: bool = False,
+        pm_oneside: bool = False,
+        telegram_chat_id: int | None = None,
+        entity: str | int | None = None,
+        chat_name: str | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Pin a message in a target chat (WRITE-gated).
+
+        ``silent`` suppresses the pin service notification; ``pm_oneside`` pins
+        only on the acting side of a private chat.
+        """
+        request = _request(provider)
+        try:
+            body = PinBody(
+                message_id=message_id,
+                silent=silent,
+                pm_oneside=pm_oneside,
+                telegram_chat_id=telegram_chat_id,
+                entity=entity,
+                chat_name=chat_name,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                dry_run=dry_run,
+            )
+            return await _resolve_pin(request, body)
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_messages_unpin",
+        annotations=WRITE_IDEMPOTENT,
+        structured_output=True,
+    )
+    async def telegram_messages_unpin(
+        message_id: int | None = None,
+        unpin_all: bool = False,
+        telegram_chat_id: int | None = None,
+        entity: str | int | None = None,
+        chat_name: str | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
+        dry_run: bool = False,
+    ) -> dict[str, Any]:
+        """Unpin a message (or all pinned messages) in a chat (WRITE-gated).
+
+        Provide either a positive ``message_id`` (unpin one) or
+        ``unpin_all=true`` (unpin every pinned message).
+        """
+        request = _request(provider)
+        try:
+            body = UnpinBody(
+                message_id=message_id,
+                unpin_all=unpin_all,
+                telegram_chat_id=telegram_chat_id,
+                entity=entity,
+                chat_name=chat_name,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                dry_run=dry_run,
+            )
+            return await _resolve_unpin(request, body)
         except Exception as exc:
             _raise_from_exception(exc)
 

@@ -46,6 +46,7 @@ from telegram_assistant.messages import (
     ForwardBackend,
     MessageBackend,
     MessageReadBackend,
+    PinBackend,
     ReactionBackend,
     SentMessageRegistry,
 )
@@ -70,6 +71,7 @@ ReactionBackendFactory = Callable[[Request], ReactionBackend | None]
 ForwardBackendFactory = Callable[[Request], ForwardBackend | None]
 DeleteBackendFactory = Callable[[Request], DeleteBackend | None]
 EditBackendFactory = Callable[[Request], EditBackend | None]
+PinBackendFactory = Callable[[Request], PinBackend | None]
 NotificationBackendFactory = Callable[[Request], NotificationBackend | None]
 ResolverFactory = Callable[[Request], EntityResolver | None]
 
@@ -355,6 +357,30 @@ def _default_edit_backend_factory(
     return _factory
 
 
+def _default_pin_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> PinBackendFactory:
+    """Build a Telethon-backed message pin/unpin backend factory.
+
+    Mirrors :func:`_default_edit_backend_factory`: returns ``None`` until a
+    Telethon client is available so the pin/unpin endpoints can return 503.
+    """
+
+    def _factory(_request: Request) -> PinBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonPinBackend,
+        )
+
+        return TelethonPinBackend(client)
+
+    return _factory
+
+
 def _default_notification_backend_factory(
     session_manager: TelethonSessionManager | None,
 ) -> NotificationBackendFactory:
@@ -418,6 +444,7 @@ def create_app(
     forward_backend_factory: ForwardBackendFactory | None = None,
     delete_backend_factory: DeleteBackendFactory | None = None,
     edit_backend_factory: EditBackendFactory | None = None,
+    pin_backend_factory: PinBackendFactory | None = None,
     notification_backend_factory: NotificationBackendFactory | None = None,
     resolver_factory: ResolverFactory | None = None,
     operation_store: OperationStore | None = None,
@@ -690,6 +717,11 @@ def create_app(
         edit_backend_factory
         if edit_backend_factory is not None
         else _default_edit_backend_factory(session_manager)
+    )
+    app.state.pin_backend_factory = (
+        pin_backend_factory
+        if pin_backend_factory is not None
+        else _default_pin_backend_factory(session_manager)
     )
     app.state.notification_backend_factory = (
         notification_backend_factory

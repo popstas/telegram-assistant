@@ -219,6 +219,8 @@ agent stops and asks for clarification — it does not invent a new path.
 | `messages` | `forward` | Forward one or more messages (`--message-id`, repeatable) from a source to a target chat (READ-gated source, WRITE-gated target). | `telegram-assistant messages forward ...` |
 | `messages` | `delete` | Delete one or more messages (`--message-id`, repeatable) from a chat (DELETE-gated; `--revoke`/`--no-revoke`, `--dry-run`, `--force`). Honors `telegram.access.delete_only_session_messages` (default true, overridable per access rule). | `telegram-assistant messages delete ...` |
 | `messages` | `edit` | Edit the text/caption of a sent message (`--message-id`, `--text`, WRITE-gated; `--dry-run`). Honors `telegram.access.edit_only_session_messages` (default true, overridable per access rule). | `telegram-assistant messages edit ...` |
+| `messages` | `pin` | Pin a message in a chat (`--message-id`, WRITE-gated; `--silent`, `--pm-oneside`, `--dry-run`). | `telegram-assistant messages pin ...` |
+| `messages` | `unpin` | Unpin a message (`--message-id`) or all pinned messages (`--all`) in a chat (WRITE-gated; `--dry-run`). | `telegram-assistant messages unpin ...` |
 | `notifications` | `mute` | Mute a chat/contact's notifications, forever or for `--duration` hours. | `telegram-assistant notifications mute ...` |
 | `notifications` | `unmute` | Restore normal notifications for a chat/contact. | `telegram-assistant notifications unmute ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
