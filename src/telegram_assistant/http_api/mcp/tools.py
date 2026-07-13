@@ -104,6 +104,7 @@ from telegram_assistant.http_api.messages import (
     _pin_backend_or_503,
     _reaction_backend_or_503,
     _read_backend_or_503,
+    _search_backend_or_503,
 )
 from telegram_assistant.http_api.messages import (
     _folder_backend_optional as _message_folder_backend_optional,
@@ -193,6 +194,7 @@ from telegram_assistant.messages import (
     mass_send_message,
     pin_message,
     resolve_schedule_at,
+    search_messages,
     send_message,
     set_message_reaction,
     unpin_message,
@@ -1084,6 +1086,64 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 "telegram_chat_id": resolved_chat_id,
                 "limit": limit,
                 "minutes": minutes,
+                "count": len(messages),
+                "messages": [message.to_dict() for message in messages],
+            }
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_messages_search",
+        annotations=READ_TELEGRAM,
+        structured_output=True,
+    )
+    async def telegram_messages_search(
+        query: str,
+        chat_id: int | None = None,
+        entity: str | None = None,
+        from_user: str | None = None,
+        limit: int = 20,
+        minutes: int | None = None,
+        topic_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Text-search a chat's messages, newest-first (READ).
+
+        ``query`` is required. ``from_user`` optionally narrows to one sender,
+        ``topic_id`` scopes the search to one forum topic, and ``minutes``
+        restricts the result to messages newer than ``now - minutes`` (composed
+        with ``limit``).
+        """
+        request = _request(provider)
+        try:
+            if (chat_id is None) == (entity is None):
+                raise ValueError("provide exactly one of chat_id or entity")
+            backend = _search_backend_or_503(request)  # type: ignore[arg-type]
+            resolved_chat_id = (
+                await resolve_entity_chat_id(request, entity)  # type: ignore[arg-type]
+                if entity is not None
+                else chat_id
+            )
+            authorizer = build_authorizer(
+                request,
+                folder_backend=_message_folder_backend_optional(request),  # type: ignore[arg-type]
+            )
+            messages = await search_messages(
+                backend=backend,
+                chat_id=resolved_chat_id,  # type: ignore[arg-type]
+                query=query,
+                from_user=from_user,
+                limit=limit,
+                minutes=minutes,
+                topic_id=topic_id,
+                authorizer=authorizer,
+            )
+            return {
+                "telegram_chat_id": resolved_chat_id,
+                "query": query,
+                "from_user": from_user,
+                "limit": limit,
+                "minutes": minutes,
+                "topic_id": topic_id,
                 "count": len(messages),
                 "messages": [message.to_dict() for message in messages],
             }

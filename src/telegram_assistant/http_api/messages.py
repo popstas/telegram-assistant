@@ -52,6 +52,7 @@ from telegram_assistant.messages import (
     PinMessageRequest,
     ReactionBackend,
     ScheduleError,
+    SearchBackend,
     SendMessageRequest,
     SendReactionRequest,
     UnpinMessageRequest,
@@ -64,6 +65,7 @@ from telegram_assistant.messages import (
     mass_send_message,
     pin_message,
     resolve_schedule_at,
+    search_messages,
     send_message,
     set_message_reaction,
     unpin_message,
@@ -631,6 +633,22 @@ def _read_backend_or_503(request: Request) -> MessageReadBackend:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram message-read backend is not available",
+        )
+    return backend
+
+
+def _search_backend_or_503(request: Request) -> SearchBackend:
+    factory = getattr(request.app.state, "search_backend_factory", None)
+    if factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram message-search backend is not configured (session may be unauthorized)",
+        )
+    backend = factory(request)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram message-search backend is not available",
         )
     return backend
 
@@ -1336,6 +1354,87 @@ def build_router() -> APIRouter:
             "telegram_chat_id": resolved_chat_id,
             "limit": limit,
             "minutes": minutes,
+            "count": len(messages),
+            "messages": [m.to_dict() for m in messages],
+        }
+
+    @router.get("/messages/search")
+    async def search(
+        request: Request,
+        query: str,
+        chat_id: int | None = None,
+        entity: str | None = None,
+        from_user: str | None = None,
+        limit: int = 20,
+        minutes: int | None = None,
+        topic_id: int | None = None,
+    ) -> dict[str, Any]:
+        """Text-search a chat's messages, newest-first (READ-gated).
+
+        Accepts either a numeric ``chat_id`` or a flexible ``entity`` reference
+        (resolved via the shared resolver). ``query`` is required. The op
+        requires READ on the resolved chat; an unpermitted chat returns 403.
+        ``from_user`` optionally narrows to one sender, ``topic_id`` scopes the
+        search to one forum topic, and ``minutes`` restricts the result to
+        messages newer than ``now - minutes`` (composed with ``limit``).
+        """
+        if (chat_id is None) == (entity is None):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="provide exactly one of chat_id or entity",
+            )
+        if not query or not query.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="query must be a non-empty string",
+            )
+        if limit <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="limit must be a positive integer",
+            )
+        if minutes is not None and minutes <= 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="minutes must be a positive integer",
+            )
+
+        backend = _search_backend_or_503(request)
+        if entity is not None:
+            resolved_chat_id = await resolve_entity_chat_id(request, entity)
+        else:
+            resolved_chat_id = chat_id  # type: ignore[assignment]
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        try:
+            messages = await search_messages(
+                backend=backend,
+                chat_id=resolved_chat_id,
+                query=query,
+                from_user=from_user,
+                limit=limit,
+                minutes=minutes,
+                topic_id=topic_id,
+                authorizer=authorizer,
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except FloodWaitError as exc:
+            raise _translate_flood_wait(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        return {
+            "telegram_chat_id": resolved_chat_id,
+            "query": query,
+            "from_user": from_user,
+            "limit": limit,
+            "minutes": minutes,
+            "topic_id": topic_id,
             "count": len(messages),
             "messages": [m.to_dict() for m in messages],
         }

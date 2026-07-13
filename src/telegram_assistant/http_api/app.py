@@ -49,6 +49,7 @@ from telegram_assistant.messages import (
     MessageReadBackend,
     PinBackend,
     ReactionBackend,
+    SearchBackend,
     SentMessageRegistry,
 )
 from telegram_assistant.notifications import NotificationBackend
@@ -68,6 +69,7 @@ MemberBackendFactory = Callable[[Request], MemberAddBackend | None]
 MemberRemoveBackendFactory = Callable[[Request], MemberRemoveBackend | None]
 MessageBackendFactory = Callable[[Request], MessageBackend | None]
 MessageReadBackendFactory = Callable[[Request], MessageReadBackend | None]
+SearchBackendFactory = Callable[[Request], SearchBackend | None]
 ReactionBackendFactory = Callable[[Request], ReactionBackend | None]
 ForwardBackendFactory = Callable[[Request], ForwardBackend | None]
 DeleteBackendFactory = Callable[[Request], DeleteBackend | None]
@@ -259,6 +261,30 @@ def _default_message_read_backend_factory(
         )
 
         return TelethonMessageReadBackend(client)
+
+    return _factory
+
+
+def _default_search_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> SearchBackendFactory:
+    """Build a Telethon-backed message-search backend factory.
+
+    Mirrors :func:`_default_message_read_backend_factory`: returns ``None``
+    until a Telethon client is available so the search endpoint can return 503.
+    """
+
+    def _factory(_request: Request) -> SearchBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.messages.telethon_backend import (
+            TelethonSearchBackend,
+        )
+
+        return TelethonSearchBackend(client)
 
     return _factory
 
@@ -467,6 +493,7 @@ def create_app(
     member_remove_backend_factory: MemberRemoveBackendFactory | None = None,
     message_backend_factory: MessageBackendFactory | None = None,
     message_read_backend_factory: MessageReadBackendFactory | None = None,
+    search_backend_factory: SearchBackendFactory | None = None,
     reaction_backend_factory: ReactionBackendFactory | None = None,
     forward_backend_factory: ForwardBackendFactory | None = None,
     delete_backend_factory: DeleteBackendFactory | None = None,
@@ -725,6 +752,11 @@ def create_app(
         message_read_backend_factory
         if message_read_backend_factory is not None
         else _default_message_read_backend_factory(session_manager)
+    )
+    app.state.search_backend_factory = (
+        search_backend_factory
+        if search_backend_factory is not None
+        else _default_search_backend_factory(session_manager)
     )
     app.state.reaction_backend_factory = (
         reaction_backend_factory
