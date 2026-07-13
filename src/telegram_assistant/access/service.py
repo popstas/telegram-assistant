@@ -225,15 +225,37 @@ class Authorizer:
         if not self._folder_caps:
             return set()
         if self._memberships is None:
-            memberships: dict[int, set[str]] = {}
-            if self._folder_backend is not None:
-                for snapshot in await self._folder_backend.list_folders():
-                    for chat in snapshot.chats:
-                        memberships.setdefault(chat.chat_id, set()).add(
-                            snapshot.folder_name
-                        )
-            self._memberships = memberships
+            self._memberships = await self._build_memberships()
         return self._memberships.get(chat_id, set())
+
+    async def _build_memberships(self) -> dict[int, set[str]]:
+        """Build the ``chat_id -> {folder_name}`` map from the folder backend.
+
+        Prefers the fast ``list_folder_chat_ids()`` path (bare peer ids, no
+        ``get_entity`` round-trips) when the injected backend exposes it, and
+        falls back to scanning ``list_folders()`` for simple/fake backends that
+        only implement the title-resolving surface. Ids are canonicalised to the
+        same bare form the rule index and request lookups use.
+        """
+        memberships: dict[int, set[str]] = {}
+        backend = self._folder_backend
+        if backend is None:
+            return memberships
+        list_ids = getattr(backend, "list_folder_chat_ids", None)
+        if callable(list_ids):
+            folder_map = await list_ids()
+            for folder_name, chat_ids in folder_map.items():
+                for cid in chat_ids:
+                    memberships.setdefault(
+                        _canonical_chat_id(cid), set()
+                    ).add(folder_name)
+        else:
+            for snapshot in await backend.list_folders():
+                for chat in snapshot.chats:
+                    memberships.setdefault(
+                        _canonical_chat_id(chat.chat_id), set()
+                    ).add(snapshot.folder_name)
+        return memberships
 
     def _effective_chat_caps(
         self, chat_id: int, memberships: Iterable[str]

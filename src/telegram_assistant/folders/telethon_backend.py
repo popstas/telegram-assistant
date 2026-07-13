@@ -27,6 +27,21 @@ def _normalise_title(value: Any) -> str:
     return str(text)
 
 
+def _peer_chat_id(peer: Any) -> int | None:
+    """Return the bare chat id carried by an ``InputPeer*`` object.
+
+    ``InputPeerChannel.channel_id`` / ``InputPeerChat.chat_id`` /
+    ``InputPeerUser.user_id`` already hold the numeric id in bare (positive)
+    form, so membership checks can read it directly without a ``get_entity``
+    round-trip. Returns ``None`` for peer shapes that carry none of these.
+    """
+    for attr in ("channel_id", "chat_id", "user_id"):
+        value = getattr(peer, attr, None)
+        if value is not None:
+            return int(value)
+    return None
+
+
 def _entity_title(entity: Any) -> str:
     title = getattr(entity, "title", None)
     if title:
@@ -87,6 +102,33 @@ class TelethonFolderBackend:
                 )
             )
         return snapshots
+
+    async def list_folder_chat_ids(self) -> dict[str, set[int]]:
+        """Return ``{folder_name: {chat_id, ...}}`` without resolving titles.
+
+        Fetches the dialog filters once (:meth:`_fetch_filters`, already wrapped
+        in ``translate_flood_wait``) and reads bare peer ids straight from the
+        ``InputPeer*`` objects — **no** ``get_entity`` calls. This is the fast
+        path the authorizer uses for folder-rule membership checks, which only
+        need ids, never titles. ``list_folders`` (which does resolve titles) is
+        left untouched for ``folders inspect``.
+        """
+        memberships: dict[str, set[int]] = {}
+        for f in await self._fetch_filters():
+            folder_id = getattr(f, "id", None)
+            raw_title = getattr(f, "title", None)
+            if folder_id is None or raw_title is None:
+                # DialogFilterDefault ("All chats") — no id/title, skip.
+                continue
+            include = list(getattr(f, "include_peers", []) or [])
+            pinned = list(getattr(f, "pinned_peers", []) or [])
+            ids: set[int] = set()
+            for peer in pinned + include:
+                chat_id = _peer_chat_id(peer)
+                if chat_id is not None:
+                    ids.add(chat_id)
+            memberships[_normalise_title(raw_title)] = ids
+        return memberships
 
     async def resolve_chat(self, chat_ref: str | int) -> FolderChat:
         try:
