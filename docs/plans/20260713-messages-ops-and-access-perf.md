@@ -202,16 +202,16 @@ Two workstreams from `docs/TODO.md`:
 
 ### Task 6: `messages pin` / `messages unpin` domain op + adapter
 
-- [ ] create `messages/pinning.py`: `PinBackend` Protocol (`pin_message(chat_id, message_id,
+- [x] create `messages/pinning.py`: `PinBackend` Protocol (`pin_message(chat_id, message_id,
       *, silent, pm_oneside)`, `unpin_message(chat_id, message_id | None)` — `None` = unpin
       all), frozen Request/Result dataclasses, service fns `pin_message`/`unpin_message` with
       `authorizer.require(chat_id, WRITE)` and dry-run support
-- [ ] adapter `TelethonPinBackend` in `messages/telethon_backend.py` using
+- [x] adapter `TelethonPinBackend` in `messages/telethon_backend.py` using
       `client.pin_message` / `client.unpin_message` (silent/pm_oneside passthrough);
       `translate_flood_wait`
-- [ ] write tests: pin/unpin success + dry-run, WRITE denial, unpin-all vs unpin-one,
+- [x] write tests: pin/unpin success + dry-run, WRITE denial, unpin-all vs unpin-one,
       adapter arg passthrough + error translation
-- [ ] run tests — must pass before task 7
+- [x] run tests — must pass before task 7
 
 ### Task 7: pin/unpin surfaces (CLI + HTTP + MCP)
 
