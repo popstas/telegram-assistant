@@ -56,6 +56,48 @@ class FakePinBackend:
         self.unpins.append({"chat_id": chat_id, "message_id": message_id})
 
 
+class FakeResolver:
+    """Entity resolver double: ``@ref -> bare chat id``, as Telethon returns."""
+
+    def __init__(self, mapping: dict[str, int]) -> None:
+        self._mapping = mapping
+        self.calls: list[str] = []
+
+    async def resolve(self, ref: object) -> Any:
+        from telegram_assistant.entities import ResolvedEntity
+
+        self.calls.append(str(ref))
+        if str(ref) not in self._mapping:
+            from telegram_assistant.entities import EntityNotFoundError
+
+            raise EntityNotFoundError(str(ref))
+        return ResolvedEntity(
+            chat_id=self._mapping[str(ref)], title=str(ref), kind="channel"
+        )
+
+
+class FakeFolderBackend:
+    """Folder backend double exposing one folder with one named chat."""
+
+    def __init__(self, folders: dict[str, tuple[int, dict[str, int]]]) -> None:
+        self._folders = folders
+
+    async def list_folders(self) -> list[Any]:
+        from telegram_assistant.folders.service import FolderChat, FolderSnapshot
+
+        return [
+            FolderSnapshot(
+                folder_id=folder_id,
+                folder_name=name,
+                chats=[
+                    FolderChat(chat_id=cid, title=title)
+                    for title, cid in chats.items()
+                ],
+            )
+            for name, (folder_id, chats) in self._folders.items()
+        ]
+
+
 def _config_with_access(access_block: str | None) -> str:
     base = textwrap.dedent(
         """
@@ -101,6 +143,8 @@ def _http_client(
     access_block: str | None = None,
     pin_backend: FakePinBackend | None = None,
     has_pin_factory: bool = True,
+    resolver: FakeResolver | None = None,
+    folder_backend: FakeFolderBackend | None = None,
 ) -> TestClient:
     config = load_config_from_text(_config_with_access(access_block))
     app = create_app(
@@ -109,11 +153,31 @@ def _http_client(
         pin_backend_factory=(
             (lambda _r: pin_backend) if has_pin_factory else (lambda _r: None)
         ),
+        folder_backend_factory=lambda _r: folder_backend,
+        resolver_factory=lambda _r: resolver,
+        operation_store=_make_store(),
+    )
+    return TestClient(app)
+
+
+def test_http_app_builds_the_shared_rate_gate() -> None:
+    """The default config paces, so the app must really open the gate store.
+
+    Guards the wiring these tests depend on: with an unopenable database path
+    `create_app` silently leaves the slot empty and every pin test below would
+    exercise the *unpaced* fallback while looking like it covers pacing.
+    """
+    config = load_config_from_text(_config_with_access(_WRITE_ACCESS))
+    assert config.telegram.pin_min_interval_seconds > 0
+    app = create_app(
+        config,
+        session_manager=None,
+        pin_backend_factory=lambda _r: None,
         folder_backend_factory=lambda _r: None,
         resolver_factory=lambda _r: None,
         operation_store=_make_store(),
     )
-    return TestClient(app)
+    assert app.state.rate_gate_store is not None
 
 
 def test_http_pin_calls_backend() -> None:
@@ -179,6 +243,98 @@ def test_http_pin_422_non_positive_id() -> None:
     )
     assert resp.status_code == 422, resp.text
     assert backend.pins == []
+
+
+def test_http_pin_via_entity() -> None:
+    """`entity` is the second documented target shape and must reach the backend.
+
+    Resolution yields the *bare* id while `telegram_chat_id` keeps the `-100`
+    marker; both must end up pinning the same chat (the shared pacing key that
+    depends on it is asserted in `test_messages_pin.py`).
+    """
+    backend = FakePinBackend()
+    resolver = FakeResolver({"@client": 100123})
+    client = _http_client(
+        access_block=_WRITE_ACCESS, pin_backend=backend, resolver=resolver
+    )
+    resp = client.post(
+        "/telegram/messages/pin",
+        json={"entity": "@client", "message_id": 7},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["telegram_chat_id"] == 100123
+    assert backend.pins[-1]["chat_id"] == 100123
+    assert resolver.calls == ["@client"]
+
+
+def test_http_pin_unknown_entity_is_404() -> None:
+    backend = FakePinBackend()
+    client = _http_client(
+        access_block=_WRITE_ACCESS,
+        pin_backend=backend,
+        resolver=FakeResolver({}),
+    )
+    resp = client.post(
+        "/telegram/messages/pin",
+        json={"entity": "@nope", "message_id": 7},
+        headers=AUTH,
+    )
+    assert resp.status_code == 404, resp.text
+    assert backend.pins == []
+
+
+def test_http_pin_via_chat_name_in_folder() -> None:
+    backend = FakePinBackend()
+    folders = FakeFolderBackend({"Clients": (2, {"Client chat": -100777})})
+    client = _http_client(
+        access_block=_WRITE_ACCESS, pin_backend=backend, folder_backend=folders
+    )
+    resp = client.post(
+        "/telegram/messages/pin",
+        json={
+            "chat_name": "Client chat",
+            "folder_name": "Clients",
+            "message_id": 7,
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["telegram_chat_id"] == -100777
+    assert resp.json()["chat_name"] == "Client chat"
+    assert backend.pins[-1]["chat_id"] == -100777
+
+
+def test_http_pin_unknown_chat_name_is_404() -> None:
+    """A folder-resolution failure is bad input (404), not a 500."""
+    backend = FakePinBackend()
+    folders = FakeFolderBackend({"Clients": (2, {"Client chat": -100777})})
+    client = _http_client(
+        access_block=_WRITE_ACCESS, pin_backend=backend, folder_backend=folders
+    )
+    resp = client.post(
+        "/telegram/messages/pin",
+        json={"chat_name": "Missing", "folder_name": "Clients", "message_id": 7},
+        headers=AUTH,
+    )
+    assert resp.status_code == 404, resp.text
+    assert backend.pins == []
+
+
+def test_http_unpin_via_entity() -> None:
+    backend = FakePinBackend()
+    client = _http_client(
+        access_block=_WRITE_ACCESS,
+        pin_backend=backend,
+        resolver=FakeResolver({"@client": 100123}),
+    )
+    resp = client.post(
+        "/telegram/messages/unpin",
+        json={"entity": "@client", "message_id": 7},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert backend.unpins[-1]["chat_id"] == 100123
 
 
 def test_http_pin_requires_auth() -> None:
@@ -355,6 +511,73 @@ def test_cli_pin_real(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert backend.pins == [
         {"chat_id": -100123, "message_id": 7, "silent": False, "pm_oneside": False}
     ]
+
+
+def _patch_cli_resolver(
+    monkeypatch: pytest.MonkeyPatch, mapping: dict[str, int]
+) -> FakeResolver:
+    """Stand in for ``TelethonEntityResolver`` at the CLI's lazy import site."""
+    import telegram_assistant.entities as entities_module
+
+    resolver = FakeResolver(mapping)
+    monkeypatch.setattr(
+        entities_module, "TelethonEntityResolver", lambda _client: resolver
+    )
+    return resolver
+
+
+def test_cli_pin_via_entity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--entity` is a documented target shape and must reach the backend."""
+    config_file = _write_config(tmp_path, _config_with_access(_WRITE_ACCESS))
+    backend = FakePinBackend()
+    _patch_cli_pin_backends(monkeypatch, backend)
+    resolver = _patch_cli_resolver(monkeypatch, {"@client": 100123})
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "pin",
+            "--entity",
+            "@client",
+            "--message-id",
+            "7",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["telegram_chat_id"] == 100123
+    assert backend.pins[-1]["chat_id"] == 100123
+    assert resolver.calls == ["@client"]
+
+
+def test_cli_pin_unknown_entity_exits_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = _write_config(tmp_path, _config_with_access(_WRITE_ACCESS))
+    backend = FakePinBackend()
+    _patch_cli_pin_backends(monkeypatch, backend)
+    _patch_cli_resolver(monkeypatch, {})
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "pin",
+            "--entity",
+            "@nope",
+            "--message-id",
+            "7",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 2, result.stdout
+    assert backend.pins == []
 
 
 def test_cli_pin_access_denied_exit_3(
@@ -618,14 +841,15 @@ def test_http_pin_no_pacing_when_interval_zero(tmp_path: Path) -> None:
     client = TestClient(app)
     body = {"telegram_chat_id": -100123, "message_id": 7}
 
-    started = time.monotonic()
     for _ in range(3):
         assert (
             client.post("/telegram/messages/pin", json=body, headers=AUTH).status_code
             == 200
         )
-    assert time.monotonic() - started < 0.4
     assert len(backend.pins) == 3
+    # Asserted structurally rather than on the wall clock: with pacing off the
+    # gate store is never even built, so no call could have booked a slot.
+    assert app.state.rate_gate_store is None
 
 
 def test_http_pin_flood_wait_reports_retry_after() -> None:

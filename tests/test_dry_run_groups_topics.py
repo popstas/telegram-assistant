@@ -233,6 +233,56 @@ def test_cli_groups_create_dry_run_envelope(
     assert any("/task 42" in action for action in payload["planned_actions"])
 
 
+def test_cli_groups_create_dry_run_named_folder_ignores_default_id(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The preview must resolve the same destination folder as the real run.
+
+    ``default_chat_folder.folder_id`` (2 here) describes the default folder only,
+    so ``--folder-name Other`` must not be cross-checked against it — otherwise
+    the dry-run reports a folder-id mismatch the live create never hits.
+    """
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = RecordingGroupBackend()
+    folder_backend = RecordingFolderBackend(
+        folders=[
+            FolderSnapshot(folder_id=2, folder_name="Planfix clients", chats=[]),
+            FolderSnapshot(folder_id=7, folder_name="Other", chats=[]),
+        ]
+    )
+    store = OperationStore(tmp_path / "state.db")
+    _patch_group_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "groups",
+            "create",
+            "--title",
+            "Acme",
+            "--planfix-task-id",
+            "42",
+            "--folder-name",
+            "Other",
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
+
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["resolved"]["folder"] == {
+        "folder_id": 7,
+        "folder_name": "Other",
+    }
+    assert folder_backend.added == []
+    assert _operation_count(store) == 0
+
+
 def test_cli_groups_create_dry_run_missing_folder_warns(
     minimal_config_yaml: str,
     tmp_path: Path,

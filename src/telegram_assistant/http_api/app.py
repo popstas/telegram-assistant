@@ -53,7 +53,7 @@ from telegram_assistant.messages import (
     SentMessageRegistry,
 )
 from telegram_assistant.notifications import NotificationBackend
-from telegram_assistant.observability.logging import configure_logging
+from telegram_assistant.observability.logging import configure_logging, get_logger
 from telegram_assistant.persistence.folder_cache import FolderMembershipCache
 from telegram_assistant.persistence.rate_gate import RateGateStore
 from telegram_assistant.persistence.store import OperationStore
@@ -62,6 +62,8 @@ from telegram_assistant.telegram_client.session import (
     TelethonSessionManager,
 )
 from telegram_assistant.topics import TopicBackend
+
+_log = get_logger(__name__)
 
 FolderBackendFactory = Callable[[Request], FolderBackend | None]
 GroupBackendFactory = Callable[[Request], GroupBackend | None]
@@ -482,6 +484,63 @@ def _default_resolver_factory(
     return _factory
 
 
+def _ensure_state_stores(
+    app: FastAPI, config: AppConfig, database_path: Path | None
+) -> None:
+    """(Re)build the config-derived SQLite stores on ``app.state``.
+
+    Two slots, both built once rather than per request and both conditional on
+    config:
+
+    * ``folder_membership_cache`` — shared by every per-request ``Authorizer``
+      (read-through with TTL + stale fallback). Only built when an access policy
+      is active: with allow-all there are no folder rules, so the cache is never
+      consulted and building the DB would only create stray files.
+    * ``rate_gate_store`` — the cross-process pin/unpin pacing gate (a CLI
+      one-shot and this server drive the same account, hence SQLite rather than
+      in-memory state). Only built when ``pin_min_interval_seconds > 0``.
+
+    Called at startup *and* from the hot-reload swap, because an edit can switch
+    on an access policy or pacing that was off when the process started; a slot
+    already filled is left alone. Both are best-effort — an unopenable DB (a
+    read-only mount, no write permission) leaves the slot empty so folder rules
+    fall back to live fetches and pin falls back to unpaced calls with
+    FLOOD_WAIT retries — but the failure is logged: otherwise the only symptom
+    is "folder rules are slow" or "pin isn't paced" with nothing to explain it.
+    """
+    db_path = (
+        database_path if database_path is not None else default_database_path(config)
+    )
+
+    if (
+        getattr(app.state, "folder_membership_cache", None) is None
+        and getattr(config.telegram, "access", None) is not None
+    ):
+        try:
+            app.state.folder_membership_cache = FolderMembershipCache(db_path)
+        except Exception as exc:
+            _log.warning(
+                "folder_membership_cache_unavailable",
+                error=str(exc),
+                database_path=str(db_path),
+            )
+            app.state.folder_membership_cache = None
+
+    if (
+        getattr(app.state, "rate_gate_store", None) is None
+        and float(getattr(config.telegram, "pin_min_interval_seconds", 0.0)) > 0
+    ):
+        try:
+            app.state.rate_gate_store = RateGateStore(db_path)
+        except Exception as exc:
+            _log.warning(
+                "rate_gate_store_unavailable",
+                error=str(exc),
+                database_path=str(db_path),
+            )
+            app.state.rate_gate_store = None
+
+
 def create_app(
     config: AppConfig | None = None,
     *,
@@ -658,44 +717,15 @@ def create_app(
                     if fmc is not None:
                         try:
                             fmc.clear()
-                        except Exception:
-                            pass
-                    elif getattr(new_config.telegram, "access", None) is not None:
-                        # An access policy was added via hot-reload after a
-                        # startup with `telegram.access` omitted; build the
-                        # persistent membership cache now so gated ops reuse it
-                        # instead of falling back to live fetches for the whole
-                        # process lifetime.
-                        fmc_path = (
-                            database_path
-                            if database_path is not None
-                            else default_database_path(new_config)
-                        )
-                        try:
-                            app.state.folder_membership_cache = FolderMembershipCache(
-                                fmc_path
+                        except Exception as exc:
+                            _log.warning(
+                                "folder_membership_cache_clear_failed", error=str(exc)
                             )
-                        except Exception:
-                            app.state.folder_membership_cache = None
-                    # Pacing may have been switched on (0 -> N) by the edit; the
-                    # gate is only built at startup when enabled, so build it
-                    # now rather than leaving pin unpaced for the process life.
-                    if (
-                        getattr(app.state, "rate_gate_store", None) is None
-                        and float(
-                            getattr(new_config.telegram, "pin_min_interval_seconds", 0.0)
-                        )
-                        > 0
-                    ):
-                        gate_path = (
-                            database_path
-                            if database_path is not None
-                            else default_database_path(new_config)
-                        )
-                        try:
-                            app.state.rate_gate_store = RateGateStore(gate_path)
-                        except Exception:
-                            app.state.rate_gate_store = None
+                    # An access policy — or pin pacing — may have been switched
+                    # on by this very edit; the stores are only built at startup
+                    # when enabled, so build them now rather than leaving the
+                    # feature off for the rest of the process lifetime.
+                    _ensure_state_stores(app, new_config, database_path)
                     if mcp_fastmcp_server is not None and new_config.mcp is not None:
                         configure_mcp_tools(
                             mcp_fastmcp_server,
@@ -846,41 +876,9 @@ def create_app(
             # 503 on demand rather than failing at app startup.
             app.state.operation_store = None
 
-    # Persistent folder-membership cache shared by every per-request Authorizer
-    # (read-through with TTL + stale fallback). Cleared on hot-reload so
-    # access-rule edits apply cleanly. Only built when an access policy is
-    # active — with allow-all there are no folder rules, so the cache is never
-    # consulted and building the DB would only create stray files. Best-effort:
-    # leave the slot empty when the DB can't be opened so the authorizer falls
-    # back to live fetches.
     app.state.folder_membership_cache = None
-    if getattr(config.telegram, "access", None) is not None:
-        fmc_db_path = (
-            database_path
-            if database_path is not None
-            else default_database_path(config)
-        )
-        try:
-            app.state.folder_membership_cache = FolderMembershipCache(fmc_db_path)
-        except Exception:
-            app.state.folder_membership_cache = None
-
-    # Shared pin/unpin pacing gate. Cross-process by design (a CLI one-shot and
-    # this server drive the same account), hence SQLite rather than in-memory
-    # state. Only built when pacing is enabled, and best-effort: an unopenable
-    # DB leaves the slot empty and pin falls back to unpaced calls with
-    # FLOOD_WAIT retries.
     app.state.rate_gate_store = None
-    if float(getattr(config.telegram, "pin_min_interval_seconds", 0.0)) > 0:
-        gate_db_path = (
-            database_path
-            if database_path is not None
-            else default_database_path(config)
-        )
-        try:
-            app.state.rate_gate_store = RateGateStore(gate_db_path)
-        except Exception:
-            app.state.rate_gate_store = None
+    _ensure_state_stores(app, config, database_path)
 
     app.state.mcp_oauth_server = mcp_oauth_server
     app.state.mcp_fastmcp_server = mcp_fastmcp_server

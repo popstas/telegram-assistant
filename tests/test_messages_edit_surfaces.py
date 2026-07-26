@@ -108,12 +108,53 @@ def _make_store() -> OperationStore:
 # ---------------------------------------------------------------------------
 
 
+class FakeResolver:
+    """Entity resolver double: ``@ref -> bare chat id``, as Telethon returns."""
+
+    def __init__(self, mapping: dict[str, int]) -> None:
+        self._mapping = mapping
+        self.calls: list[str] = []
+
+    async def resolve(self, ref: object) -> Any:
+        from telegram_assistant.entities import EntityNotFoundError, ResolvedEntity
+
+        self.calls.append(str(ref))
+        if str(ref) not in self._mapping:
+            raise EntityNotFoundError(str(ref))
+        return ResolvedEntity(
+            chat_id=self._mapping[str(ref)], title=str(ref), kind="channel"
+        )
+
+
+class FakeFolderBackend:
+    """Folder backend double exposing folders with named chats."""
+
+    def __init__(self, folders: dict[str, tuple[int, dict[str, int]]]) -> None:
+        self._folders = folders
+
+    async def list_folders(self) -> list[Any]:
+        from telegram_assistant.folders.service import FolderChat, FolderSnapshot
+
+        return [
+            FolderSnapshot(
+                folder_id=folder_id,
+                folder_name=name,
+                chats=[
+                    FolderChat(chat_id=cid, title=title) for title, cid in chats.items()
+                ],
+            )
+            for name, (folder_id, chats) in self._folders.items()
+        ]
+
+
 def _http_client(
     *,
     access_block: str | None = None,
     edit_backend: FakeEditBackend | None = None,
     message_backend: FakeMessageBackend | None = None,
     has_edit_factory: bool = True,
+    resolver: FakeResolver | None = None,
+    folder_backend: FakeFolderBackend | None = None,
 ) -> TestClient:
     config = load_config_from_text(_config_with_access(access_block))
     app = create_app(
@@ -125,8 +166,8 @@ def _http_client(
         message_backend_factory=(
             (lambda _r: message_backend) if message_backend is not None else (lambda _r: None)
         ),
-        folder_backend_factory=lambda _r: None,
-        resolver_factory=lambda _r: None,
+        folder_backend_factory=lambda _r: folder_backend,
+        resolver_factory=lambda _r: resolver,
         operation_store=_make_store(),
     )
     return TestClient(app)
@@ -200,6 +241,88 @@ def test_http_edit_flag_off_allows_arbitrary_ids() -> None:
     assert backend.calls == [
         {"chat_id": -100123, "message_id": 42, "text": "patched"}
     ]
+
+
+_FREE_EDIT_ACCESS = (
+    "access:\n  rules:\n    - all: true\n      permission: write\n"
+    "  edit_only_session_messages: false\n"
+)
+
+
+def test_http_edit_via_entity() -> None:
+    """`entity` is a documented target shape; it must reach the backend."""
+    backend = FakeEditBackend()
+    resolver = FakeResolver({"@client": 100123})
+    client = _http_client(
+        access_block=_FREE_EDIT_ACCESS, edit_backend=backend, resolver=resolver
+    )
+    resp = client.post(
+        "/telegram/messages/edit",
+        json={"entity": "@client", "message_id": 42, "text": "patched"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["telegram_chat_id"] == 100123
+    assert backend.calls[-1]["chat_id"] == 100123
+    assert resolver.calls == ["@client"]
+
+
+def test_http_edit_unknown_entity_is_404() -> None:
+    backend = FakeEditBackend()
+    client = _http_client(
+        access_block=_FREE_EDIT_ACCESS,
+        edit_backend=backend,
+        resolver=FakeResolver({}),
+    )
+    resp = client.post(
+        "/telegram/messages/edit",
+        json={"entity": "@nope", "message_id": 42, "text": "patched"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 404, resp.text
+    assert backend.calls == []
+
+
+def test_http_edit_via_chat_name_in_folder() -> None:
+    backend = FakeEditBackend()
+    folders = FakeFolderBackend({"Clients": (2, {"Client chat": -100777})})
+    client = _http_client(
+        access_block=_FREE_EDIT_ACCESS, edit_backend=backend, folder_backend=folders
+    )
+    resp = client.post(
+        "/telegram/messages/edit",
+        json={
+            "chat_name": "Client chat",
+            "folder_name": "Clients",
+            "message_id": 42,
+            "text": "patched",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["telegram_chat_id"] == -100777
+    assert resp.json()["chat_name"] == "Client chat"
+    assert backend.calls[-1]["chat_id"] == -100777
+
+
+def test_http_edit_unknown_chat_name_is_404() -> None:
+    backend = FakeEditBackend()
+    folders = FakeFolderBackend({"Clients": (2, {"Client chat": -100777})})
+    client = _http_client(
+        access_block=_FREE_EDIT_ACCESS, edit_backend=backend, folder_backend=folders
+    )
+    resp = client.post(
+        "/telegram/messages/edit",
+        json={
+            "chat_name": "Missing",
+            "folder_name": "Clients",
+            "message_id": 42,
+            "text": "patched",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 404, resp.text
+    assert backend.calls == []
 
 
 def test_http_edit_rule_level_override_restricts_over_policy_default() -> None:

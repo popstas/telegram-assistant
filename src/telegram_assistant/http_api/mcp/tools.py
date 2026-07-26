@@ -2122,13 +2122,28 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         try:
             backend = _message_folder_backend_or_503(request)  # type: ignore[arg-type]
             authorizer = build_authorizer(request, folder_backend=backend)  # type: ignore[arg-type]
+            # Mirror of the HTTP route: resolve first so the READ gate sees the
+            # folder's own id and a `folder_id:` rule grants an inspect by name.
+            try:
+                snapshot = await inspect_folder(
+                    backend,
+                    folder_name=folder_name,
+                    folder_id=folder_id,
+                )
+            except (FolderNotFoundError, FolderIdMismatchError):
+                # Mirror of the HTTP route: a resolution failure must not
+                # outrank the denial, or an ungranted caller can tell present
+                # folders (403) from absent ones (404) and drive a
+                # dialog-filter RPC per probe. The gate runs on the requested
+                # *name* only: the caller-supplied `folder_id` is unverified
+                # here, so applying a `folder_id:` rule to it would let READ on
+                # one folder unlock probing every other title.
+                await authorizer.require_folder(folder_name, AccessLevel.READ)
+                raise
             await authorizer.require_folder(
-                folder_name, AccessLevel.READ, folder_id=folder_id
-            )
-            snapshot = await inspect_folder(
-                backend,
-                folder_name=folder_name,
-                folder_id=folder_id,
+                snapshot.folder_name,
+                AccessLevel.READ,
+                folder_id=snapshot.folder_id,
             )
             return snapshot.to_dict()
         except Exception as exc:

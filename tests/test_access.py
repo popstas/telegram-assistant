@@ -795,6 +795,27 @@ async def test_folder_id_and_name_rules_union() -> None:
 
 
 @pytest.mark.asyncio
+async def test_require_folder_granted_by_wildcard_rule() -> None:
+    """`all:` is a separate code path in `require_folder` from chat gating.
+
+    The documented "wildcard baseline" shape is what gates `groups create` into
+    a folder, so losing the wildcard here would deny every folder placement.
+    """
+    auth = Authorizer(AccessConfig(rules=[AccessRule(all=True, permission="write")]))
+    await auth.require_folder("Clients", AccessLevel.WRITE)
+    await auth.require_folder("Clients", AccessLevel.WRITE, folder_id=2)
+
+
+@pytest.mark.asyncio
+async def test_require_folder_wildcard_read_does_not_grant_write() -> None:
+    """Capabilities stay independent on the folder path too."""
+    auth = Authorizer(AccessConfig(rules=[AccessRule(all=True, permission="read")]))
+    await auth.require_folder("Clients", AccessLevel.READ)
+    with pytest.raises(AccessDenied):
+        await auth.require_folder("Clients", AccessLevel.WRITE)
+
+
+@pytest.mark.asyncio
 async def test_require_folder_accepts_folder_id_rule() -> None:
     auth = Authorizer(
         AccessConfig(rules=[AccessRule(folder_id=2, permission="write")]),

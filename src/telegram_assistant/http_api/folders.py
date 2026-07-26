@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field, model_validator
 
-from telegram_assistant.access import AccessDenied
+from telegram_assistant.access import AccessDenied, AccessLevel
 from telegram_assistant.folders import (
     AmbiguousChatNameError,
     ChatNotFoundError,
@@ -104,10 +104,41 @@ def build_router() -> APIRouter:
         folder_id: int | None = None,
     ) -> dict[str, Any]:
         backend = _backend_or_503(request)
+        # Listing a folder discloses every chat id/title in it, so it needs the
+        # same READ gate the MCP `telegram_folders_inspect` tool applies —
+        # otherwise a deny-by-default policy is enforced on one remote surface
+        # and bypassed on the other.
+        authorizer = build_authorizer(request, folder_backend=backend)
         try:
-            snapshot = await inspect_folder(
-                backend, folder_name=folder_name, folder_id=folder_id
+            # Resolve first, then gate on the folder's *own* id: the caller need
+            # not repeat `folder_id`, so gating on the request value would make a
+            # `folder_id:` rule unable to grant an inspect by name. Nothing is
+            # disclosed before the check — only the snapshot's own identity is
+            # used to run it.
+            try:
+                snapshot = await inspect_folder(
+                    backend, folder_name=folder_name, folder_id=folder_id
+                )
+            except (FolderNotFoundError, FolderIdMismatchError):
+                # A resolution failure must not outrank the denial: reporting
+                # 404 before the gate would let an ungranted caller enumerate
+                # which folder titles exist (404 = absent, 403 = present), and
+                # spend a dialog-filter RPC per probe. Gate on the requested
+                # *name* only — the request's `folder_id` is unverified input
+                # here, and nothing proved it belongs to this name, so honouring
+                # a `folder_id:` rule for it would hand back exactly the
+                # 404/409 distinction (and the mismatch message's real ids) the
+                # fence exists to withhold: READ on one folder id would unlock
+                # probing every other title with `?folder_id=<granted id>`.
+                await authorizer.require_folder(folder_name, AccessLevel.READ)
+                raise
+            await authorizer.require_folder(
+                snapshot.folder_name,
+                AccessLevel.READ,
+                folder_id=snapshot.folder_id,
             )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
         except Exception as exc:
             raise _translate_folder_error(exc) from exc
         return snapshot.to_dict()

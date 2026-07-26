@@ -105,10 +105,12 @@ def _translate_flood_wait(exc: FloodWaitError) -> HTTPException:
     )
 
 
-def _build_pin_pacer(request: Request) -> Pacer | None:
-    """Pacer for pin/unpin, or ``None`` when pacing is disabled.
+def _build_pin_pacer(request: Request) -> Pacer:
+    """Pacer for pin/unpin.
 
-    Reads the interval from the *current* config on every call so a hot-reloaded
+    A disabled policy is expressed by the pacer itself (interval ``0`` skips the
+    gate), not by returning ``None`` — the FLOOD_WAIT retry half applies either
+    way. Reads the interval from the *current* config on every call so a hot-reloaded
     ``telegram.pin_min_interval_seconds`` applies without a restart. The gate
     store may be absent (unopenable DB) — the pacer is still built so FLOOD_WAIT
     retries apply, just without cross-process spacing.
@@ -638,14 +640,19 @@ def _resolve_download_dir(request: Request, out_dir: str | None) -> str:
     directly in the root; an explicit ``out_dir`` is joined into the root when
     relative, resolved to an absolute path, and must stay inside the root, else
     :class:`ValueError` (→ 400). The CLI is not routed through this helper.
+
+    Both sides are resolved with :func:`os.path.realpath`, so a symlink inside
+    the root cannot be used to step out of it (the default root is the system
+    temp dir, which is world-writable on a normal host). ``realpath`` on the
+    root also handles a ``download_root`` that is itself reached via a symlink.
     """
     config = getattr(request.app.state, "config", None)
     configured = getattr(getattr(config, "telegram", None), "download_root", None)
-    root_abs = os.path.abspath(configured or tempfile.gettempdir())
+    root_abs = os.path.realpath(configured or tempfile.gettempdir())
     if out_dir is None:
         return root_abs
     candidate = out_dir if os.path.isabs(out_dir) else os.path.join(root_abs, out_dir)
-    candidate_abs = os.path.abspath(candidate)
+    candidate_abs = os.path.realpath(candidate)
     if candidate_abs != root_abs and not candidate_abs.startswith(root_abs + os.sep):
         raise ValueError(
             "out_dir must be within the configured download root"

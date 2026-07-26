@@ -26,6 +26,7 @@ import contextlib
 import json
 import sqlite3
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -79,15 +80,40 @@ class FolderMembershipCache:
         if not isinstance(payload, dict) or payload.get("version") != PAYLOAD_VERSION:
             return None
         mapping: MembershipMap = {}
-        for entry in payload.get("folders", []):
-            mapping[int(entry["id"])] = (
-                str(entry["name"]),
-                {int(cid) for cid in entry.get("chat_ids", [])},
-            )
-        return mapping, float(row["fetched_at"])
+        try:
+            for entry in payload.get("folders", []):
+                mapping[int(entry["id"])] = (
+                    str(entry["name"]),
+                    {int(cid) for cid in entry.get("chat_ids", [])},
+                )
+            fetched_at = float(row["fetched_at"])
+        except (KeyError, TypeError, ValueError):
+            # A structurally broken row (truncated write, hand-edited DB, a
+            # future shape reusing this version) is a cache *miss*, not a fault:
+            # raising here would 500 every gated operation until someone deletes
+            # the row by hand.
+            return None
+        return mapping, fetched_at
 
-    def save(self, mapping: MembershipMap, fetched_at: float) -> None:
-        """Persist ``mapping`` and the epoch it was fetched at (upsert row 1)."""
+    def save(
+        self,
+        mapping: MembershipMap,
+        fetched_at: float,
+        *,
+        not_after: float | None = None,
+    ) -> bool:
+        """Persist ``mapping`` and the epoch it was fetched at (upsert row 1).
+
+        ``not_after`` makes the write **conditional**: the row is left alone
+        when it already carries a stamp newer than that epoch. Callers pass the
+        moment their fetch *started*, which is what keeps a slow fetch from
+        resurrecting a pre-mutation map — :meth:`clear` leaves a tombstone
+        stamped with the invalidation time, so a map fetched before it (and
+        therefore missing the change) loses the race instead of overwriting it
+        and denying the just-granted chat for a full TTL in every process.
+
+        Returns ``True`` when the row was written.
+        """
         payload = json.dumps(
             {
                 "version": PAYLOAD_VERSION,
@@ -104,6 +130,13 @@ class FolderMembershipCache:
         )
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if not_after is not None:
+                row = conn.execute(
+                    "SELECT fetched_at FROM folder_membership_cache WHERE id = 1"
+                ).fetchone()
+                if row is not None and float(row["fetched_at"]) > float(not_after):
+                    conn.execute("COMMIT")
+                    return False
             conn.execute(
                 """
                 INSERT INTO folder_membership_cache (id, payload, fetched_at)
@@ -115,10 +148,28 @@ class FolderMembershipCache:
                 (payload, float(fetched_at)),
             )
             conn.execute("COMMIT")
+        return True
 
     def clear(self) -> None:
-        """Drop the cached row so the next load misses (a no-op when empty)."""
+        """Invalidate the cached map so the next load misses.
+
+        Writes a tombstone rather than deleting the row: the stamp is what
+        :meth:`save` compares its ``not_after`` against, so a concurrent fetch
+        that started *before* this invalidation cannot write its now-stale map
+        back over it. The tombstone carries a payload version :meth:`load` does
+        not recognise, so it reads as a plain cache miss.
+        """
+        payload = json.dumps({"version": 0, "cleared": True}, sort_keys=True)
         with self._lock, self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM folder_membership_cache WHERE id = 1")
+            conn.execute(
+                """
+                INSERT INTO folder_membership_cache (id, payload, fetched_at)
+                VALUES (1, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    payload = excluded.payload,
+                    fetched_at = excluded.fetched_at
+                """,
+                (payload, time.time()),
+            )
             conn.execute("COMMIT")

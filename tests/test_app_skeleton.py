@@ -9,10 +9,15 @@ from telegram_assistant.cli.main import app as cli_app
 from telegram_assistant.config import load_config_from_text
 from telegram_assistant.http_api import create_app
 from telegram_assistant.messages.telethon_backend import (
+    TelethonDeleteBackend,
+    TelethonEditBackend,
     TelethonForwardBackend,
+    TelethonMediaDownloadBackend,
     TelethonMessageBackend,
     TelethonMessageReadBackend,
+    TelethonPinBackend,
     TelethonReactionBackend,
+    TelethonSearchBackend,
 )
 from telegram_assistant.notifications import TelethonNotificationBackend
 
@@ -101,9 +106,42 @@ def test_default_message_operation_factories_use_telethon_backends(
     )
     assert isinstance(app.state.reaction_backend_factory(None), TelethonReactionBackend)
     assert isinstance(app.state.forward_backend_factory(None), TelethonForwardBackend)
+    assert isinstance(app.state.delete_backend_factory(None), TelethonDeleteBackend)
+    assert isinstance(app.state.edit_backend_factory(None), TelethonEditBackend)
+    assert isinstance(app.state.pin_backend_factory(None), TelethonPinBackend)
+    assert isinstance(
+        app.state.download_backend_factory(None), TelethonMediaDownloadBackend
+    )
+    assert isinstance(app.state.search_backend_factory(None), TelethonSearchBackend)
     assert isinstance(
         app.state.notification_backend_factory(None), TelethonNotificationBackend
     )
+
+
+def test_default_message_operation_factories_return_none_without_a_client(
+    minimal_config_yaml: str,
+) -> None:
+    """Every factory must degrade to 503, never construct a clientless adapter."""
+
+    class _UnconnectedSessionManager:
+        _client = None
+
+    config = load_config_from_text(minimal_config_yaml)
+    app = create_app(config, session_manager=_UnconnectedSessionManager())  # type: ignore[arg-type]
+
+    for slot in (
+        "message_backend_factory",
+        "message_read_backend_factory",
+        "reaction_backend_factory",
+        "forward_backend_factory",
+        "delete_backend_factory",
+        "edit_backend_factory",
+        "pin_backend_factory",
+        "download_backend_factory",
+        "search_backend_factory",
+        "notification_backend_factory",
+    ):
+        assert getattr(app.state, slot)(None) is None, slot
 
 
 def test_cli_version_command() -> None:

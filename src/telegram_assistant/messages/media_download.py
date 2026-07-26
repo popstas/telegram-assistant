@@ -22,6 +22,7 @@ backend, and removes the claimed placeholder when the transfer fails.
 
 from __future__ import annotations
 
+import mimetypes
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -170,14 +171,23 @@ def _resolve_target_path(
 
     ``out_path`` is used verbatim. For ``out_dir`` the original filename is
     joined in (basename only, so a crafted name can't escape the directory);
-    when the media has no name a stable ``message-<id>.bin`` fallback is used.
+    when the media has no name a stable ``message-<id><ext>`` fallback is used,
+    with the extension derived from the probed MIME type.
+
+    Only *documents* carry a name (Telethon reads it from
+    ``DocumentAttributeFilename``), so the fallback is the normal path for every
+    photo and voice note. Telethon would usually repair the extension itself in
+    ``_get_proper_filename``, but :func:`_claim_path` has already created the
+    placeholder by then and Telethon leaves an existing path untouched — so the
+    extension has to be right here or a JPEG lands as ``message-42.bin``.
     """
     if out_path is not None:
         return out_path
     assert out_dir is not None  # guaranteed by the caller's validation
     name = os.path.basename((info.filename or "").strip())
     if not name:
-        name = f"message-{message_id}.bin"
+        ext = mimetypes.guess_extension((info.mime or "").strip()) or ".bin"
+        name = f"message-{message_id}{ext}"
     return os.path.join(out_dir, name)
 
 
@@ -227,16 +237,31 @@ def _claim_path(path: str) -> str:
     placeholder with ``O_CREAT | O_EXCL``, so two concurrent downloads of the
     same file name can't pick the same target — the loser sees ``EEXIST`` and
     moves on to the next candidate. Telethon then writes into the placeholder.
-    The parent directory is created when missing.
+    The parent directory is created when missing. An unusable target directory
+    (a regular file in its place, or one we may not write to) is reported as
+    :class:`ValueError` — bad input, not a server fault, so surfaces map it to
+    the same 400/exit-2 path as the other download validation errors.
     """
     directory = os.path.dirname(path)
     if directory:
-        os.makedirs(directory, exist_ok=True)
+        try:
+            os.makedirs(directory, exist_ok=True)
+        except OSError as exc:
+            raise ValueError(
+                f"cannot use download directory {directory!r}: {exc.strerror or exc}"
+            ) from exc
     for candidate in _candidate_paths(path):
         try:
-            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            # 0600: the default download root is the world-writable system temp
+            # dir, and a READ-only remote caller must not leak private-chat
+            # media to every other local user.
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
         except FileExistsError:
             continue
+        except OSError as exc:
+            raise ValueError(
+                f"cannot create download file {candidate!r}: {exc.strerror or exc}"
+            ) from exc
         os.close(fd)
         return candidate
     raise ValueError(

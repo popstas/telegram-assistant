@@ -45,13 +45,28 @@ class RateGateStore:
         finally:
             conn.close()
 
-    def reserve(self, key: str, min_interval_seconds: float, now: float) -> float:
+    def reserve(
+        self,
+        key: str,
+        min_interval_seconds: float,
+        now: float,
+        *,
+        max_wait: float | None = None,
+    ) -> float:
         """Claim the next slot for ``key`` and return the seconds to wait.
 
         The returned delay is ``next_allowed_at - now`` (``0.0`` when the gate
         is already open). The gate is then advanced to
         ``max(now, next_allowed_at) + min_interval_seconds`` so the *following*
         caller — in this or any other process — waits its own full interval.
+
+        ``max_wait`` makes the reservation conditional: when the caller is not
+        willing to wait that long it would abandon the slot anyway, and booking
+        it would push the gate *further* out on every rejected attempt — a
+        client polling a flood-waited chat would extend its own block. With
+        ``max_wait`` set, a gate beyond it is reported verbatim and left
+        untouched (checked inside the same transaction, so a concurrent
+        reserver can't slip between the read and the decision).
         """
         interval = max(float(min_interval_seconds), 0.0)
         with self._lock, self._connect() as conn:
@@ -61,6 +76,9 @@ class RateGateStore:
             ).fetchone()
             next_allowed_at = float(row["next_allowed_at"]) if row is not None else 0.0
             wait = max(next_allowed_at - float(now), 0.0)
+            if max_wait is not None and wait > float(max_wait):
+                conn.execute("COMMIT")
+                return wait
             conn.execute(
                 """
                 INSERT INTO rate_gate (key, next_allowed_at) VALUES (?, ?)
@@ -96,13 +114,6 @@ class RateGateStore:
                 "SELECT next_allowed_at FROM rate_gate WHERE key = ?", (key,)
             ).fetchone()
         return None if row is None else float(row["next_allowed_at"])
-
-    def clear(self) -> None:
-        """Drop every gate row (used by tests and operator resets)."""
-        with self._lock, self._connect() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            conn.execute("DELETE FROM rate_gate")
-            conn.execute("COMMIT")
 
 
 __all__ = ["RateGateStore"]

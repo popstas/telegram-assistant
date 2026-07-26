@@ -30,7 +30,11 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Protocol, TypeVar
 
+from telegram_assistant.entities.service import EntityRef
+from telegram_assistant.observability.logging import get_logger
 from telegram_assistant.worker.queue import FloodWaitError
+
+_log = get_logger(__name__)
 
 T = TypeVar("T")
 
@@ -48,7 +52,14 @@ DEFAULT_MAX_FLOOD_WAIT_SECONDS = 60.0
 class RateGate(Protocol):
     """Shared pacing state — see :class:`~persistence.rate_gate.RateGateStore`."""
 
-    def reserve(self, key: str, min_interval_seconds: float, now: float) -> float:
+    def reserve(
+        self,
+        key: str,
+        min_interval_seconds: float,
+        now: float,
+        *,
+        max_wait: float | None = None,
+    ) -> float:
         ...
 
     def block_until(self, key: str, next_allowed_at: float) -> None:
@@ -75,10 +86,16 @@ class PacedFloodWaitError(FloodWaitError):
         self.retry_after_seconds = max(float(retry_after_seconds), 0.0)
         self.retry_at = float(retry_at)
         self.attempts = int(attempts)
-        self.args = (
-            f"FLOOD_WAIT {self.seconds:.0f}s not absorbed after {self.attempts} "
-            f"attempt(s); retry after {self.retry_after_seconds:.0f}s",
-        )
+        if self.attempts:
+            reason = (
+                f"FLOOD_WAIT {self.seconds:.0f}s not absorbed after "
+                f"{self.attempts} attempt(s)"
+            )
+        else:
+            # Raised before the op ran: the shared gate is still blocked from an
+            # earlier FLOOD_WAIT, longer than we are willing to wait inline.
+            reason = "pacing gate is blocked by an earlier FLOOD_WAIT"
+        self.args = (f"{reason}; retry after {self.retry_after_seconds:.0f}s",)
 
 
 class Pacer:
@@ -111,16 +128,19 @@ class Pacer:
         self._sleep: SleepFn = sleep if sleep is not None else asyncio.sleep
         self._clock: ClockFn = clock if clock is not None else time.time
 
-    @property
-    def min_interval_seconds(self) -> float:
-        return self._min_interval
-
     async def run(self, key: str, op: Callable[[], Awaitable[T]]) -> T:
         """Pace, run ``op``, and retry it through bounded FLOOD_WAIT pauses."""
-        await self._wait_for_slot(key)
-
         attempts = 0
         while True:
+            # Re-taken on *every* attempt, not just the first. The retry sleep
+            # below backs this caller off, and `block_until` tells the others to
+            # back off — but the gate then opens for everyone at the same
+            # instant: while we sleep, another process can reserve that very
+            # slot and walk in at `retry_at`, so both calls would hit Telegram
+            # together at the retry boundary — the burst the gate exists to
+            # prevent, on the one chat Telegram just flood-waited. Reserving
+            # again makes the retry queue behind whoever booked in the meantime.
+            await self._wait_for_slot(key, attempts=attempts)
             try:
                 return await op()
             except FloodWaitError as exc:
@@ -129,8 +149,20 @@ class Pacer:
                 retry_at = self._clock() + pause
                 # Push the shared gate out so other processes/surfaces also back
                 # off for this chat instead of walking into the same wall.
+                # Best-effort: a gate fault here must not replace the
+                # FLOOD_WAIT we are about to retry (or report) with a storage
+                # error — this caller still sleeps, the others just miss the
+                # hint. Mirrors how the folder-membership cache degrades.
+                # The inner binding must NOT be named `exc`: Python deletes an
+                # `except ... as` name when its block ends, which would unbind
+                # the FLOOD_WAIT we are still handling below.
                 if self._gate is not None:
-                    self._gate.block_until(key, retry_at)
+                    try:
+                        self._gate.block_until(key, retry_at)
+                    except Exception as gate_exc:
+                        _log.warning(
+                            "rate_gate_block_until_failed", key=key, error=str(gate_exc)
+                        )
                 if attempts >= self._max_retries or pause > self._max_wait:
                     raise PacedFloodWaitError(
                         getattr(exc, "seconds", 0.0),
@@ -140,17 +172,69 @@ class Pacer:
                     ) from exc
                 await self._sleep(pause)
 
-    async def _wait_for_slot(self, key: str) -> None:
+    async def _wait_for_slot(self, key: str, *, attempts: int = 0) -> None:
         if self._gate is None or self._min_interval <= 0:
             return
-        wait = self._gate.reserve(key, self._min_interval, self._clock())
-        if wait > 0:
-            await self._sleep(wait)
+        # The cap bounds waits *written into the gate by a FLOOD_WAIT*; it must
+        # never reject the operator's own configured interval. With
+        # `pin_min_interval_seconds` above `max_flood_wait_seconds` a plain
+        # min-interval wait would otherwise exceed the cap, so every paced call
+        # would fail with a flood-wait error Telegram never sent.
+        cap = max(self._max_wait, self._min_interval)
+        # `max_wait` keeps the reservation conditional: a call we are about to
+        # reject must not book (and thereby advance) the slot, or a client
+        # polling a flood-waited chat would push its own retry time further out
+        # with every rejected attempt.
+        # Best-effort, like the pacer's construction sites: an unopenable DB
+        # already degrades to "no cross-process spacing" there, and a *runtime*
+        # fault (write lock held past the busy timeout by the very CLI one-shot
+        # this gate exists to pace against, read-only DB dir) must degrade the
+        # same way. Letting `sqlite3.OperationalError` escape would surface as
+        # an unhandled HTTP 500 — it is neither `AccessDenied`, `FloodWaitError`
+        # nor `ValueError`, the only errors the pin/unpin routes translate.
+        try:
+            wait = self._gate.reserve(
+                key, self._min_interval, self._clock(), max_wait=cap
+            )
+        except Exception as gate_exc:
+            _log.warning("rate_gate_reserve_failed", key=key, error=str(gate_exc))
+            return
+        if wait <= 0:
+            return
+        if wait > cap:
+            # The gate is far in the future — typically a FLOOD_WAIT another
+            # call (or another process) wrote into it. Holding this request open
+            # for that long defeats the same cap `run()` applies to its own
+            # sleeps, so report the wait instead of sleeping it off.
+            # `seconds` carries the real wait too: it is the attribute
+            # `worker.queue.WorkerQueue` sleeps on (`max(fw.seconds, 0) +
+            # margin`), so leaving it at 0 would make a queued paced op burn its
+            # whole retry budget in a few seconds and land in `needs_review`.
+            raise PacedFloodWaitError(
+                wait,
+                retry_after_seconds=wait,
+                retry_at=self._clock() + wait,
+                # `attempts` is what the op has already spent: 0 before the
+                # first call, and the real count when a retry finds the gate
+                # pushed further out by someone else while it slept.
+                attempts=attempts,
+            )
+        await self._sleep(wait)
 
 
 def pin_pacing_key(chat_id: int) -> str:
-    """Gate key for pin/unpin — Telegram's pin limits bite per chat."""
-    return f"pin:{chat_id}"
+    """Gate key for pin/unpin — Telegram's pin limits bite per chat.
+
+    The id is reduced to its bare form (``EntityRef.numeric_id``, i.e. the
+    ``-100`` marker stripped) because the same chat reaches the domain in either
+    shape: an explicit ``telegram_chat_id: -1001234567890`` keeps the marker,
+    while an ``entity``/``chat_name`` lookup yields the bare ``1234567890``.
+    Keying on the raw value would open *two* independent gate rows for one chat,
+    so cross-surface pacing — the whole point of the shared SQLite gate — would
+    silently not apply, and a ``block_until()`` written after a FLOOD_WAIT under
+    one shape would leave the other wide open.
+    """
+    return f"pin:{EntityRef(raw=int(chat_id)).numeric_id}"
 
 
 def retry_after_details(exc: BaseException) -> dict[str, float] | None:

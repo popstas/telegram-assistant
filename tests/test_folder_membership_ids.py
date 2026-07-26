@@ -9,6 +9,7 @@ Telethon traffic is needed.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -139,6 +140,48 @@ async def test_list_folder_chat_ids_skips_default_and_unknown_peers() -> None:
     assert result == [
         FolderChats(folder_id=2, folder_name="Work", chat_ids={20})
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_folder_chat_ids_resolves_saved_messages() -> None:
+    """``InputPeerSelf`` is the one peer shape with no numeric id on it.
+
+    Dropping it would leave Saved Messages out of its folder — every rule
+    granting that folder would then deny ``chat: me``, and the wrong map would
+    be persisted into the shared cache for the whole TTL.
+    """
+    from telethon.tl.types import InputPeerSelf
+
+    class _SelfAwareClient(_FakeClient):
+        def __init__(self, filters: list[Any]) -> None:
+            super().__init__(filters)
+            self.get_me_calls = 0
+
+        async def get_me(self) -> Any:
+            self.get_me_calls += 1
+            return SimpleNamespace(id=4242)
+
+    client = _SelfAwareClient(
+        [
+            _Filter(
+                id=4,
+                title="Personal",
+                include_peers=[InputPeerSelf(), _InputPeerChannel(40)],
+            ),
+            _Filter(id=5, title="Also me", include_peers=[InputPeerSelf()]),
+        ]
+    )
+    backend = TelethonFolderBackend(client)
+
+    result = await backend.list_folder_chat_ids()
+
+    assert result == [
+        FolderChats(folder_id=4, folder_name="Personal", chat_ids={4242, 40}),
+        FolderChats(folder_id=5, folder_name="Also me", chat_ids={4242}),
+    ]
+    # Resolved once, not per folder or per peer.
+    assert client.get_me_calls == 1
+    assert client.get_entity_calls == 0
 
 
 @pytest.mark.asyncio

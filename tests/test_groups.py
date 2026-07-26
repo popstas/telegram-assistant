@@ -609,6 +609,86 @@ async def test_create_group_missing_folder_marks_needs_review(
         )
 
 
+async def test_create_group_explicit_default_folder_name_uses_configured_id(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    """Naming the *default* folder explicitly must still use its configured id.
+
+    Telegram allows two folders with the same title, which is exactly what
+    ``default_chat_folder.folder_id`` disambiguates. Dropping the id merely
+    because the request spelled the default folder's name out would make
+    ``resolve_folder`` fail with "matches 2 folders; set ...folder_id" *after*
+    the supergroup exists — while the operator did set it.
+    """
+    config = _config(minimal_config_yaml)  # default folder: id 2 / "Planfix clients"
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend(
+        folders=[
+            _default_folder(),
+            FolderSnapshot(folder_id=9, folder_name="Planfix clients", chats=[]),
+        ]
+    )
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=1,
+        folder_name="Planfix clients",
+        skip_reserve=True,
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    assert result.folder_id == 2
+    assert folder_backend.added == [(2, -100123)]
+
+
+async def test_create_group_named_folder_ignores_configured_default_id(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    """`--folder-name Other` must not be cross-checked against the default id.
+
+    ``default_chat_folder.folder_id`` describes the *default* folder, so it can
+    only disambiguate when the request names no folder of its own — otherwise
+    ``resolve_folder`` refuses the named folder for having "the wrong id", after
+    the supergroup already exists.
+    """
+    config = _config(minimal_config_yaml)  # default folder: id 2 / "Planfix clients"
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend(
+        folders=[
+            _default_folder(),
+            FolderSnapshot(folder_id=7, folder_name="Other", chats=[]),
+        ]
+    )
+    request = GroupCreateRequest(
+        title="Acme",
+        external_ref=1,
+        folder_name="Other",
+        skip_reserve=True,
+    )
+
+    result, op = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=request,
+    )
+
+    assert op.status is OperationStatus.COMPLETED
+    assert result.folder_name == "Other"
+    assert result.folder_id == 7
+    assert folder_backend.added == [(7, -100123)]
+
+
 async def test_create_group_folder_mutation_failure_marks_needs_review(
     minimal_config_yaml: str, store: OperationStore
 ) -> None:

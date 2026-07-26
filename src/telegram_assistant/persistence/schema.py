@@ -60,8 +60,11 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 
 # Single-row cache of the folder-membership map used by folder-scoped access
 # rules. One Telegram account per deployment ⇒ one row suffices; the CHECK keeps
-# it that way. `payload` is JSON of {folder_name: [chat_id, ...]}; `fetched_at`
-# is a caller-supplied epoch used for the TTL check.
+# it that way. `payload` is versioned JSON
+# {"version": N, "folders": [{"id", "name", "chat_ids"}]} — keyed by the stable
+# folder id, so two folders sharing a title stay separate entries; a row written
+# under an older `folder_cache.PAYLOAD_VERSION` loads as a cache miss.
+# `fetched_at` is a caller-supplied epoch used for the TTL check.
 _FOLDER_MEMBERSHIP_CACHE_DDL = """
 CREATE TABLE IF NOT EXISTS folder_membership_cache (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -70,8 +73,10 @@ CREATE TABLE IF NOT EXISTS folder_membership_cache (
 )
 """
 
-# Cross-process pacing state: `key` names the paced resource (e.g.
-# "pin:-100123") and `next_allowed_at` is the epoch before which the next call
+# Cross-process pacing state: `key` names the paced resource (e.g. "pin:123",
+# built by `pin_pacing_key` from the *bare* chat id — the `-100` marker is
+# stripped so one chat never gets two rows) and `next_allowed_at` is the epoch
+# before which the next call
 # must not run. Separate CLI processes and the HTTP server share one row per
 # key, so a rapid series of pins paces itself no matter which surface issues it.
 _RATE_GATE_DDL = """

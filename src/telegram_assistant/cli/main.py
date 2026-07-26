@@ -477,6 +477,7 @@ def groups_create(
         GroupCreatePending,
         GroupCreateRequest,
         create_group,
+        destination_folder,
     )
     from telegram_assistant.groups.service import (
         ContactSpec,
@@ -592,14 +593,11 @@ def groups_create(
         folder_payload: dict[str, object] | None = None
         warnings: list[str] = []
         if not request.skip_folder:
-            target_folder_name = (
-                request.folder_name
-                or config.telegram.default_chat_folder.folder_name
-            )
-            target_folder_id = (
-                request.folder_id
-                if request.folder_id is not None
-                else config.telegram.default_chat_folder.folder_id
+            # Same helper the real run uses, so the preview resolves the very
+            # same destination folder (a divergence would report a folder error
+            # the actual create never hits, and hide the ones it does).
+            target_folder_name, target_folder_id = destination_folder(
+                config=config.telegram, request=request
             )
 
             async def _check_folder() -> dict[str, object]:
@@ -4206,6 +4204,11 @@ def messages_search(
     except FolderError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+    except ValueError as exc:
+        # Bad input (an unresolvable `--from`, a rejected range re-validated in
+        # the domain) exits 2 like the other message commands, not 1.
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
     except Exception as exc:
         _raise_for_access_or_entity_error(exc)
         typer.echo(f"messages search failed: {exc}", err=True)
@@ -6755,6 +6758,8 @@ def _access_rule_target(rule) -> dict[str, object]:
         return {"kind": "all"}
     if rule.folder is not None:
         return {"kind": "folder", "folder": rule.folder}
+    if rule.folder_id is not None:
+        return {"kind": "folder_id", "folder_id": rule.folder_id}
     return {"kind": "chat", "chats": [str(ref) for ref in rule.chat_refs]}
 
 

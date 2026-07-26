@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -133,6 +134,32 @@ def test_corrupt_payload_is_a_miss(tmp_path: Path) -> None:
     assert FolderMembershipCache(db).load() is None
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Right version, wrong shape: truncated write / hand-edited DB / a
+        # future format that happens to reuse the version.
+        {"version": PAYLOAD_VERSION, "folders": [{"name": "Clients"}]},
+        {"version": PAYLOAD_VERSION, "folders": [{"id": "x", "name": "Clients"}]},
+        {"version": PAYLOAD_VERSION, "folders": [{"id": 1, "name": "C", "chat_ids": 5}]},
+        {"version": PAYLOAD_VERSION, "folders": "nope"},
+    ],
+)
+def test_structurally_broken_payload_is_a_miss(tmp_path: Path, payload: object) -> None:
+    """A malformed row must not raise out of ``load`` — that would 500 the gate."""
+    db = tmp_path / "state.db"
+    cache = FolderMembershipCache(db)
+    cache.save({1: ("Clients", {10})}, fetched_at=1.0)
+    with sqlite3.connect(str(db)) as conn:
+        conn.execute(
+            "UPDATE folder_membership_cache SET payload = ? WHERE id = 1",
+            (json.dumps(payload),),
+        )
+        conn.commit()
+
+    assert FolderMembershipCache(db).load() is None
+
+
 def test_save_overwrites_single_row(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     cache = FolderMembershipCache(db)
@@ -148,14 +175,39 @@ def test_save_overwrites_single_row(tmp_path: Path) -> None:
     assert count == 1
 
 
-def test_clear_removes_row(tmp_path: Path) -> None:
+def test_clear_makes_the_next_load_miss(tmp_path: Path) -> None:
     cache = FolderMembershipCache(tmp_path / "state.db")
     cache.save({1: ("A", {1})}, fetched_at=1.0)
     cache.clear()
     assert cache.load() is None
-    # Clear on an already-empty cache is a no-op.
+    # Clear on an already-cleared cache is a no-op.
     cache.clear()
     assert cache.load() is None
+
+
+def test_conditional_save_is_skipped_when_clear_won_the_race(tmp_path: Path) -> None:
+    """A fetch overtaken by an invalidation must not restore the stale map.
+
+    Process B starts its fetch at ``started``; process A mutates folder
+    membership and clears the shared row; B then tries to persist the map it
+    read *before* the mutation. Without the fence the just-changed chat would be
+    judged against the pre-mutation map for a whole TTL, in every process.
+    """
+    cache = FolderMembershipCache(tmp_path / "state.db")
+    started = time.time()
+    cache.clear()  # stamped "now", i.e. after `started`
+
+    assert cache.save({1: ("A", {1})}, started, not_after=started) is False
+    assert cache.load() is None
+
+
+def test_conditional_save_writes_when_nothing_newer_landed(tmp_path: Path) -> None:
+    cache = FolderMembershipCache(tmp_path / "state.db")
+    cache.clear()
+    started = time.time() + 1.0  # the fetch started after the invalidation
+
+    assert cache.save({1: ("A", {1})}, started, not_after=started) is True
+    assert cache.load() == ({1: ("A", {1})}, started)
 
 
 def test_save_empty_map(tmp_path: Path) -> None:
