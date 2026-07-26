@@ -88,6 +88,19 @@ def test_access_rule_chats_list_is_a_target() -> None:
     assert rule2.chat_refs == [1, 2, 3]
 
 
+def test_access_rule_folder_id_is_its_own_target_kind() -> None:
+    rule = AccessRule(folder_id=7, permission="read")
+    assert rule.folder_id == 7
+    assert rule.folder is None
+    # ...and it conflicts with every other target kind.
+    with pytest.raises(ValueError):
+        AccessRule(folder="Clients", folder_id=7)
+    with pytest.raises(ValueError):
+        AccessRule(chat=1, folder_id=7)
+    with pytest.raises(ValueError):
+        AccessRule(folder_id=7, all=True)
+
+
 def test_access_rule_chats_conflicts_with_other_kinds() -> None:
     with pytest.raises(ValueError):
         AccessRule(chats=[1], folder="Clients")  # two target kinds
@@ -700,3 +713,173 @@ async def test_edit_only_none_config_returns_default() -> None:
     auth = Authorizer(None)
     assert await auth.edit_only_session_messages(1, default=True) is True
     assert await auth.edit_only_session_messages(1, default=False) is False
+
+
+# ---------------------------------------------------------------------------
+# Same-named folders: name rules union, `folder_id` rules select one (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def _twin_clients_folders() -> list[FolderSnapshot]:
+    """Two distinct folders sharing the title ``Clients``."""
+    return [
+        FolderSnapshot(
+            folder_id=1,
+            folder_name="Clients",
+            chats=[FolderChat(chat_id=10, title="A")],
+        ),
+        FolderSnapshot(
+            folder_id=2,
+            folder_name="Clients",
+            chats=[FolderChat(chat_id=20, title="B")],
+        ),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_name_rule_unions_all_same_named_folders() -> None:
+    # Regression: a title-keyed map kept only the last folder, silently denying
+    # the chats of the shadowed one.
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder="Clients", permission="write")]),
+        folder_backend=FakeFolderBackend(_twin_clients_folders()),
+    )
+    await auth.require(10, AccessLevel.WRITE)
+    await auth.require(20, AccessLevel.WRITE)
+    with pytest.raises(AccessDenied):
+        await auth.require(99, AccessLevel.WRITE)
+
+
+@pytest.mark.asyncio
+async def test_folder_id_rule_targets_exactly_one_folder() -> None:
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=2, permission="write")]),
+        folder_backend=FakeFolderBackend(_twin_clients_folders()),
+    )
+    await auth.require(20, AccessLevel.WRITE)
+    # The twin folder shares the title but not the id -> denied.
+    with pytest.raises(AccessDenied):
+        await auth.require(10, AccessLevel.WRITE)
+
+
+@pytest.mark.asyncio
+async def test_folder_id_rule_reports_matched_rule() -> None:
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=2, permissions=["read", "write"])]),
+        folder_backend=FakeFolderBackend(_twin_clients_folders()),
+    )
+    caps, matched = await auth.describe(20)
+    assert caps == frozenset({AccessLevel.READ, AccessLevel.WRITE})
+    assert matched == "folder_id:2"
+    _caps, matched_name = await auth.describe(10)
+    assert matched_name is None
+
+
+@pytest.mark.asyncio
+async def test_folder_id_and_name_rules_union() -> None:
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(folder="Clients", permission="read"),
+                AccessRule(folder_id=1, permission="write"),
+            ]
+        ),
+        folder_backend=FakeFolderBackend(_twin_clients_folders()),
+    )
+    # Folder 1 gets read (name rule) + write (id rule); folder 2 only read.
+    await auth.require(10, AccessLevel.READ)
+    await auth.require(10, AccessLevel.WRITE)
+    await auth.require(20, AccessLevel.READ)
+    with pytest.raises(AccessDenied):
+        await auth.require(20, AccessLevel.WRITE)
+
+
+@pytest.mark.asyncio
+async def test_require_folder_accepts_folder_id_rule() -> None:
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=2, permission="write")]),
+        folder_backend=FakeFolderBackend(_twin_clients_folders()),
+    )
+    await auth.require_folder("Clients", AccessLevel.WRITE, folder_id=2)
+    # The same title with the other id (or with no id at all) is not granted.
+    with pytest.raises(AccessDenied):
+        await auth.require_folder("Clients", AccessLevel.WRITE, folder_id=1)
+    with pytest.raises(AccessDenied):
+        await auth.require_folder("Clients", AccessLevel.WRITE)
+
+
+@pytest.mark.asyncio
+async def test_folder_id_rule_delete_only_override() -> None:
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(
+                    folder_id=2,
+                    permissions=["write", "delete"],
+                    delete_only_session_messages=False,
+                )
+            ]
+        ),
+        folder_backend=FakeFolderBackend(_twin_clients_folders()),
+    )
+    # Member of folder 2 -> override applies; the same-titled twin does not.
+    assert await auth.delete_only_session_messages(20, default=True) is False
+    assert await auth.delete_only_session_messages(10, default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_folder_id_rule_edit_only_override() -> None:
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(
+                    folder_id=1,
+                    permission="write",
+                    edit_only_session_messages=False,
+                )
+            ]
+        ),
+        folder_backend=FakeFolderBackend(_twin_clients_folders()),
+    )
+    assert await auth.edit_only_session_messages(10, default=True) is False
+    assert await auth.edit_only_session_messages(20, default=True) is True
+
+
+@pytest.mark.asyncio
+async def test_folder_level_overrides_restrictive_across_name_and_id() -> None:
+    # A name rule (false) and an id rule (true) both match chat 10; both sit at
+    # the folder level, so the restrictive True wins.
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(
+                    folder="Clients",
+                    permissions=["write", "delete"],
+                    delete_only_session_messages=False,
+                ),
+                AccessRule(
+                    folder_id=1,
+                    permission="delete",
+                    delete_only_session_messages=True,
+                ),
+            ]
+        ),
+        folder_backend=FakeFolderBackend(_twin_clients_folders()),
+    )
+    assert await auth.delete_only_session_messages(10, default=False) is True
+    # Chat 20 only matches the name rule -> its false override stands.
+    assert await auth.delete_only_session_messages(20, default=True) is False
+
+
+@pytest.mark.asyncio
+async def test_folder_id_rule_denies_caller_supplied_name_memberships() -> None:
+    # Callers may hand over bare folder names (no id); those can only satisfy
+    # name rules, never an id rule.
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=1, permission="write")]),
+        folder_backend=FakeFolderBackend(_twin_clients_folders()),
+    )
+    with pytest.raises(AccessDenied):
+        await auth.require(10, AccessLevel.WRITE, folder_memberships=["Clients"])
+    # An explicit (id, name) membership pair does match.
+    await auth.require(10, AccessLevel.WRITE, folder_memberships=[(1, "Clients")])

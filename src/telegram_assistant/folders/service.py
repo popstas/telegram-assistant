@@ -283,7 +283,11 @@ async def remove_chat_from_folder(
             await authorizer.require(chat.chat_id, AccessLevel.WRITE)
         else:
             if not await authorizer.allows(chat.chat_id, AccessLevel.WRITE):
-                await authorizer.require_folder(snapshot.folder_name, AccessLevel.WRITE)
+                await authorizer.require_folder(
+                    snapshot.folder_name,
+                    AccessLevel.WRITE,
+                    folder_id=snapshot.folder_id,
+                )
     if not present:
         return {
             "folder_id": snapshot.folder_id,

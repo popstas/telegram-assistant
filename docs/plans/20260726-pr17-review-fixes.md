@@ -81,13 +81,19 @@ Non-blocking observation (symlink hardening of `download_root`) goes to Post-Com
 
 ### Task 3: `folder_id` access rules + name rules union all same-named folders
 
-- [ ] add `folder_id: int | None = None` to `AccessRule` in `config/models.py` as a new target kind (counts toward the "exactly one target kind" validation together with `chat`/`chats`/`folder`/`all`)
-- [ ] in `access/service.py` `_ensure_index`, index folder rules two ways: by name (compat) and by id; in `_effective_chat_caps`, a **name** rule matches a chat if *any* of its member folders has that name (union across same-named folders), an **id** rule matches only the exact folder; `matched` diagnostic strings become `folder:<name>` / `folder_id:<id>`
-- [ ] keep specificity resolution for `delete_only_session_messages` / `edit_only_session_messages` as chat > folder (id or name — treat both as folder-level; restrictive `true` wins on conflict) > all > policy default
-- [ ] verify the hot-reload `on_swap` cache clear (`http_api/app.py:844`) and CLI cache wiring (`cli/main.py` `_cli_folder_membership_cache`) still work with the new payload
-- [ ] write tests in `tests/test_access.py` / `tests/test_access_enforcement.py`: name rule grants access to chats in *both* same-named folders; `folder_id` rule targets exactly one of them; `folder_id` rule with per-rule `delete_only_session_messages` override; config validation errors (rule with both `folder` and `folder_id`, rule with neither target)
-- [ ] extend `tests/test_access_folder_cache.py` for TTL/stale-serve behavior over the id-keyed map
-- [ ] run tests - must pass before next task
+- [x] add `folder_id: int | None = None` to `AccessRule` in `config/models.py` as a new target kind (counts toward the "exactly one target kind" validation together with `chat`/`chats`/`folder`/`all`)
+- [x] in `access/service.py` `_ensure_index`, index folder rules two ways: by name (compat) and by id; in `_effective_chat_caps`, a **name** rule matches a chat if *any* of its member folders has that name (union across same-named folders), an **id** rule matches only the exact folder; `matched` diagnostic strings become `folder:<name>` / `folder_id:<id>`
+- [x] keep specificity resolution for `delete_only_session_messages` / `edit_only_session_messages` as chat > folder (id or name — treat both as folder-level; restrictive `true` wins on conflict) > all > policy default
+- [x] verify the hot-reload `on_swap` cache clear (`http_api/app.py:844`) and CLI cache wiring (`cli/main.py` `_cli_folder_membership_cache`) still work with the new payload
+- [x] write tests in `tests/test_access.py` / `tests/test_access_enforcement.py`: name rule grants access to chats in *both* same-named folders; `folder_id` rule targets exactly one of them; `folder_id` rule with per-rule `delete_only_session_messages` override; config validation errors (rule with both `folder` and `folder_id`, rule with neither target)
+- [x] extend `tests/test_access_folder_cache.py` for TTL/stale-serve behavior over the id-keyed map
+- [x] run tests - must pass before next task
+
+➕ `require_folder()` gained an optional `folder_id=` kwarg so destination-folder gating can match `folder_id` rules too; passed from `folders/service.py` (snapshot id), MCP `telegram_folders_inspect`, and `groups create` (request id, falling back to `default_chat_folder.folder_id` only when the request names no folder — a requested name + configured default id could describe different folders).
+
+➕ Caller-supplied `folder_memberships=["Name"]` (bare names, id `None`) can only satisfy *name* rules — an id rule needs a real folder id, which is what the backend/cache path supplies.
+
+➕ Hot-reload/CLI cache wiring needed no change: both only construct/`clear()` the cache, and payload v2 (Task 2) already carries ids; verified by the existing wiring tests plus the new id-keyed TTL/stale tests.
 
 ### Task 4: Pin/unpin pacing + FLOOD_WAIT retry shared across surfaces
 

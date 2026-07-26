@@ -261,3 +261,83 @@ def test_app_state_cache_only_with_policy(tmp_path: Path) -> None:
     with_policy = load_config_from_text(_config(policy_lines))
     app2 = create_app(with_policy, session_manager=None, operation_store=None)
     assert app2.state.folder_membership_cache is not None
+
+
+# ---------------------------------------------------------------------------
+# id-keyed map: TTL / stale-serve behaviour with same-named folders (Task 3)
+# ---------------------------------------------------------------------------
+
+
+def _twin_cfg(ttl: int = 300, *, folder_id: int | None = None) -> AccessConfig:
+    rule = (
+        AccessRule(folder_id=folder_id, permission="write")
+        if folder_id is not None
+        else AccessRule(folder="Clients", permission="write")
+    )
+    return AccessConfig(rules=[rule], folder_cache_ttl=ttl)
+
+
+@pytest.mark.asyncio
+async def test_cached_same_named_folders_stay_distinct(tmp_path: Path) -> None:
+    cache = FolderMembershipCache(tmp_path / "state.db")
+    cache.save(
+        {1: ("Clients", {10}), 2: ("Clients", {20})}, fetched_at=time.time()
+    )
+    backend = _CountingFastBackend([])
+
+    # A name rule unions both cached folders...
+    name_auth = Authorizer(_twin_cfg(), folder_backend=backend, cache=cache)
+    await name_auth.require(10, AccessLevel.WRITE)
+    await name_auth.require(20, AccessLevel.WRITE)
+
+    # ...while an id rule only grants the folder it names.
+    id_auth = Authorizer(
+        _twin_cfg(folder_id=2), folder_backend=backend, cache=cache
+    )
+    await id_auth.require(20, AccessLevel.WRITE)
+    with pytest.raises(AccessDenied):
+        await id_auth.require(10, AccessLevel.WRITE)
+
+    assert backend.calls == 0  # both served from the cached id-keyed map
+
+
+@pytest.mark.asyncio
+async def test_expired_cache_refetch_keeps_both_twins(tmp_path: Path) -> None:
+    db = tmp_path / "state.db"
+    cache = FolderMembershipCache(db)
+    cache.save({1: ("Clients", {10})}, fetched_at=time.time() - 10_000)
+    backend = _CountingFastBackend(
+        [
+            FolderChats(folder_id=1, folder_name="Clients", chat_ids={11}),
+            FolderChats(folder_id=2, folder_name="Clients", chat_ids={21}),
+        ]
+    )
+    auth = Authorizer(_twin_cfg(folder_id=2), folder_backend=backend, cache=cache)
+
+    await auth.require(21, AccessLevel.WRITE)
+    with pytest.raises(AccessDenied):
+        await auth.require(11, AccessLevel.WRITE)
+    assert backend.calls == 1
+    assert FolderMembershipCache(db).load()[0] == {
+        1: ("Clients", {11}),
+        2: ("Clients", {21}),
+    }
+
+
+@pytest.mark.asyncio
+async def test_stale_serve_preserves_folder_ids(tmp_path: Path) -> None:
+    cache = FolderMembershipCache(tmp_path / "state.db")
+    cache.save(
+        {1: ("Clients", {10}), 2: ("Clients", {20})},
+        fetched_at=time.time() - 10_000,
+    )
+    backend = _RaisingBackend()
+    auth = Authorizer(
+        _twin_cfg(folder_id=1), folder_backend=backend, cache=cache
+    )
+
+    # The fetch fails; the stale id-keyed map still distinguishes the twins.
+    await auth.require(10, AccessLevel.WRITE)
+    with pytest.raises(AccessDenied):
+        await auth.require(20, AccessLevel.WRITE)
+    assert backend.calls == 1
