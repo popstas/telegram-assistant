@@ -107,9 +107,15 @@ Goal: answer two blocking questions before writing feature code: (a) does the se
 
 ### Task 4: CLI — `--rich-markdown <file.md>` on `messages send`
 
-- [ ] TDD: add failing CLI tests: `--rich-markdown` file read (UTF-8) and passed to domain; error when combined with `--text`/`--file`/`--file-url`/`--mass`; missing/unreadable file → clear error; `--dry-run` payload reflects rich send (update `tests/test_dry_run_members_messages.py` / `tests/test_dry_run_contract.py` as needed)
-- [ ] add `--rich-markdown` option to `messages_send` (`cli/main.py:3223`): read file content, validate non-empty, pass into `SendMessageRequest`; extend the dry-run `planned_actions`/`resolved` payload (`:3620-3655`)
-- [ ] run tests — must pass before next task
+- [x] TDD: add failing CLI tests: `--rich-markdown` file read (UTF-8) and passed to domain; error when combined with `--text`/`--file`/`--file-url`/`--mass`; missing/unreadable file → clear error; `--dry-run` payload reflects rich send (update `tests/test_dry_run_members_messages.py` / `tests/test_dry_run_contract.py` as needed)
+- [x] add `--rich-markdown` option to `messages_send` (`cli/main.py:3223`): read file content, validate non-empty, pass into `SendMessageRequest`; extend the dry-run `planned_actions`/`resolved` payload (`:3620-3655`)
+- [x] run tests — must pass before next task — **1642 passed**, `ruff check src tests` clean
+
+⚠️ **All `--rich-markdown` input errors exit 2, not 1.** The file is read and bounded (non-empty, ≤ `MAX_RICH_MARKDOWN_CHARS`) *before* any backend is opened, mirroring how `--file`/`--schedule-at` already fail fast — so a missing/unreadable/non-UTF-8/empty/oversize file, or a conflicting `--text`/`--file`/`--file-url`/mass-mode combination, never costs a Telegram connection and never reaches the domain's `ValueError` → exit-1 path. Error text goes to **stderr** (Click 8.3 keeps it separate from stdout), so tests assert on `stdout + stderr`.
+
+➕ Dry-run payload reports the article as a **marker, not its body**: `rich_markdown: bool`, `rich_markdown_chars: int | None`, `rich_markdown_file: str | None` — a 32k article would otherwise be echoed back in full. `would`/`planned_actions` read `send rich message (N chars) to chat …`. Pinned by `test_cli_messages_send_dry_run_rich_markdown_envelope` (asserts the markdown text is absent from the whole payload) and `test_cli_messages_send_dry_run_plain_marks_rich_false`.
+
+➕ Added `CliLegacyMessageBackend` in `tests/test_messages_rich_surfaces.py` — the CLI analog of Task 2's `LegacySendBackend`: a plain `--text` send through the real CLI path would `TypeError` if `rich_markdown=None` started being passed downstream.
 
 ### Task 5: MCP — `rich_markdown` kwarg on `telegram_messages_send`
 
