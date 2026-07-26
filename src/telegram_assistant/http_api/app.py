@@ -55,6 +55,7 @@ from telegram_assistant.messages import (
 from telegram_assistant.notifications import NotificationBackend
 from telegram_assistant.observability.logging import configure_logging
 from telegram_assistant.persistence.folder_cache import FolderMembershipCache
+from telegram_assistant.persistence.rate_gate import RateGateStore
 from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.plugins import build_registry
 from telegram_assistant.telegram_client.session import (
@@ -676,6 +677,25 @@ def create_app(
                             )
                         except Exception:
                             app.state.folder_membership_cache = None
+                    # Pacing may have been switched on (0 -> N) by the edit; the
+                    # gate is only built at startup when enabled, so build it
+                    # now rather than leaving pin unpaced for the process life.
+                    if (
+                        getattr(app.state, "rate_gate_store", None) is None
+                        and float(
+                            getattr(new_config.telegram, "pin_min_interval_seconds", 0.0)
+                        )
+                        > 0
+                    ):
+                        gate_path = (
+                            database_path
+                            if database_path is not None
+                            else default_database_path(new_config)
+                        )
+                        try:
+                            app.state.rate_gate_store = RateGateStore(gate_path)
+                        except Exception:
+                            app.state.rate_gate_store = None
                     if mcp_fastmcp_server is not None and new_config.mcp is not None:
                         configure_mcp_tools(
                             mcp_fastmcp_server,
@@ -844,6 +864,23 @@ def create_app(
             app.state.folder_membership_cache = FolderMembershipCache(fmc_db_path)
         except Exception:
             app.state.folder_membership_cache = None
+
+    # Shared pin/unpin pacing gate. Cross-process by design (a CLI one-shot and
+    # this server drive the same account), hence SQLite rather than in-memory
+    # state. Only built when pacing is enabled, and best-effort: an unopenable
+    # DB leaves the slot empty and pin falls back to unpaced calls with
+    # FLOOD_WAIT retries.
+    app.state.rate_gate_store = None
+    if float(getattr(config.telegram, "pin_min_interval_seconds", 0.0)) > 0:
+        gate_db_path = (
+            database_path
+            if database_path is not None
+            else default_database_path(config)
+        )
+        try:
+            app.state.rate_gate_store = RateGateStore(gate_db_path)
+        except Exception:
+            app.state.rate_gate_store = None
 
     app.state.mcp_oauth_server = mcp_oauth_server
     app.state.mcp_fastmcp_server = mcp_fastmcp_server

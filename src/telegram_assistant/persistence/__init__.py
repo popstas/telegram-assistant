@@ -9,6 +9,7 @@ from telegram_assistant.persistence.models import (
     OperationRecord,
     OperationStatus,
 )
+from telegram_assistant.persistence.rate_gate import RateGateStore
 from telegram_assistant.persistence.schema import (
     SCHEMA_VERSION,
     bootstrap,
@@ -31,6 +32,7 @@ __all__ = [
     "OperationRecord",
     "OperationStatus",
     "OperationStore",
+    "RateGateStore",
     "bootstrap",
     "connect",
     "idempotency",

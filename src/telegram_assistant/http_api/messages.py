@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 from datetime import datetime
@@ -49,6 +50,7 @@ from telegram_assistant.messages import (
     MessageSendFailed,
     MessageSendNeedsReview,
     MessageSendPending,
+    Pacer,
     PinBackend,
     PinMessageRequest,
     ReactionBackend,
@@ -66,6 +68,7 @@ from telegram_assistant.messages import (
     mass_send_message,
     pin_message,
     resolve_schedule_at,
+    retry_after_details,
     search_messages,
     send_message,
     set_message_reaction,
@@ -83,10 +86,40 @@ from telegram_assistant.worker.queue import FloodWaitError
 
 
 def _translate_flood_wait(exc: FloodWaitError) -> HTTPException:
+    """Map FLOOD_WAIT to 502, adding retry-after when pacing supplies it.
+
+    A paced pin/unpin that exhausted its retry budget knows *when* the caller
+    may try again; that lands both in the JSON detail and in the standard
+    ``Retry-After`` header so plain HTTP clients see it too.
+    """
+    detail: dict[str, Any] = {"error": "needs_review", "message": str(exc)}
+    retry = retry_after_details(exc)
+    if retry is None:
+        return HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail)
+    detail.update(retry)
     return HTTPException(
         status_code=status.HTTP_502_BAD_GATEWAY,
-        detail={"error": "needs_review", "message": str(exc)},
+        detail=detail,
+        headers={"Retry-After": str(int(math.ceil(retry["retry_after_seconds"])))},
     )
+
+
+def _build_pin_pacer(request: Request) -> Pacer | None:
+    """Pacer for pin/unpin, or ``None`` when pacing is disabled.
+
+    Reads the interval from the *current* config on every call so a hot-reloaded
+    ``telegram.pin_min_interval_seconds`` applies without a restart. The gate
+    store may be absent (unopenable DB) — the pacer is still built so FLOOD_WAIT
+    retries apply, just without cross-process spacing.
+    """
+    config = getattr(request.app.state, "config", None)
+    interval = (
+        float(getattr(config.telegram, "pin_min_interval_seconds", 0.0))
+        if config is not None
+        else 0.0
+    )
+    gate = getattr(request.app.state, "rate_gate_store", None)
+    return Pacer(gate, min_interval_seconds=interval)
 
 
 class Base64AttachmentBody(BaseModel):
@@ -1208,6 +1241,7 @@ def build_router() -> APIRouter:
                     chat_name=chat_name_for_log,
                 ),
                 authorizer=authorizer,
+                pacer=_build_pin_pacer(request),
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc
@@ -1315,6 +1349,7 @@ def build_router() -> APIRouter:
                     chat_name=chat_name_for_log,
                 ),
                 authorizer=authorizer,
+                pacer=_build_pin_pacer(request),
             )
         except AccessDenied as exc:
             raise translate_access_error(exc) from exc

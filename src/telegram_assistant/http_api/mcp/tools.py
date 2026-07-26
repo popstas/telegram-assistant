@@ -95,6 +95,7 @@ from telegram_assistant.http_api.messages import (
     PinBody,
     ReactionBody,
     UnpinBody,
+    _build_pin_pacer,
     _delete_backend_or_503,
     _download_backend_or_503,
     _edit_backend_or_503,
@@ -194,6 +195,7 @@ from telegram_assistant.messages import (
     mass_send_message,
     pin_message,
     resolve_schedule_at,
+    retry_after_details,
     search_messages,
     send_message,
     set_message_reaction,
@@ -417,10 +419,13 @@ def _raise_from_exception(exc: Exception) -> NoReturn:
             message=str(exc),
         )
     if isinstance(exc, FolderPeerFailureError | FloodWaitError):
+        # A paced pin/unpin that ran out of retries knows when to come back —
+        # pass that through so the client can schedule instead of guessing.
         _raise_tool_error(
             code="needs_review",
             status_code=status.HTTP_502_BAD_GATEWAY,
             message=str(exc),
+            detail=retry_after_details(exc),
         )
     if isinstance(exc, OperationNotFoundError):
         _raise_tool_error(
@@ -943,6 +948,7 @@ async def _resolve_pin(request: _McpRequest, body: PinBody) -> dict[str, Any]:
             chat_name=chat_name_for_log,
         ),
         authorizer=authorizer,
+        pacer=_build_pin_pacer(request),  # type: ignore[arg-type]
     )
     return result.to_dict()
 
@@ -978,6 +984,7 @@ async def _resolve_unpin(request: _McpRequest, body: UnpinBody) -> dict[str, Any
             chat_name=chat_name_for_log,
         ),
         authorizer=authorizer,
+        pacer=_build_pin_pacer(request),  # type: ignore[arg-type]
     )
     return result.to_dict()
 

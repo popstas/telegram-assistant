@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from telegram_assistant.access.service import AccessLevel, Authorizer
+from telegram_assistant.messages.pacing import Pacer, pin_pacing_key
 
 
 class PinBackend(Protocol):
@@ -129,6 +130,7 @@ async def pin_message(
     *,
     request: PinMessageRequest,
     authorizer: Authorizer | None = None,
+    pacer: Pacer | None = None,
 ) -> PinMessageResult:
     """Pin ``request.message_id`` in the resolved chat.
 
@@ -138,6 +140,11 @@ async def pin_message(
     it must grant ``WRITE`` on the target chat or :class:`AccessDenied` is raised
     before the backend is touched. ``dry_run`` runs the access check but returns
     without calling the backend.
+
+    A ``pacer`` spreads rapid pins over a shared minimum interval and absorbs
+    ``FLOOD_WAIT`` with bounded sleep-and-retry; without one the backend is
+    called directly (pre-pacing behaviour). ``dry_run`` never paces — nothing
+    reaches Telegram, so there is no rate limit to respect.
     """
     if request.message_id <= 0:
         raise ValueError("message_id must be a positive integer")
@@ -155,12 +162,18 @@ async def pin_message(
             chat_name=request.chat_name,
         )
 
-    await backend.pin_message(
-        chat_id=request.telegram_chat_id,
-        message_id=request.message_id,
-        silent=request.silent,
-        pm_oneside=request.pm_oneside,
-    )
+    async def _call() -> None:
+        await backend.pin_message(
+            chat_id=request.telegram_chat_id,
+            message_id=request.message_id,
+            silent=request.silent,
+            pm_oneside=request.pm_oneside,
+        )
+
+    if pacer is not None:
+        await pacer.run(pin_pacing_key(request.telegram_chat_id), _call)
+    else:
+        await _call()
     return PinMessageResult(
         telegram_chat_id=request.telegram_chat_id,
         telegram_message_id=request.message_id,
@@ -176,6 +189,7 @@ async def unpin_message(
     *,
     request: UnpinMessageRequest,
     authorizer: Authorizer | None = None,
+    pacer: Pacer | None = None,
 ) -> UnpinMessageResult:
     """Unpin ``request.message_id`` (or all pinned messages) in the chat.
 
@@ -186,6 +200,9 @@ async def unpin_message(
     it must grant ``WRITE`` on the target chat or :class:`AccessDenied` is raised
     before the backend is touched. ``dry_run`` runs the access check but returns
     without calling the backend.
+
+    Unpins share the pin pacing gate (same per-chat Telegram limit), so a
+    ``pacer`` throttles them together and retries bounded ``FLOOD_WAIT`` pauses.
     """
     unpin_all = request.message_id is None
     if not unpin_all and request.message_id <= 0:
@@ -203,10 +220,16 @@ async def unpin_message(
             chat_name=request.chat_name,
         )
 
-    await backend.unpin_message(
-        chat_id=request.telegram_chat_id,
-        message_id=request.message_id,
-    )
+    async def _call() -> None:
+        await backend.unpin_message(
+            chat_id=request.telegram_chat_id,
+            message_id=request.message_id,
+        )
+
+    if pacer is not None:
+        await pacer.run(pin_pacing_key(request.telegram_chat_id), _call)
+    else:
+        await _call()
     return UnpinMessageResult(
         telegram_chat_id=request.telegram_chat_id,
         telegram_message_id=request.message_id,

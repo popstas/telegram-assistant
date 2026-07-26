@@ -11,7 +11,7 @@ import contextlib
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _OPERATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS operations (
@@ -70,6 +70,17 @@ CREATE TABLE IF NOT EXISTS folder_membership_cache (
 )
 """
 
+# Cross-process pacing state: `key` names the paced resource (e.g.
+# "pin:-100123") and `next_allowed_at` is the epoch before which the next call
+# must not run. Separate CLI processes and the HTTP server share one row per
+# key, so a rapid series of pins paces itself no matter which surface issues it.
+_RATE_GATE_DDL = """
+CREATE TABLE IF NOT EXISTS rate_gate (
+    key TEXT PRIMARY KEY,
+    next_allowed_at REAL NOT NULL
+)
+"""
+
 _INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_operations_status ON operations(status)",
     "CREATE INDEX IF NOT EXISTS idx_operations_type ON operations(type)",
@@ -107,6 +118,7 @@ def bootstrap(database_path: Path) -> None:
         conn.execute(_IDEMPOTENCY_INDEX_DDL)
         conn.execute(_META_DDL)
         conn.execute(_FOLDER_MEMBERSHIP_CACHE_DDL)
+        conn.execute(_RATE_GATE_DDL)
         for stmt in _INDEXES:
             conn.execute(stmt)
         conn.execute(

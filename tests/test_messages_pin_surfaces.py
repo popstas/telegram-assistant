@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import tempfile
 import textwrap
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from telegram_assistant.cli import main as cli_main
 from telegram_assistant.config import load_config_from_text
 from telegram_assistant.http_api import create_app
 from telegram_assistant.persistence import OperationStore
+from telegram_assistant.worker.queue import FloodWaitError
 
 AUTH = {"Authorization": "Bearer secret_token"}
 
@@ -525,3 +527,209 @@ def test_cli_unpin_rejects_id_and_all(
     )
     assert result.exit_code == 2
     assert backend.unpins == []
+
+
+# ---------------------------------------------------------------------------
+# Pacing + FLOOD_WAIT retry-after across surfaces
+# ---------------------------------------------------------------------------
+
+
+class FloodPinBackend:
+    """Always answers FLOOD_WAIT, with a wait too long for pacing to absorb."""
+
+    def __init__(self, seconds: float = 600.0) -> None:
+        self.seconds = seconds
+        self.attempts = 0
+
+    async def pin_message(
+        self, *, chat_id: int, message_id: int, silent: bool, pm_oneside: bool
+    ) -> None:
+        self.attempts += 1
+        raise FloodWaitError(self.seconds)
+
+    async def unpin_message(
+        self, *, chat_id: int, message_id: int | None
+    ) -> None:
+        self.attempts += 1
+        raise FloodWaitError(self.seconds)
+
+
+def _config_with_pacing(interval: float, session_dir: Path) -> str:
+    return textwrap.dedent(
+        f"""
+        telegram:
+          api_id: 123456
+          api_hash: "telegram_api_hash"
+          session_path: {session_dir}/telegram-assistant.session
+          pin_min_interval_seconds: {interval}
+          default_chat_folder:
+            folder_id: 2
+            folder_name: "Planfix clients"
+          access:
+            rules:
+              - all: true
+                permission: write
+        http:
+          host: "0.0.0.0"
+          port: 8085
+          bearer_token: "secret_token"
+        logging:
+          level: INFO
+        """
+    ).strip()
+
+
+def test_http_pin_paces_rapid_calls(tmp_path: Path) -> None:
+    """The second pin on the same chat waits out the configured interval."""
+    backend = FakePinBackend()
+    config = load_config_from_text(_config_with_pacing(0.4, tmp_path))
+    app = create_app(
+        config,
+        session_manager=None,
+        pin_backend_factory=lambda _r: backend,
+        folder_backend_factory=lambda _r: None,
+        resolver_factory=lambda _r: None,
+        database_path=tmp_path / "state.db",
+    )
+    client = TestClient(app)
+    body = {"telegram_chat_id": -100123, "message_id": 7}
+
+    started = time.monotonic()
+    for _ in range(2):
+        resp = client.post("/telegram/messages/pin", json=body, headers=AUTH)
+        assert resp.status_code == 200, resp.text
+    elapsed = time.monotonic() - started
+
+    assert elapsed >= 0.4
+    assert len(backend.pins) == 2
+
+
+def test_http_pin_no_pacing_when_interval_zero(tmp_path: Path) -> None:
+    backend = FakePinBackend()
+    config = load_config_from_text(_config_with_pacing(0, tmp_path))
+    app = create_app(
+        config,
+        session_manager=None,
+        pin_backend_factory=lambda _r: backend,
+        folder_backend_factory=lambda _r: None,
+        resolver_factory=lambda _r: None,
+        database_path=tmp_path / "state.db",
+    )
+    client = TestClient(app)
+    body = {"telegram_chat_id": -100123, "message_id": 7}
+
+    started = time.monotonic()
+    for _ in range(3):
+        assert (
+            client.post("/telegram/messages/pin", json=body, headers=AUTH).status_code
+            == 200
+        )
+    assert time.monotonic() - started < 0.4
+    assert len(backend.pins) == 3
+
+
+def test_http_pin_flood_wait_reports_retry_after() -> None:
+    backend = FloodPinBackend(seconds=600.0)
+    client = _http_client(access_block=_WRITE_ACCESS, pin_backend=backend)  # type: ignore[arg-type]
+    resp = client.post(
+        "/telegram/messages/pin",
+        json={"telegram_chat_id": -100123, "message_id": 7},
+        headers=AUTH,
+    )
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "needs_review"
+    # 600s FLOOD_WAIT + the 5s safety margin.
+    assert detail["retry_after_seconds"] == 605.0
+    assert detail["retry_at"] > 0
+    assert resp.headers["Retry-After"] == "605"
+
+
+def test_http_unpin_flood_wait_reports_retry_after() -> None:
+    backend = FloodPinBackend(seconds=600.0)
+    client = _http_client(access_block=_WRITE_ACCESS, pin_backend=backend)  # type: ignore[arg-type]
+    resp = client.post(
+        "/telegram/messages/unpin",
+        json={"telegram_chat_id": -100123, "unpin_all": True},
+        headers=AUTH,
+    )
+    assert resp.status_code == 502, resp.text
+    assert resp.json()["detail"]["retry_after_seconds"] == 605.0
+    assert resp.headers["Retry-After"] == "605"
+
+
+def test_cli_pin_flood_wait_reports_next_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = _write_config(tmp_path, _config_with_access(_WRITE_ACCESS))
+    backend = FloodPinBackend(seconds=600.0)
+    _patch_cli_pin_backends(monkeypatch, backend)  # type: ignore[arg-type]
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "pin",
+            "--chat-id",
+            "-100123",
+            "--message-id",
+            "7",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    assert "Retry after 605s" in result.output
+    assert "next attempt at" in result.output
+
+
+def test_cli_unpin_flood_wait_reports_next_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = _write_config(tmp_path, _config_with_access(_WRITE_ACCESS))
+    backend = FloodPinBackend(seconds=600.0)
+    _patch_cli_pin_backends(monkeypatch, backend)  # type: ignore[arg-type]
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "unpin",
+            "--chat-id",
+            "-100123",
+            "--all",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    assert "Retry after 605s" in result.output
+
+
+def test_cli_pin_paces_across_processes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two CLI invocations share the SQLite gate, so the second one waits."""
+    config_file = _write_config(tmp_path, _config_with_pacing(0.4, tmp_path))
+    backend = FakePinBackend()
+    _patch_cli_pin_backends(monkeypatch, backend)
+
+    runner = CliRunner()
+    args = [
+        "messages",
+        "pin",
+        "--chat-id",
+        "-100123",
+        "--message-id",
+        "7",
+        "--config",
+        str(config_file),
+    ]
+    started = time.monotonic()
+    for _ in range(2):
+        result = runner.invoke(cli_main.app, args)
+        assert result.exit_code == 0, result.output
+    assert time.monotonic() - started >= 0.4
+    assert len(backend.pins) == 2
