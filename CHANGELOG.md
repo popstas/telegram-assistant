@@ -13,6 +13,7 @@
 
 ### Bug Fixes
 
+- Address code review findings
 - Never claim a foreign UpdateMessageID as the rich send's id
 - Keep rich-send env/id failures out of the previous_attempt_failed taxonomy
 - review: Handle UpdateShort* envelopes in rich send id extraction
