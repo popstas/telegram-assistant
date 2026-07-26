@@ -5,6 +5,7 @@
 
 ### Features
 
+- Key folder membership by folder_id instead of title
 - Never overwrite files on messages download
 - Document messages edit/pin/unpin/download/search + access perf knobs
 - Verify messages ops + access perf acceptance criteria

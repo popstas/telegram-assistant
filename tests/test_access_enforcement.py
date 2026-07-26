@@ -426,3 +426,60 @@ async def test_create_group_allowed_when_destination_folder_writable(
         authorizer=auth,
     )
     assert result.telegram_chat_id == backend._chat_id
+
+
+async def test_create_group_allowed_by_folder_id_rule(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    # The destination is the configured default folder (id 2); a `folder_id`
+    # rule gates the create just as precisely as a name rule.
+    config = load_config_from_text(minimal_config_yaml)
+    from tests.test_groups import FakeGroupBackend
+
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend(
+        [FolderSnapshot(folder_id=2, folder_name="Planfix clients", chats=[])]
+    )
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=2, permission="write")]),
+        folder_backend=folder_backend,
+    )
+    result, _ = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=GroupCreateRequest(title="Acme", external_ref=1),
+        authorizer=auth,
+    )
+    assert result.telegram_chat_id == backend._chat_id
+
+
+async def test_create_group_denied_by_other_folder_id_rule(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    config = load_config_from_text(minimal_config_yaml)
+    from tests.test_groups import FakeGroupBackend
+
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend(
+        [FolderSnapshot(folder_id=2, folder_name="Planfix clients", chats=[])]
+    )
+    # Grants write to a *different* folder id, even though titles could match.
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=3, permission="write")]),
+        folder_backend=folder_backend,
+    )
+    with pytest.raises(AccessDenied):
+        await create_group(
+            backend=backend,
+            folder_backend=folder_backend,
+            store=store,
+            config=config.telegram,
+            plugins=build_registry(config),
+            request=GroupCreateRequest(title="Acme", external_ref=1),
+            authorizer=auth,
+        )
+    assert backend.created == []
+    assert _operation_count(store) == 0

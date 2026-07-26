@@ -2091,7 +2091,9 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         try:
             backend = _message_folder_backend_or_503(request)  # type: ignore[arg-type]
             authorizer = build_authorizer(request, folder_backend=backend)  # type: ignore[arg-type]
-            await authorizer.require_folder(folder_name, AccessLevel.READ)
+            await authorizer.require_folder(
+                folder_name, AccessLevel.READ, folder_id=folder_id
+            )
             snapshot = await inspect_folder(
                 backend,
                 folder_name=folder_name,

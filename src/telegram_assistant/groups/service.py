@@ -723,7 +723,16 @@ async def create_group(
         target_folder_name = (
             request.folder_name or config.default_chat_folder.folder_name
         )
-        await authorizer.require_folder(target_folder_name, AccessLevel.WRITE)
+        # The destination folder id (when known) lets a ``folder_id`` rule gate
+        # the create as precisely as a name rule. The configured default id only
+        # applies when the request did not name a different folder — otherwise
+        # it would describe a folder the chat is not headed for.
+        target_folder_id = request.folder_id
+        if target_folder_id is None and request.folder_name is None:
+            target_folder_id = config.default_chat_folder.folder_id
+        await authorizer.require_folder(
+            target_folder_name, AccessLevel.WRITE, folder_id=target_folder_id
+        )
 
     key = idempotency.group_create_key(
         external_ref=request.external_ref, title=request.title

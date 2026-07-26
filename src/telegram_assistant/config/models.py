@@ -59,7 +59,10 @@ class AccessRule(BaseModel):
       resolver. ``chat`` (singular) and ``chats`` (list) are the same kind and
       may be combined — their refs union together;
     * ``folder`` — a Telegram chat-folder name (every chat in it inherits the
-      grant);
+      grant). Folder titles are **not** unique in Telegram, so a name rule
+      unions *every* folder carrying that title;
+    * ``folder_id`` — a Telegram chat-folder id, selecting exactly one folder
+      even when several share its title;
     * ``all: true`` — a wildcard matching every chat.
 
     Permissions come from ``permissions`` (a list) when set, otherwise from the
@@ -77,6 +80,7 @@ class AccessRule(BaseModel):
     chat: str | int | None = None
     chats: list[str | int] = Field(default_factory=list)
     folder: str | None = None
+    folder_id: int | None = None
     all: bool = False
     permission: AccessPermission = "write"
     permissions: list[AccessPermission] = Field(default_factory=list)
@@ -127,13 +131,14 @@ class AccessRule(BaseModel):
         targets = [
             bool(self.chat_refs),
             self.folder is not None,
+            self.folder_id is not None,
             bool(self.all),
         ]
         set_count = sum(targets)
         if set_count != 1:
             raise ValueError(
                 "each access rule must set exactly one target kind of "
-                "'chat'/'chats' / 'folder' / 'all: true'"
+                "'chat'/'chats' / 'folder' / 'folder_id' / 'all: true'"
             )
         if not self.effective_permissions:
             raise ValueError("access rule must grant at least one permission")

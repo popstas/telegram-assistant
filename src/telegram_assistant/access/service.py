@@ -189,18 +189,23 @@ class Authorizer:
         self._built = False
         self._default_caps: set[AccessLevel] = set()
         self._chat_caps: dict[int, set[AccessLevel]] = {}
+        # Folder rules are indexed twice: by title (compat — matches *every*
+        # same-named folder) and by stable id (exact single folder).
         self._folder_caps: dict[str, set[AccessLevel]] = {}
+        self._folder_id_caps: dict[int, set[AccessLevel]] = {}
         # Per-level ``delete_only_session_messages`` overrides (only rules that
         # set the flag land here). Within a level conflicting values collapse
         # restrictively (``True`` wins) at build time.
         self._default_delete_only: bool | None = None
         self._chat_delete_only: dict[int, bool] = {}
         self._folder_delete_only: dict[str, bool] = {}
+        self._folder_id_delete_only: dict[int, bool] = {}
         # Per-level ``edit_only_session_messages`` overrides, resolved with the
         # exact same specificity/restrictive-wins rules as the delete maps above.
         self._default_edit_only: bool | None = None
         self._chat_edit_only: dict[int, bool] = {}
         self._folder_edit_only: dict[str, bool] = {}
+        self._folder_id_edit_only: dict[int, bool] = {}
         self._memberships: dict[int, set[Membership]] | None = None
 
     @property
@@ -214,12 +219,15 @@ class Authorizer:
         default_caps: set[AccessLevel] = set()
         chat_caps: dict[int, set[AccessLevel]] = {}
         folder_caps: dict[str, set[AccessLevel]] = {}
+        folder_id_caps: dict[int, set[AccessLevel]] = {}
         default_delete_only: bool | None = None
         chat_delete_only: dict[int, bool] = {}
         folder_delete_only: dict[str, bool] = {}
+        folder_id_delete_only: dict[int, bool] = {}
         default_edit_only: bool | None = None
         chat_edit_only: dict[int, bool] = {}
         folder_edit_only: dict[str, bool] = {}
+        folder_id_edit_only: dict[int, bool] = {}
 
         def _merge_only(existing: bool | None, new: bool) -> bool:
             # Restrictive (True) wins on conflict within a level.
@@ -249,6 +257,16 @@ class Authorizer:
                     folder_edit_only[rule.folder] = _merge_only(
                         folder_edit_only.get(rule.folder), edit_override
                     )
+            elif rule.folder_id is not None:
+                folder_id_caps.setdefault(rule.folder_id, set()).update(levels)
+                if delete_override is not None:
+                    folder_id_delete_only[rule.folder_id] = _merge_only(
+                        folder_id_delete_only.get(rule.folder_id), delete_override
+                    )
+                if edit_override is not None:
+                    folder_id_edit_only[rule.folder_id] = _merge_only(
+                        folder_id_edit_only.get(rule.folder_id), edit_override
+                    )
             else:
                 refs = rule.chat_refs
                 if refs and self._resolver is None:
@@ -270,17 +288,21 @@ class Authorizer:
         self._default_caps = default_caps
         self._chat_caps = chat_caps
         self._folder_caps = folder_caps
+        self._folder_id_caps = folder_id_caps
         self._default_delete_only = default_delete_only
         self._chat_delete_only = chat_delete_only
         self._folder_delete_only = folder_delete_only
+        self._folder_id_delete_only = folder_id_delete_only
         self._default_edit_only = default_edit_only
         self._chat_edit_only = chat_edit_only
         self._folder_edit_only = folder_edit_only
+        self._folder_id_edit_only = folder_id_edit_only
         self._built = True
 
     async def _folder_memberships(self, chat_id: int) -> set[Membership]:
-        # No folder rules → folder membership is irrelevant; skip the scan.
-        if not self._folder_caps:
+        # No folder rules (by name or id) → folder membership is irrelevant;
+        # skip the scan.
+        if not self._folder_caps and not self._folder_id_caps:
             return set()
         if self._memberships is None:
             self._memberships = await self._resolve_memberships()
@@ -373,20 +395,28 @@ class Authorizer:
     ) -> tuple[set[AccessLevel], str | None]:
         """Return ``(granted_caps, matched_rule_description)`` for a chat.
 
-        Capabilities **union** across every matching rule. ``matched`` names the
-        most specific rule kind that contributed (``chat`` > ``folder`` >
-        ``all``), for observability.
+        Capabilities **union** across every matching rule. A **name** folder rule
+        matches when *any* of the chat's folders carries that title (so two
+        same-named folders both grant), an **id** rule only on the exact folder.
+        ``matched`` names the most specific rule kind that contributed (``chat``
+        > ``folder:<name>``/``folder_id:<id>`` > ``all``), for observability.
         """
         caps: set[AccessLevel] = set()
         matched: str | None = None
         if self._default_caps:
             caps |= self._default_caps
             matched = "all"
-        for _folder_id, folder_name in memberships:
+        for folder_id, folder_name in memberships:
             folder_caps = self._folder_caps.get(folder_name)
             if folder_caps:
                 caps |= folder_caps
                 matched = f"folder:{folder_name}"
+            id_caps = (
+                self._folder_id_caps.get(folder_id) if folder_id is not None else None
+            )
+            if id_caps:
+                caps |= id_caps
+                matched = f"folder_id:{folder_id}"
         chat_caps = self._chat_caps.get(chat_id)
         if chat_caps:
             caps |= chat_caps
@@ -457,18 +487,22 @@ class Authorizer:
 
         ``which`` selects the override maps (``"delete"`` or ``"edit"``). Starts
         from the policy-level ``default`` and applies the most specific matching
-        rule override (chat rule > folder rule > all rule). Within one level a
-        restrictive ``True`` already won at index-build time. The override maps
-        are read *after* :meth:`_ensure_index` populates them.
+        rule override (chat rule > folder rule > all rule). Name- and
+        id-targeted folder rules sit at the *same* (folder) level, so a
+        restrictive ``True`` from either wins. Within one level a restrictive
+        ``True`` already won at index-build time. The override maps are read
+        *after* :meth:`_ensure_index` populates them.
         """
         await self._ensure_index()
         if which == "delete":
             default_override = self._default_delete_only
             folder_overrides_map = self._folder_delete_only
+            folder_id_overrides_map = self._folder_id_delete_only
             chat_overrides_map = self._chat_delete_only
         else:
             default_override = self._default_edit_only
             folder_overrides_map = self._folder_edit_only
+            folder_id_overrides_map = self._folder_id_edit_only
             chat_overrides_map = self._chat_edit_only
         lookup_id = _canonical_chat_id(chat_id)
         if folder_memberships is None:
@@ -485,8 +519,14 @@ class Authorizer:
             for _folder_id, folder_name in memberships
             if folder_name in folder_overrides_map
         ]
+        folder_overrides.extend(
+            folder_id_overrides_map[folder_id]
+            for folder_id, _folder_name in memberships
+            if folder_id is not None and folder_id in folder_id_overrides_map
+        )
         if folder_overrides:
-            # Multiple folders may match; restrictive (True) wins.
+            # Multiple folders (by name or id) may match; restrictive (True)
+            # wins across the whole folder level.
             effective = any(folder_overrides)
         if lookup_id in chat_overrides_map:
             effective = chat_overrides_map[lookup_id]
@@ -579,12 +619,20 @@ class Authorizer:
             matched_rule=matched,
         )
 
-    async def require_folder(self, folder_name: str, level: AccessLevel) -> None:
-        """Raise :class:`AccessDenied` unless ``folder_name`` is granted ``level``.
+    async def require_folder(
+        self,
+        folder_name: str,
+        level: AccessLevel,
+        *,
+        folder_id: int | None = None,
+    ) -> None:
+        """Raise :class:`AccessDenied` unless the folder is granted ``level``.
 
         Used for destination-folder gating (e.g. group create). The effective
-        capability set is the union of the wildcard default and any folder rule.
-        With no active policy this is a no-op.
+        capability set is the union of the wildcard default, any name rule
+        carrying ``folder_name`` and — when the caller knows the folder's stable
+        id — any ``folder_id`` rule for it. With no active policy this is a
+        no-op.
         """
         if self._config is None:
             return
@@ -598,6 +646,10 @@ class Authorizer:
         if folder_caps:
             caps |= folder_caps
             matched = f"folder:{folder_name}"
+        id_caps = self._folder_id_caps.get(folder_id) if folder_id is not None else None
+        if id_caps:
+            caps |= id_caps
+            matched = f"folder_id:{folder_id}"
         if level not in caps:
             _log.warning(
                 "access_denied",
