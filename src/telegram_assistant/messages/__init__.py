@@ -41,6 +41,13 @@ from telegram_assistant.messages.media_download import (
     NoDownloadableMediaError,
     download_media,
 )
+from telegram_assistant.messages.pacing import (
+    PacedFloodWaitError,
+    Pacer,
+    RateGate,
+    pin_pacing_key,
+    retry_after_details,
+)
 from telegram_assistant.messages.pinning import (
     PinBackend,
     PinMessageRequest,
@@ -128,6 +135,11 @@ __all__ = [
     "MessageSendFailed",
     "MessageSendNeedsReview",
     "MessageSendPending",
+    "PacedFloodWaitError",
+    "Pacer",
+    "RateGate",
+    "pin_pacing_key",
+    "retry_after_details",
     "PinBackend",
     "PinMessageRequest",
     "PinMessageResult",

@@ -213,6 +213,16 @@ class TelegramConfig(BaseModel):
             "or http://host:8080. Supported schemes: socks5, socks4, http, https."
         ),
     )
+    pin_min_interval_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        description=(
+            "Minimum seconds between two pin/unpin calls on the same chat. "
+            "Telegram answers rapid pin bursts with FLOOD_WAIT, so the server "
+            "paces them through a shared SQLite gate (CLI processes and the "
+            "HTTP/MCP server pace against each other). 0 disables pacing."
+        ),
+    )
     download_root: str | None = Field(
         default=None,
         description=(

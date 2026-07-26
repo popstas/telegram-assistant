@@ -97,13 +97,27 @@ Non-blocking observation (symlink hardening of `download_root`) goes to Post-Com
 
 ### Task 4: Pin/unpin pacing + FLOOD_WAIT retry shared across surfaces
 
-- [ ] add a small pacer to the pin domain (`messages/pinning.py` or a sibling module): before each real (non-dry-run) `pin`/`unpin` backend call, enforce a minimum interval since the previous pin-op; persist the last-op timestamp in SQLite next to `OperationStore` (new small table, e.g. `rate_gate(key, next_allowed_at)`) so separate CLI processes and the server share pacing state; injectable clock/sleep for tests
-- [ ] add config knob `telegram.pin_min_interval_seconds` (default conservative, e.g. 2.0; `0` disables pacing) in `config/models.py`, threaded from HTTP app state, CLI builder, and MCP the same way other knobs are
-- [ ] on `FloodWaitError` from the backend, sleep `seconds + margin` and retry within a bounded budget (mirror `worker/queue.py` semantics: margin ~5s, max retries); when the budget is exhausted or the wait exceeds a sane cap, raise a structured error carrying `retry_after_seconds`
-- [ ] surface `retry_after_seconds` in all three surfaces: HTTP keeps the existing `_translate_flood_wait` status but includes retry-after in the body/header; CLI prints the next-attempt time; MCP returns it in the tool error payload — no tool renames
-- [ ] write tests in `tests/test_messages_pin.py`: pacing delays the second rapid pin (fake clock, no real sleep); FLOOD_WAIT → sleep+retry → success; budget exhausted → structured error with `retry_after_seconds`; `dry_run` skips pacing and backend; `pin_min_interval_seconds: 0` disables pacing
-- [ ] extend `tests/test_messages_pin_surfaces.py`: HTTP/CLI/MCP propagate retry-after info
-- [ ] run tests - must pass before next task
+- [x] add a small pacer to the pin domain (`messages/pinning.py` or a sibling module): before each real (non-dry-run) `pin`/`unpin` backend call, enforce a minimum interval since the previous pin-op; persist the last-op timestamp in SQLite next to `OperationStore` (new small table, e.g. `rate_gate(key, next_allowed_at)`) so separate CLI processes and the server share pacing state; injectable clock/sleep for tests
+- [x] add config knob `telegram.pin_min_interval_seconds` (default conservative, e.g. 2.0; `0` disables pacing) in `config/models.py`, threaded from HTTP app state, CLI builder, and MCP the same way other knobs are
+- [x] on `FloodWaitError` from the backend, sleep `seconds + margin` and retry within a bounded budget (mirror `worker/queue.py` semantics: margin ~5s, max retries); when the budget is exhausted or the wait exceeds a sane cap, raise a structured error carrying `retry_after_seconds`
+- [x] surface `retry_after_seconds` in all three surfaces: HTTP keeps the existing `_translate_flood_wait` status but includes retry-after in the body/header; CLI prints the next-attempt time; MCP returns it in the tool error payload — no tool renames
+- [x] write tests in `tests/test_messages_pin.py`: pacing delays the second rapid pin (fake clock, no real sleep); FLOOD_WAIT → sleep+retry → success; budget exhausted → structured error with `retry_after_seconds`; `dry_run` skips pacing and backend; `pin_min_interval_seconds: 0` disables pacing
+- [x] extend `tests/test_messages_pin_surfaces.py`: HTTP/CLI/MCP propagate retry-after info
+- [x] run tests - must pass before next task
+
+➕ Pacing policy lives in a new `messages/pacing.py` (`Pacer`, `PacedFloodWaitError`, `pin_pacing_key`, `retry_after_details`); the shared state is `persistence/rate_gate.py` (`RateGateStore`, table `rate_gate`, `SCHEMA_VERSION` bumped 2 → 3). `Pacer.run(key, op)` is generic, so other burst-sensitive ops can reuse it later.
+
+➕ `RateGateStore.reserve()` *advances* the gate inside one write transaction (returns the wait, then books the next slot), so concurrent processes get distinct slots instead of colliding on the same one; `block_until()` (called after a FLOOD_WAIT) never moves a gate backwards.
+
+➕ `PacedFloodWaitError` subclasses `worker.queue.FloodWaitError`, so the existing HTTP 502 / MCP `needs_review` mapping needed no new branches — the surfaces only add `retry_after_seconds`/`retry_at` (HTTP also sets the standard `Retry-After` header).
+
+➕ Extra cap beyond the plan: `max_flood_wait_seconds` (default 60s). A single FLOOD_WAIT longer than that is reported immediately with its retry-after instead of holding a request open for minutes.
+
+➕ `pin_message`/`unpin_message` take `pacer=None` by default — without one the backend is called directly (pre-pacing behaviour), which keeps the existing domain tests and any other caller unchanged. Both share one per-chat gate key (`pin:<chat_id>`).
+
+➕ Tests: gate store covered in a new `tests/test_rate_gate.py`; MCP retry-after in `tests/test_mcp_tools.py` (the pin-surfaces file covers HTTP + CLI, which is where its harness lives). Surface pacing tests use a real (sub-second) interval on a tmp DB; the flood tests use a 600s FLOOD_WAIT so the cap fires immediately and no test ever really sleeps.
+
+➕ HTTP hot-reload (`on_swap`) builds the gate store when `pin_min_interval_seconds` is raised from `0` at runtime, mirroring the folder-cache handling; `_build_pin_pacer` reads the interval per request so a changed value applies live.
 
 ### Task 5: Search date range — domain contract and validation
 

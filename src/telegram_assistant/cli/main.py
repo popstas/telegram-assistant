@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import UTC
 from pathlib import Path
 
 import typer
@@ -177,6 +178,53 @@ def _cli_folder_membership_cache(config):
         return FolderMembershipCache(default_database_path(config))
     except Exception:
         return None
+
+
+def _cli_pin_pacer(config):
+    """Build the pin/unpin pacer for a CLI invocation.
+
+    The gate lives in SQLite so this one-shot process paces against the running
+    server (and against the previous CLI call) — the burst Telegram punishes is
+    per account, not per process. Best-effort: when the DB can't be opened the
+    pacer still retries FLOOD_WAIT, just without cross-process spacing.
+    """
+    from telegram_assistant.messages import Pacer
+
+    interval = float(getattr(config.telegram, "pin_min_interval_seconds", 0.0))
+    gate = None
+    if interval > 0:
+        from telegram_assistant.persistence.rate_gate import RateGateStore
+
+        try:
+            gate = RateGateStore(default_database_path(config))
+        except Exception:
+            gate = None
+    return Pacer(gate, min_interval_seconds=interval)
+
+
+def _raise_for_flood_wait(exc: BaseException, action: str) -> None:
+    """Report a paced-out FLOOD_WAIT with the time of the next allowed attempt.
+
+    Only fires for errors carrying retry-after information (pacing gave up);
+    plain flood-wait errors fall through to the caller's generic handler.
+    """
+    from datetime import datetime
+
+    from telegram_assistant.messages import retry_after_details
+
+    details = retry_after_details(exc)
+    if details is None:
+        return
+    message = (
+        f"{action} rate-limited by Telegram: {exc}. "
+        f"Retry after {details['retry_after_seconds']:.0f}s"
+    )
+    retry_at = details.get("retry_at")
+    if retry_at is not None:
+        when = datetime.fromtimestamp(retry_at, tz=UTC).isoformat()
+        message += f" (next attempt at {when})"
+    typer.echo(message, err=True)
+    raise typer.Exit(code=1)
 
 
 def _cli_authorizer(config, *, resolver=None, folder_backend=None):
@@ -5177,6 +5225,7 @@ def messages_pin(
                     chat_name=name,
                 ),
                 authorizer=authorizer,
+                pacer=_cli_pin_pacer(config),
             )
             return result.to_dict()
         finally:
@@ -5197,6 +5246,7 @@ def messages_pin(
         raise typer.Exit(code=2) from exc
     except Exception as exc:
         _raise_for_access_or_entity_error(exc)
+        _raise_for_flood_wait(exc, "messages pin")
         typer.echo(f"messages pin failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -5321,6 +5371,7 @@ def messages_unpin(
                     chat_name=name,
                 ),
                 authorizer=authorizer,
+                pacer=_cli_pin_pacer(config),
             )
             return result.to_dict()
         finally:
@@ -5341,6 +5392,7 @@ def messages_unpin(
         raise typer.Exit(code=2) from exc
     except Exception as exc:
         _raise_for_access_or_entity_error(exc)
+        _raise_for_flood_wait(exc, "messages unpin")
         typer.echo(f"messages unpin failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 

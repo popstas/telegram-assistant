@@ -13,6 +13,7 @@ from telegram_assistant.http_api import create_app
 from telegram_assistant.messages import DownloadedMedia, MediaInfo, RecentMessage
 from telegram_assistant.persistence import OperationStore
 from telegram_assistant.topics import TopicSummary
+from telegram_assistant.worker.queue import FloodWaitError
 from tests.test_mcp_mount import (
     FakeGoogleOidcProvider,
     FakeSessionManager,
@@ -1427,3 +1428,72 @@ def test_mcp_delete_503_when_backend_unavailable(
     assert result["isError"] is True
     text = result["content"][0]["text"]
     assert '"status": 503' in text
+
+
+class FloodPinBackend:
+    """Always answers FLOOD_WAIT with a wait too long for pacing to absorb."""
+
+    def __init__(self, seconds: float = 600.0) -> None:
+        self.seconds = seconds
+        self.attempts = 0
+
+    async def pin_message(
+        self, *, chat_id: int, message_id: int, silent: bool, pm_oneside: bool
+    ) -> None:
+        self.attempts += 1
+        raise FloodWaitError(self.seconds)
+
+    async def unpin_message(
+        self, *, chat_id: int, message_id: int | None
+    ) -> None:
+        self.attempts += 1
+        raise FloodWaitError(self.seconds)
+
+
+def test_mcp_pin_flood_wait_reports_retry_after(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FloodPinBackend(seconds=600.0)
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"write\"\n",
+    )
+    with _client(config_yaml, tmp_path, pin_backend=backend) as client:  # type: ignore[arg-type]
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_pin",
+            {"telegram_chat_id": -100123, "message_id": 5},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "needs_review"' in text
+    # 600s FLOOD_WAIT + the 5s safety margin.
+    assert '"retry_after_seconds": 605.0' in text
+
+
+def test_mcp_unpin_flood_wait_reports_retry_after(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FloodPinBackend(seconds=600.0)
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"write\"\n",
+    )
+    with _client(config_yaml, tmp_path, pin_backend=backend) as client:  # type: ignore[arg-type]
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_unpin",
+            {"telegram_chat_id": -100123, "unpin_all": True},
+        )
+
+    assert result["isError"] is True
+    assert '"retry_after_seconds": 605.0' in result["content"][0]["text"]
