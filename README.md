@@ -11,19 +11,12 @@ Runtime surfaces share one domain layer:
 
 Runs on MTProto via Telethon under a technical Telegram user account.
 
-> ⚠️ **Warning**
+> **Just watching and forwarding messages?** If you only need to *match and
+> forward* messages (not send/manage them), see
+> [popstas/telegram-resender](https://github.com/popstas/telegram-resender).
 >
-> **Automatically adding members can get your account banned.** Telegram's anti-spam
-> system flags MTProto user accounts that programmatically add people to groups —
-> especially **by phone number** or without the person's consent — as spam, and may
-> **freeze or delete the account** (no real user report is required; detection is
-> automated). To stay within [Telegram's ToS](https://telegram.org/tos):
-> - Prefer **invite links** (`create_invite_link`) so people join the group themselves,
->   instead of passing `members` / `admins` / `contacts` / `telegram_id`.
-> - **Never add users by phone number.**
-> - Adding your own account or a bot (e.g. `@planfix_bot` via `reserve_members`) to your
->   own group is low risk; adding non-consenting human users is what triggers bans.
-> - Treat the technical account as disposable, warm it up, and keep actions rate-limited.
+> **Just want to read-only download any chat history?** See
+> [popstas/telegram-download-chat](https://github.com/popstas/telegram-download-chat).
 
 ## Features
 
@@ -39,9 +32,19 @@ Runs on MTProto via Telethon under a technical Telegram user account.
 - **Access control** — deny-by-default `read` / `write` / `delete` rules per chat, chat list, folder (by name or id), or wildcard, hot-reloaded from config within ~2s.
 - **Planfix plugin** — optional, off by default: `/task <ref>` service messages and `@planfix_bot` welcome cleanup for the Planfix ↔ Telegram integration.
 
-> **Just watching and forwarding messages?** If you only need to *match and
-> forward* messages (not send/manage them), see
-> [popstas/telegram-resender](https://github.com/popstas/telegram-resender).
+> ⚠️ **Warning**
+>
+> **Automatically adding members can get your account banned.** Telegram's anti-spam
+> system flags MTProto user accounts that programmatically add people to groups —
+> especially **by phone number** or without the person's consent — as spam, and may
+> **freeze or delete the account** (no real user report is required; detection is
+> automated). To stay within [Telegram's ToS](https://telegram.org/tos):
+> - Prefer **invite links** (`create_invite_link`) so people join the group themselves,
+>   instead of passing `members` / `admins` / `contacts` / `telegram_id`.
+> - **Never add users by phone number.**
+> - Adding your own account or a bot (e.g. `@planfix_bot` via `reserve_members`) to your
+>   own group is low risk; adding non-consenting human users is what triggers bans.
+> - Treat the technical account as disposable, warm it up, and keep actions rate-limited.
 
 ## Quick start
 
