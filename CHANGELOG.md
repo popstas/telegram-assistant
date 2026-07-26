@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add from_date/to_date contract to messages search domain
 - Pace pin/unpin and retry FLOOD_WAIT across surfaces
 - Add folder_id access rules and union same-named folders
 - Key folder membership by folder_id instead of title

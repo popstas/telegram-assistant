@@ -4,11 +4,13 @@ Covers the write side of the message adapter: text-only sends route through
 ``send_message``, attachment sends through ``send_file`` (single id vs album
 list), scheduling and topic reply ids are forwarded, an empty caption becomes
 ``None``, and Telethon ``FloodWaitError`` is translated for the worker queue.
+:class:`TelethonSearchBackend` is covered too: one ``messages.Search`` RPC
+carrying every filter, plus ``offset_id`` pagination.
 """
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -16,6 +18,7 @@ import pytest
 from telegram_assistant.messages.telethon_backend import (
     TelethonDeleteBackend,
     TelethonMessageBackend,
+    TelethonSearchBackend,
 )
 from telegram_assistant.worker.queue import FloodWaitError
 
@@ -255,3 +258,282 @@ async def test_delete_backend_flood_wait_is_translated() -> None:
     backend = TelethonDeleteBackend(_Flooding())
     with pytest.raises(FloodWaitError):
         await backend.delete_messages(chat_id=1, message_ids=(1,))
+
+
+# ---------------------------------------------------------------------------
+# TelethonSearchBackend
+# ---------------------------------------------------------------------------
+
+
+class _SearchMsg:
+    """Raw ``messages.Search`` hit — no resolved ``sender``, nested reply header."""
+
+    def __init__(
+        self,
+        msg_id: int,
+        *,
+        date: datetime | None = None,
+        message: str = "",
+        from_id: Any = None,
+        reply_to: Any = None,
+        media: Any = None,
+    ) -> None:
+        self.id = msg_id
+        self.date = date
+        self.message = message
+        self.from_id = from_id
+        self.reply_to = reply_to
+        self.media = media
+
+
+class _PeerUser:
+    def __init__(self, user_id: int) -> None:
+        self.user_id = user_id
+
+
+class _ReplyHeader:
+    def __init__(self, reply_to_msg_id: int) -> None:
+        self.reply_to_msg_id = reply_to_msg_id
+
+
+class _User:
+    def __init__(self, user_id: int, username: str | None) -> None:
+        self.id = user_id
+        self.username = username
+
+
+class _SearchPage:
+    def __init__(self, messages: list[Any], users: list[Any] | None = None) -> None:
+        self.messages = messages
+        self.users = list(users or [])
+
+
+class _SearchingClient:
+    """Telethon client double serving canned ``messages.Search`` pages.
+
+    The last page is served repeatedly so a broken termination condition shows
+    up as the request cap below rather than an infinite loop.
+    """
+
+    def __init__(self, pages: list[_SearchPage]) -> None:
+        self._pages = list(pages) or [_SearchPage([])]
+        self.requests: list[Any] = []
+        self.entity_calls: list[Any] = []
+
+    async def get_input_entity(self, ref: Any) -> Any:
+        self.entity_calls.append(ref)
+        return f"peer:{ref}"
+
+    async def __call__(self, request: Any) -> Any:
+        self.requests.append(request)
+        assert len(self.requests) <= 10, "search paging did not terminate"
+        if len(self._pages) > 1:
+            return self._pages.pop(0)
+        return self._pages[0]
+
+
+_BASE = datetime(2026, 7, 1, 12, 0, tzinfo=UTC)
+_FROM = _BASE - timedelta(hours=1)
+_TO = _BASE + timedelta(hours=1)
+
+
+@pytest.mark.asyncio
+async def test_search_builds_one_request_with_all_filters() -> None:
+    """The flagged combination (query + topic + sender + range) is one RPC."""
+    client = _SearchingClient(
+        [_SearchPage([_SearchMsg(10, date=_BASE, message="hit")])]
+    )
+    backend = TelethonSearchBackend(client)
+
+    rows = await backend.search_messages(
+        chat_id=-100777,
+        query="report",
+        from_user="@bob",
+        limit=5,
+        topic_id=42,
+        from_date=_FROM,
+        to_date=_TO,
+    )
+
+    assert [row.id for row in rows] == [10]
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert request.peer == "peer:-100777"
+    assert request.q == "report"
+    assert request.from_id == "peer:@bob"
+    assert request.top_msg_id == 42
+    assert request.limit == 5
+    assert request.offset_id == 0
+    # Bounds are widened by a second; the exact inclusive check runs on rows.
+    assert request.min_date == _FROM - timedelta(seconds=1)
+    assert request.max_date == _TO + timedelta(seconds=1)
+
+
+@pytest.mark.asyncio
+async def test_search_without_range_sends_no_date_bounds() -> None:
+    client = _SearchingClient(
+        [_SearchPage([_SearchMsg(3, date=_BASE, message="a")])]
+    )
+    backend = TelethonSearchBackend(client)
+
+    rows = await backend.search_messages(chat_id=5, query="a", limit=2)
+
+    assert [row.id for row in rows] == [3]
+    request = client.requests[0]
+    assert request.min_date is None
+    assert request.max_date is None
+    assert request.from_id is None
+    assert request.top_msg_id is None
+    # No sender lookup when from_user is absent.
+    assert client.entity_calls == [5]
+
+
+@pytest.mark.asyncio
+async def test_search_query_with_topic_only() -> None:
+    client = _SearchingClient(
+        [_SearchPage([_SearchMsg(8, date=_BASE, message="in topic")])]
+    )
+    backend = TelethonSearchBackend(client)
+
+    rows = await backend.search_messages(
+        chat_id=-100, query="topic", limit=3, topic_id=99
+    )
+
+    assert [row.text for row in rows] == ["in topic"]
+    request = client.requests[0]
+    assert request.q == "topic"
+    assert request.top_msg_id == 99
+
+
+@pytest.mark.asyncio
+async def test_search_range_bounds_are_inclusive() -> None:
+    client = _SearchingClient(
+        [
+            _SearchPage(
+                [
+                    _SearchMsg(4, date=_TO + timedelta(seconds=1), message="after"),
+                    _SearchMsg(3, date=_TO, message="upper edge"),
+                    _SearchMsg(2, date=_FROM, message="lower edge"),
+                    _SearchMsg(1, date=_FROM - timedelta(seconds=1), message="before"),
+                ]
+            )
+        ]
+    )
+    backend = TelethonSearchBackend(client)
+
+    rows = await backend.search_messages(
+        chat_id=1, query="edge", limit=10, from_date=_FROM, to_date=_TO
+    )
+
+    assert [row.id for row in rows] == [3, 2]
+
+
+@pytest.mark.asyncio
+async def test_search_pages_until_limit_collected_newest_first() -> None:
+    out_of_range = _BASE + timedelta(hours=5)
+    client = _SearchingClient(
+        [
+            _SearchPage(
+                [
+                    _SearchMsg(30, date=_BASE, message="one"),
+                    _SearchMsg(29, date=out_of_range, message="skip"),
+                    _SearchMsg(28, date=_BASE, message="two"),
+                ]
+            ),
+            _SearchPage(
+                [
+                    # Overlapping id 28 must be deduped, not counted twice.
+                    _SearchMsg(28, date=_BASE, message="two"),
+                    _SearchMsg(27, date=_BASE, message="three"),
+                    _SearchMsg(26, date=_BASE, message="four"),
+                ]
+            ),
+        ]
+    )
+    backend = TelethonSearchBackend(client)
+
+    rows = await backend.search_messages(
+        chat_id=1, query="x", limit=3, from_date=_FROM, to_date=_TO
+    )
+
+    assert [row.id for row in rows] == [30, 28, 27]
+    assert len(client.requests) == 2
+    # The second page asks for messages older than the last one processed.
+    assert client.requests[0].offset_id == 0
+    assert client.requests[1].offset_id == 28
+
+
+@pytest.mark.asyncio
+async def test_search_stops_when_offset_does_not_advance() -> None:
+    """A server replaying the same page must not loop forever."""
+    stale = _BASE + timedelta(hours=5)
+    client = _SearchingClient(
+        [
+            _SearchPage(
+                [
+                    _SearchMsg(10, date=stale, message="out"),
+                    _SearchMsg(9, date=stale, message="out"),
+                ]
+            )
+        ]
+    )
+    backend = TelethonSearchBackend(client)
+
+    rows = await backend.search_messages(
+        chat_id=1, query="x", limit=2, from_date=_FROM, to_date=_TO
+    )
+
+    assert rows == []
+    assert len(client.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_search_stops_on_empty_page() -> None:
+    client = _SearchingClient([_SearchPage([])])
+    backend = TelethonSearchBackend(client)
+
+    rows = await backend.search_messages(chat_id=1, query="nothing", limit=5)
+
+    assert rows == []
+    assert len(client.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_search_maps_sender_reply_and_media_fallback() -> None:
+    client = _SearchingClient(
+        [
+            _SearchPage(
+                [
+                    _SearchMsg(
+                        12,
+                        date=_BASE,
+                        message="",
+                        from_id=_PeerUser(77),
+                        reply_to=_ReplyHeader(11),
+                        media=type("MessageMediaPhoto", (), {})(),
+                    )
+                ],
+                users=[_User(77, "bob")],
+            )
+        ]
+    )
+    backend = TelethonSearchBackend(client)
+
+    rows = await backend.search_messages(chat_id=1, query="pic", limit=5)
+
+    row = rows[0]
+    assert row.sender == "bob"
+    assert row.reply_to == 11
+    assert row.text == "[photo]"
+    assert row.date == _BASE.isoformat()
+
+
+@pytest.mark.asyncio
+async def test_search_flood_wait_is_translated() -> None:
+    class _Flooding(_SearchingClient):
+        async def __call__(self, request: Any) -> Any:
+            raise _TelethonFloodWaitError(20)
+
+    backend = TelethonSearchBackend(_Flooding([_SearchPage([])]))
+    with pytest.raises(FloodWaitError):
+        await backend.search_messages(chat_id=1, query="x", limit=1)

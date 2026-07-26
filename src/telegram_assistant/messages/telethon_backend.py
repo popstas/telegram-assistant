@@ -13,7 +13,7 @@ imports. Two adapters live here:
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 from telegram_assistant.messages.service import RecentMessage
@@ -381,18 +381,70 @@ class TelethonMediaDownloadBackend:
         )
 
 
+#: Telegram caps a single ``messages.Search`` page at 100 rows.
+_SEARCH_PAGE_SIZE = 100
+
+
+def _search_usernames(users: Any) -> dict[int, str | None]:
+    """Map ``user_id -> username`` from a raw search result's ``users`` list."""
+    out: dict[int, str | None] = {}
+    for user in users or ():
+        user_id = getattr(user, "id", None)
+        if user_id is None:
+            continue
+        out[int(user_id)] = getattr(user, "username", None)
+    return out
+
+
+def _search_sender(msg: Any, usernames: dict[int, str | None]) -> str | None:
+    """Return the sender username for a raw search hit, if known.
+
+    A message from ``messages.Search`` carries only ``from_id``; the usernames
+    come from the result envelope. Telethon's patched ``Message`` may also carry
+    a resolved ``sender`` (e.g. in fakes or when the client filled it in), so
+    that is preferred when present.
+    """
+    sender = getattr(msg, "sender", None)
+    username = getattr(sender, "username", None) if sender is not None else None
+    if username is not None:
+        return username
+    from_id = getattr(msg, "from_id", None)
+    user_id = getattr(from_id, "user_id", None) if from_id is not None else None
+    if user_id is None:
+        return None
+    return usernames.get(int(user_id))
+
+
+def _search_reply_to(msg: Any) -> int | None:
+    """Return the replied-to message id of a raw search hit, if any."""
+    reply_to = getattr(msg, "reply_to_msg_id", None)
+    if reply_to is None:
+        header = getattr(msg, "reply_to", None)
+        reply_to = (
+            getattr(header, "reply_to_msg_id", None) if header is not None else None
+        )
+    return int(reply_to) if reply_to else None
+
+
 class TelethonSearchBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`SearchBackend`.
 
-    Delegates to Telegram's server-side search via
-    ``iter_messages(entity, search=query, from_user=..., reply_to=topic_id,
-    limit=...)`` and maps each hit into a :class:`RecentMessage` row (newest
-    first, the Telethon default). ``FloodWaitError`` is translated so the worker
-    queue can pause-and-retry rather than mark a generic failure.
+    Issues Telegram's server-side search as a single ``messages.Search`` RPC per
+    page, carrying **all** filters at once — ``q``, ``from_id``, ``top_msg_id``
+    and both date bounds — instead of composing ``iter_messages(search=…,
+    reply_to=…)``, whose ``query`` + ``topic_id`` combination is unreliable.
 
-    ``from_date``/``to_date`` are accepted (already validated and UTC-normalised
-    by the domain) so the protocol is satisfied; the domain re-applies the
-    inclusive range check to whatever this adapter returns.
+    ``from_date``/``to_date`` (already validated and UTC-normalised by the
+    domain) are pushed down as ``min_date``/``max_date``, widened by a second on
+    each side because Telegram's own bounds are second-granular and exclusive in
+    places; the inclusive check is then re-applied here (and again in the domain)
+    so the contract stays ``from_date <= date <= to_date``.
+
+    Pages are collected newest-first via ``offset_id`` until ``limit`` in-range
+    rows are gathered, a page comes back empty/short, or the offset stops
+    advancing. Message ids are deduped across pages. ``FloodWaitError`` is
+    translated so the worker queue can pause-and-retry rather than mark a
+    generic failure.
     """
 
     def __init__(self, client: Any) -> None:
@@ -409,39 +461,90 @@ class TelethonSearchBackend:
         from_date: datetime | None = None,
         to_date: datetime | None = None,
     ) -> list[RecentMessage]:
+        from telethon.tl.functions.messages import SearchRequest
+        from telethon.tl.types import InputMessagesFilterEmpty
+
+        # Widen the server-side window by a second on each side; the exact
+        # inclusive bounds are enforced below on the mapped rows.
+        min_date = from_date - timedelta(seconds=1) if from_date is not None else None
+        max_date = to_date + timedelta(seconds=1) if to_date is not None else None
+        page_size = max(1, min(limit, _SEARCH_PAGE_SIZE))
+
         try:
-            entity = await self._client.get_input_entity(chat_id)
+            peer = await self._client.get_input_entity(chat_id)
+            from_peer = (
+                await self._client.get_input_entity(from_user)
+                if from_user is not None
+                else None
+            )
             out: list[RecentMessage] = []
-            async for msg in self._client.iter_messages(
-                entity,
-                search=query,
-                from_user=from_user,
-                reply_to=topic_id,
-                limit=limit,
-            ):
-                sender = getattr(msg, "sender", None)
-                username = (
-                    getattr(sender, "username", None) if sender is not None else None
-                )
-                reply_to = getattr(msg, "reply_to_msg_id", None)
-                date = getattr(msg, "date", None)
-                text = getattr(msg, "message", "") or ""
-                if not text:
-                    media = getattr(msg, "media", None)
-                    if media is not None:
-                        text = _media_summary(media)
-                out.append(
-                    RecentMessage(
-                        id=int(getattr(msg, "id", 0)),
-                        sender=username,
-                        date=date.isoformat() if date is not None else None,
-                        reply_to=int(reply_to) if reply_to else None,
-                        text=text,
+            seen: set[int] = set()
+            offset_id = 0
+            while len(out) < limit:
+                result = await self._client(
+                    SearchRequest(
+                        peer=peer,
+                        q=query,
+                        filter=InputMessagesFilterEmpty(),
+                        min_date=min_date,
+                        max_date=max_date,
+                        offset_id=offset_id,
+                        add_offset=0,
+                        limit=page_size,
+                        max_id=0,
+                        min_id=0,
+                        hash=0,
+                        from_id=from_peer,
+                        top_msg_id=topic_id,
                     )
                 )
+                page = list(getattr(result, "messages", None) or ())
+                if not page:
+                    break
+                usernames = _search_usernames(getattr(result, "users", None))
+                next_offset = offset_id
+                for msg in page:
+                    msg_id = int(getattr(msg, "id", 0))
+                    if next_offset == 0 or 0 < msg_id < next_offset:
+                        next_offset = msg_id
+                    if msg_id in seen:
+                        continue
+                    seen.add(msg_id)
+                    date = getattr(msg, "date", None)
+                    if from_date is not None or to_date is not None:
+                        if date is None:
+                            continue
+                        stamp = date if date.tzinfo is not None else date.replace(tzinfo=UTC)
+                        stamp = stamp.astimezone(UTC)
+                        if from_date is not None and stamp < from_date:
+                            continue
+                        if to_date is not None and stamp > to_date:
+                            continue
+                    text = getattr(msg, "message", "") or ""
+                    if not text:
+                        media = getattr(msg, "media", None)
+                        if media is not None:
+                            text = _media_summary(media)
+                    out.append(
+                        RecentMessage(
+                            id=msg_id,
+                            sender=_search_sender(msg, usernames),
+                            date=date.isoformat() if date is not None else None,
+                            reply_to=_search_reply_to(msg),
+                            text=text,
+                        )
+                    )
+                    if len(out) >= limit:
+                        break
+                # An offset that did not move older would replay the same page.
+                if next_offset == offset_id or next_offset <= 0:
+                    break
+                offset_id = next_offset
+                if len(page) < page_size:
+                    break
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
-        return out
+        return out[:limit]
 
 
 class TelethonForwardBackend:
