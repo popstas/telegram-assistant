@@ -164,10 +164,16 @@ Goal: answer two blocking questions before writing feature code: (a) does the se
 
 ### Task 7: Update documentation
 
-- [ ] update `skills/telegram-assistant/SKILL.md` (messages send options/scenarios, short note on the rich markdown dialect: headings/tables/quotes/code/media-by-URL, 32k limit) and re-sync to `~/.claude/skills/telegram-assistant/SKILL.md`
-- [ ] update `README.md` Commands/usage + HTTP API sections (and MCP tool description if the catalog lists parameters)
-- [ ] update `CLAUDE.md` messages/ area description (rich send, telethon >= 1.44)
-- [ ] run `pytest tests/test_skill_inventory.py tests/test_skill_structure.py` — must pass
+- [x] update `skills/telegram-assistant/SKILL.md` (messages send options/scenarios, short note on the rich markdown dialect: headings/tables/quotes/code/media-by-URL, 32k limit) and re-sync to `~/.claude/skills/telegram-assistant/SKILL.md`
+- [x] update `README.md` Commands/usage + HTTP API sections (and MCP tool description if the catalog lists parameters)
+- [x] update `CLAUDE.md` messages/ area description (rich send, telethon >= 1.44)
+- [x] run `pytest tests/test_skill_inventory.py tests/test_skill_structure.py` — must pass — **13 passed**; full `pytest` **1653 passed**, `ruff check src tests` clean
+
+➕ `--rich-markdown` is the **only** non-bulk send flag that needs a `/tmp` file, so the SKILL.md "Temporary files in `/tmp`" section and the `messages send` **Temp file** row both had to be amended — they previously said "no temp file, text goes via `--text`", which would have pushed the agent to shell-escape a 32k article instead of writing `/tmp/telegram-assistant-article.md`.
+
+➕ Documented the dry-run **marker** contract on every surface doc (`rich_markdown` / `rich_markdown_chars` / `rich_markdown_file`, body never echoed) plus the explicit "do not fall back to a plain `--text` send on failure" rule — the no-silent-fallback decision is a behavioural contract for the *agent* using the skill, not just for the code.
+
+➕ CLAUDE.md's "Three cross-cutting behaviours in `messages/`" became **four**: rich send is exactly that kind of shared invariant (only-when-set kwarg, version-tolerant `InputRichMessageMarkdown` import, raw `SendMessageRequest` + `UpdateMessageID` extraction, mass-exclusivity living on the surfaces).
 
 ## Technical Details
 

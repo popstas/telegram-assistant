@@ -20,7 +20,7 @@ Runs on MTProto via Telethon under a technical Telegram user account.
 
 ## Features
 
-- **Messages** — send targeted or folder-wide mass messages with file/URL attachments (albums), scheduling/delay, and threaded replies; read recent history, text-search a chat (relative window or fixed date range), react with emoji, forward, edit, pin/unpin (server-paced), download a message's media, and delete.
+- **Messages** — send targeted or folder-wide mass messages with file/URL attachments (albums), scheduling/delay, and threaded replies; send **rich messages** (Telegram articles: headings, tables, quotes, code, up to 32 768 chars) from markdown; read recent history, text-search a chat (relative window or fixed date range), react with emoji, forward, edit, pin/unpin (server-paced), download a message's media, and delete.
 - **Groups** — create supergroups (with topics, invite links, member/admin/phone-contact seeding), rename, and switch forum layout (`list` / `tabs`).
 - **Topics** — create single or bulk forum topics (CSV/JSON), close, reopen, and rename.
 - **Members** — bulk add (optionally as admin) and bulk remove (kick or ban); references by `@username`, user id, or phone-contact.
@@ -91,7 +91,7 @@ Top-level:
 
 `messages` — send messages and service commands:
 
-- `messages send` — send a message or service command (targeted or folder-wide mass mode). Attach local files with repeated `--file` and/or remote URLs with repeated `--file-url` (multiple attachments send an album); defer delivery with `--schedule-at` (ISO-8601 datetime) or `--delay` (relative duration like `10m`, `2h`, `1d`); thread a reply with `--reply-to <message_id>`. `--text` may be omitted for media-only sends. Attachments, scheduling, and `--reply-to` apply to targeted sends only, not mass mode.
+- `messages send` — send a message or service command (targeted or folder-wide mass mode). Attach local files with repeated `--file` and/or remote URLs with repeated `--file-url` (multiple attachments send an album); defer delivery with `--schedule-at` (ISO-8601 datetime) or `--delay` (relative duration like `10m`, `2h`, `1d`); thread a reply with `--reply-to <message_id>`. `--text` may be omitted for media-only sends. Attachments, scheduling, and `--reply-to` apply to targeted sends only, not mass mode. `--rich-markdown <file.md>` sends the file's contents as a Telegram **rich message** (article) instead of plain text — see below.
 - `messages recent` — read the most recent messages from a chat (READ-gated; `--limit` defaults to 5, optional `--minutes N` keeps only messages newer than `now - N` minutes).
 - `messages react` — set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated).
 - `messages forward` — forward one or more messages (`--message-id`, repeatable) from a source (`--from-chat-id`/`--from-entity`) to a target (`--to-chat-id`/`--to-entity`, or the usual target aliases `--chat-id`/`--chat-name`/`--entity`); READ-gated on the source, WRITE-gated on the target.
@@ -116,6 +116,16 @@ Member references in `members`/`admins` (group create) and in `members bulk-add`
 - `folders inspect` — inspect a chat folder and list its chats.
 - `folders add-chat` — move an existing chat into a folder.
 - `folders remove-chat` — remove a chat from a folder (idempotent: a no-op if the chat is not in the folder).
+
+#### Rich messages (articles)
+
+`messages send --rich-markdown <file.md>` sends the file's contents as a Telegram **rich message** — the server parses the markdown itself and delivers a single article, so a >4096-character post is *not* split. The same input is `rich_markdown` (a string, not a path) on `POST /telegram/messages` and on the `telegram_messages_send` MCP tool.
+
+- **Dialect** (parsed server-side): `#`…`######` headings, tables with alignment, task lists, `>` quotes, fenced code with a language, `---` dividers, `~~strike~~`, `==marked==`, `||spoiler||`, footnotes, math, `<details>`, and media by public HTTPS URL — `![](https://…jpg "caption")` becomes an image block the server fetches itself. Local-file media inside an article is not supported.
+- **Limits**: 1..32 768 characters (validated locally, inclusive); the server additionally caps blocks/nesting/media/table columns and reports its own errors (`RICH_MESSAGE_MARKDOWN_INVALID`, `RICH_MESSAGE_TEXT_TOO_LONG`, …).
+- **Exclusivity**: `--rich-markdown` is a targeted-send-only alternative to the message body — it cannot be combined with `--text`, `--file`, `--file-url` (HTTP/MCP: `text`, `file_urls`, `base64_files`) or with mass mode.
+- Everything else is unchanged: entity resolution, the WRITE gate, `--operation-id` idempotency, topic/reply targeting (`--topic-id`/`--reply-to`), and scheduling (`--schedule-at`/`--delay`) all work. `--dry-run` reports the article as a marker (`rich_markdown`, `rich_markdown_chars`, `rich_markdown_file`) rather than echoing a 32k body.
+- A failed rich send is **not** silently retried as plain text — it surfaces as the normal send error, and the caller decides. Requires `telethon >= 1.44` (layer 227); on an older Telethon the send fails with an explicit version error.
 
 Mutating CLI commands support `--dry-run` before the real run. Local `--file` attachments must exist, be regular files, and be non-empty. `--file-url` must be a valid `http`/`https` URL with a host. `--schedule-at` and `--delay` are mutually exclusive and must resolve to a future time. `messages react` requires exactly one of `--emoji` or `--clear`; `notifications mute --duration` must be positive. `folders remove-chat` accepts `--chat-id`, `--chat-name`, or `--entity`, plus optional `--folder-id`.
 
@@ -187,7 +197,7 @@ Updating this list: descriptions are sourced from each Typer command's docstring
 All `/telegram/*` endpoints require `Authorization: Bearer <token>` and use the same access policy as the CLI.
 
 - `POST /telegram/groups` creates a supergroup. In addition to `title`, `about`, `admins`, `members`, `managers`, `external_ref`, and `topics_layout`, the HTTP body accepts two optional fields (string **or** list-of-strings — the first element is used): `lang` (`"ru"`/`"en"`, default `ru`) and `telegram_id`. Every response now also carries a localized **`answer`** summary string alongside `operation_id`/`operation_status`. When `members[0]` is a phone-style `t.me` reference (`https://t.me/79222222222`, `https://t.me/+79222222222`): if `telegram_id` is set, the client is added by that numeric id and `answer` is «Группа создана, клиент добавлен»; if `telegram_id` is empty, the group is still created but that client member is **skipped** (recorded in `skipped` with `reason: "phone_without_telegram_id"`) and `answer` warns that the client cannot be connected by phone number without a telegram id. Otherwise `answer` is «Группа создана». These three behaviors (`lang`, `telegram_id`, `answer`) are currently **HTTP-only** — they are not exposed on the CLI or MCP surfaces.
-- `POST /telegram/messages` sends targeted or mass messages. Targeted bodies accept `telegram_chat_id`, `entity`, or `chat_name` + `folder_name`, plus optional `telegram_topic_id`/`topic_name`, `file_urls`, base64 `base64_files` (`{filename, mime, content_b64}`, default max 1 MB each), `reply_to_message_id`, `schedule_at`, `delay_seconds`, and `operation_id`. HTTP server-local `files` are rejected; use `file_urls` (downloaded to a temp file with size/time limits) or `base64_files` for media over HTTP. Responses include `telegram_message_id`, `telegram_message_ids` for albums, `scheduled`, `schedule_at`, `operation_id`, and `operation_status`.
+- `POST /telegram/messages` sends targeted or mass messages. Targeted bodies accept `telegram_chat_id`, `entity`, or `chat_name` + `folder_name`, plus optional `telegram_topic_id`/`topic_name`, `file_urls`, base64 `base64_files` (`{filename, mime, content_b64}`, default max 1 MB each), `reply_to_message_id`, `schedule_at`, `delay_seconds`, and `operation_id`. `rich_markdown` (markdown source, 1..32 768 chars) sends a rich message/article instead of a text body — targeted-only, and mutually exclusive with `text`, `file_urls`, `base64_files`, and mass mode (conflicts are rejected by the body validator as `422`, out-of-range markdown as `400`). HTTP server-local `files` are rejected; use `file_urls` (downloaded to a temp file with size/time limits) or `base64_files` for media over HTTP. Responses include `telegram_message_id`, `telegram_message_ids` for albums, `scheduled`, `schedule_at`, `operation_id`, and `operation_status`.
 - `POST /telegram/messages/reactions` sets or clears a reaction with `message_id` plus exactly one of `emoji` or `clear=true`.
 - `POST /telegram/messages/forward` forwards `message_ids` from `from_chat_id`/`from_entity` to `to_chat_id`/`to_entity`.
 - `POST /telegram/messages/delete` deletes `message_ids` from a target chat (DELETE-gated). Optional `revoke` (default `true`), `dry_run`, and `force`. Honors `telegram.access.delete_only_session_messages`; the backend factory returns `503` when the session is not connected.
@@ -235,7 +245,7 @@ MCP tool catalog:
 | --- | --- |
 | `telegram_health` | none |
 | `telegram_messages_recent` | `chat_id`, `limit`, optional `minutes` (only messages newer than `now - minutes`) |
-| `telegram_messages_send` | `telegram_chat_id`/`entity`, `text`, `telegram_topic_id`/`topic_name`, `file_urls`, base64 `base64_files`, `schedule_at`, `delay_seconds`, `reply_to_message_id`, `operation_id`; `chat_name`/`folder_name`/`folder_id` and server-local `files` are not part of the MCP surface (target via `entity`) |
+| `telegram_messages_send` | `telegram_chat_id`/`entity`, `text`, `rich_markdown` (markdown article, 1..32 768 chars; exclusive with `text`/`file_urls`/`base64_files`), `telegram_topic_id`/`topic_name`, `file_urls`, base64 `base64_files`, `schedule_at`, `delay_seconds`, `reply_to_message_id`, `operation_id`; `chat_name`/`folder_name`/`folder_id` and server-local `files` are not part of the MCP surface (target via `entity`) |
 | `telegram_messages_forward` | `from_chat_id`/`from_entity`, `to_chat_id`/`to_entity`, `message_ids`, `operation_id` |
 | `telegram_messages_delete` | `telegram_chat_id`/`entity`, `message_ids`, `revoke`, `dry_run`, `force`; gated on DELETE, honors `delete_only_session_messages` |
 | `telegram_messages_edit` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`/`folder_id`, `message_id`, `text`, `dry_run`; WRITE-gated, honors `edit_only_session_messages` |
