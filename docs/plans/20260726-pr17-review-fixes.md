@@ -169,11 +169,20 @@ Non-blocking observation (symlink hardening of `download_root`) goes to Post-Com
 
 ### Task 8: Verify acceptance criteria
 
-- [ ] re-read both PR #17 review comments and check every confirmed defect and recommendation is addressed: no-overwrite downloads; folder_id-keyed cache + union-by-name compat + `folder_id` rule; pin pacing/FLOOD_WAIT retry with next-attempt reporting across CLI/HTTP/MCP; `from_date`/`to_date` via single SearchRequest with the reviewer's target test list covered
-- [ ] verify edge cases: same-title folders regression test, download `(N)` race claim, pacing with `0` interval, range bounds inclusivity at both edges
-- [ ] run full test suite (`pytest`) — all pass
-- [ ] run `ruff check src tests` — clean
-- [ ] confirm backward compat: config without `folder_id`/`pin_min_interval_seconds` and search without range behave exactly as before
+- [x] re-read both PR #17 review comments and check every confirmed defect and recommendation is addressed: no-overwrite downloads; folder_id-keyed cache + union-by-name compat + `folder_id` rule; pin pacing/FLOOD_WAIT retry with next-attempt reporting across CLI/HTTP/MCP; `from_date`/`to_date` via single SearchRequest with the reviewer's target test list covered
+- [x] verify edge cases: same-title folders regression test, download `(N)` race claim, pacing with `0` interval, range bounds inclusivity at both edges
+- [x] run full test suite (`pytest`) — all pass
+- [x] run `ruff check src tests` — clean
+- [x] confirm backward compat: config without `folder_id`/`pin_min_interval_seconds` and search without range behave exactly as before
+
+➕ Verification evidence (all four confirmed defects have implementation + named tests):
+
+- Download no-overwrite: `_claim_path` (`messages/media_download.py:223`) claims via `os.open(..., O_CREAT | O_EXCL | O_WRONLY)` under `_MAX_NAME_ATTEMPTS = 1000`, creating the parent dir first — that `O_EXCL` claim *is* the race answer (a loser of the race gets `FileExistsError` and moves to the next candidate). Tests: `test_download_repeat_gets_numbered_name_and_keeps_first`, `test_download_out_path_collision_gets_free_name`, `test_download_collision_on_extensionless_name`, `test_download_removes_placeholder_on_backend_error`, `test_download_placeholder_removed_does_not_block_next_name`, `test_download_dry_run_reports_first_free_name`, `test_download_oversized_removes_claimed_file`.
+- Same-title folders: `test_same_title_folders_keep_separate_entries`, `test_name_rule_covers_both_same_named_folders`, `test_list_folders_fallback_keeps_same_named_folders` (`tests/test_folder_membership_ids.py`), `test_same_named_folders_round_trip_separately` + old/future/corrupt-payload miss tests (`tests/test_folder_membership_cache.py`), `test_stale_serve_preserves_folder_ids` (`tests/test_access_folder_cache.py`). `folder_id` rules: 8 tests in `tests/test_access.py` (targeting, matched-string, union with name rules, `require_folder`, delete/edit-only overrides, name-membership denial) + 2 in `tests/test_access_enforcement.py`.
+- Pin pacing: `tests/test_messages_pin.py` covers pacing, per-chat gates, shared pin/unpin gate, `0`-interval disable, dry-run skip, FLOOD_WAIT sleep+retry, gate blocking, budget exhaustion with `retry_after_seconds`, over-cap wait, no-pacer passthrough. Surfaces: `test_http_pin_paces_rapid_calls`, `test_http_pin_no_pacing_when_interval_zero`, HTTP/CLI retry-after tests, `test_cli_pin_paces_across_processes`; MCP retry-after in `tests/test_mcp_tools.py`. Gate store: 11 tests in `tests/test_rate_gate.py`.
+- Search range: inclusivity at both edges (`test_search_range_includes_both_bounds_exactly`, `test_search_range_excludes_just_outside_bounds`, `test_search_range_bounds_are_inclusive`) plus single-bound/naive/inverted/`minutes`-combined rejections and the pre-access-check validation test; adapter tests pin one `SearchRequest` carrying every filter, pagination to `limit` newest-first, non-advancing-offset and empty-page termination.
+- Backward compat: `test_defaults_applied_when_optional_sections_omitted` now also asserts a knob-less config loads with `pin_min_interval_seconds == 2.0` and `access is None` (allow-all); range-less search echoes `None` bounds (`test_search_range_echoes_none_without_range`, `test_http_search_range_echoes_none_without_range`, `test_cli_search_range_echoes_none_without_range`); `test_search_minutes_*` pin the unchanged relative path. Note: pacing is *on* by default (2.0s) — a deliberate conservative default from Task 4, not a silent behaviour preservation.
+- Full suite: 1507 passed; `ruff check src tests`: All checks passed.
 
 ### Task 9: [Final] Update documentation
 
