@@ -217,4 +217,13 @@ Non-blocking observation (symlink hardening of `download_root`) goes to Post-Com
 - silent-pin push-notification absence still needs a second chat participant to confirm
 
 **Optional hardening** (reviewer's non-blocking note):
-- defense-in-depth symlink resolution inside `download_root` for multi-user deployments (`os.path.realpath` both sides before the prefix check in `_resolve_download_dir`)
+- ✅ done during the post-implementation code review: `_resolve_download_dir` now resolves **both** sides with `os.path.realpath`, so a symlink inside `download_root` is no longer an escape hatch (`test_http_download_rejects_out_dir_symlinked_outside_root`).
+
+**Post-implementation review fixes** (same review pass, all covered by new tests):
+- `Pacer._wait_for_slot` capped: a gate parked behind an over-cap FLOOD_WAIT now raises `PacedFloodWaitError` with the retry-after instead of sleeping it off inside the next request.
+- mass send passes the resolved folder's `(id, name)` to the authorizer, so `folder_id` rules grant it (a bare name could only ever match name rules).
+- `access list` renders `folder_id` rules instead of printing them as empty chat rules.
+- `_place_in_folder` applies `default_chat_folder.folder_id` only when the request names no folder — matching the WRITE gate, and fixing a `FolderIdMismatchError` raised *after* the group was created.
+- the folder-membership cache is no longer written when there is no folder backend (an empty map would deny every folder rule cross-process until the TTL expired).
+- `_claim_path` maps `OSError` to `ValueError` (400/exit 2 instead of a 500); `messages search` maps `ValueError` to exit 2 like its siblings.
+- tests: the default SQLite path is redirected into `tmp_path` for every test (`tests/conftest.py`), so the HTTP/CLI stores are really built rather than silently degrading to `None`; `create_app`'s `on_swap` (cache clear, cache hot-add, gate hot-add) is now covered.

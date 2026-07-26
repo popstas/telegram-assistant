@@ -293,3 +293,155 @@ def test_watcher_does_not_self_retrigger_on_reload_read(
         assert final == after_edit, f"watcher self-retriggered: {after_edit} -> {final}"
     finally:
         watcher.stop()
+
+
+# ---------------------------------------------------------------------------
+# App-level `on_swap`: config-derived state rebuilt on hot-reload
+#
+# `create_app` builds the folder-membership cache and the pin rate gate once,
+# at startup, from the config it was given. The watcher's `on_swap` closure is
+# what keeps them honest afterwards — it clears a cache keyed to the old access
+# rules, and builds either store when the edit switches its feature on. All
+# three paths swallow their failures, so without a test they would degrade
+# silently for the rest of the process' life.
+# ---------------------------------------------------------------------------
+
+
+def _watched_config(
+    *, session: Path, access: str = "", pin_interval: float = 0.0
+) -> str:
+    return (
+        "telegram:\n"
+        "  api_id: 1\n"
+        "  api_hash: h\n"
+        f"  session_path: {session}\n"
+        f"  pin_min_interval_seconds: {pin_interval}\n"
+        "  default_chat_folder:\n"
+        "    folder_id: 2\n"
+        "    folder_name: F\n"
+        f"{access}"
+        "http:\n"
+        "  host: 0.0.0.0\n"
+        "  port: 8085\n"
+        "  bearer_token: t\n"
+    )
+
+
+_ACCESS_BLOCK = (
+    "  access:\n"
+    "    rules:\n"
+    "      - folder: F\n"
+    "        permission: write\n"
+)
+
+
+def _watched_app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str):
+    """`create_app()` reading `data/config.yml` from a tmp CWD (watcher on).
+
+    Config hot-reload is only wired when `create_app` loads the config from
+    disk itself, so the app cannot take an injected `AppConfig` here. Telethon
+    is stubbed out so no session manager (and no connect-retry task) is built.
+    """
+    from telegram_assistant.http_api import app as app_module
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    cfg_path = data_dir / "config.yml"
+    _write(cfg_path, body)
+    monkeypatch.chdir(tmp_path)
+
+    def _no_telethon(*args, **kwargs):
+        raise RuntimeError("no Telethon session manager in tests")
+
+    monkeypatch.setattr(app_module, "TelethonSessionManager", _no_telethon)
+    app = app_module.create_app(database_path=tmp_path / "state.db")
+    return app, cfg_path
+
+
+def _swap(app, cfg_path: Path, body: str) -> None:
+    """Write a new config and run the app's reload callback synchronously.
+
+    Calls the watcher's callback directly rather than waiting on inotify + the
+    2s debounce — the watcher's own plumbing is covered by the tests above; the
+    subject here is what `on_swap` does to `app.state`.
+    """
+    _write(cfg_path, body)
+    watcher = app.state.config_watcher
+    assert watcher is not None, "config watcher was not started"
+    watcher._on_reload()
+
+
+def test_swap_clears_folder_membership_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Access-rule edits must not be answered from a map built under old rules."""
+    from fastapi.testclient import TestClient
+
+    from telegram_assistant.persistence import FolderMembershipCache
+
+    session = tmp_path / "sess.session"
+    body = _watched_config(session=session, access=_ACCESS_BLOCK)
+    app, cfg_path = _watched_app(tmp_path, monkeypatch, body)
+
+    with TestClient(app):
+        cache = app.state.folder_membership_cache
+        assert cache is not None
+        cache.save({2: ("F", {10, 11})}, fetched_at=time.time())
+        assert cache.load() is not None
+
+        _swap(
+            app,
+            cfg_path,
+            _watched_config(
+                session=session,
+                access=_ACCESS_BLOCK.replace("permission: write", "permission: read"),
+            ),
+        )
+
+        assert app.state.config.telegram.access.rules[0].effective_permissions == [
+            "read"
+        ]
+        assert FolderMembershipCache(tmp_path / "state.db").load() is None
+
+
+def test_swap_builds_folder_membership_cache_when_access_added(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A policy added at runtime gets its cache, not live fetches forever."""
+    from fastapi.testclient import TestClient
+
+    session = tmp_path / "sess.session"
+    app, cfg_path = _watched_app(
+        tmp_path, monkeypatch, _watched_config(session=session)
+    )
+
+    with TestClient(app):
+        assert app.state.folder_membership_cache is None
+        _swap(
+            app,
+            cfg_path,
+            _watched_config(session=session, access=_ACCESS_BLOCK),
+        )
+        assert app.state.folder_membership_cache is not None
+
+
+def test_swap_builds_rate_gate_when_pacing_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Raising `pin_min_interval_seconds` from 0 must not need a restart."""
+    from fastapi.testclient import TestClient
+
+    session = tmp_path / "sess.session"
+    app, cfg_path = _watched_app(
+        tmp_path, monkeypatch, _watched_config(session=session, pin_interval=0.0)
+    )
+
+    with TestClient(app):
+        assert app.state.rate_gate_store is None
+        _swap(
+            app,
+            cfg_path,
+            _watched_config(session=session, pin_interval=2.0),
+        )
+        assert app.state.rate_gate_store is not None
+        assert app.state.config.telegram.pin_min_interval_seconds == 2.0

@@ -128,6 +128,36 @@ def test_list_deny_by_default_rules(
     assert payload["rules"][1]["permissions"] == ["write", "delete"]
 
 
+def test_list_renders_folder_and_folder_id_targets(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """`access list` is the only inspection surface — it must show id rules.
+
+    A `folder_id` rule used to fall through to the chat branch and print an
+    empty chat rule, so an operator auditing an id-scoped policy saw a rule
+    targeting nothing.
+    """
+    access = textwrap.dedent(
+        """
+        access:
+          rules:
+            - folder: "Clients"
+              permission: read
+            - folder_id: 5
+              permissions:
+                - read
+                - write
+        """
+    ).strip() + "\n"
+    cfg = _write_config(tmp_path, _with_access(minimal_config_yaml, access))
+    result = _run(["access", "list", "--config", str(cfg)])
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["rules"][0]["target"] == {"kind": "folder", "folder": "Clients"}
+    assert payload["rules"][1]["target"] == {"kind": "folder_id", "folder_id": 5}
+    assert payload["rules"][1]["permissions"] == ["read", "write"]
+
+
 # ---------------------------------------------------------------------------
 # access check
 # ---------------------------------------------------------------------------

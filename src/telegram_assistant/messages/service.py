@@ -984,7 +984,11 @@ async def mass_send_message(
                 await authorizer.require(
                     chat.chat_id,
                     AccessLevel.WRITE,
-                    folder_memberships=[snapshot.folder_name],
+                    # Pass the resolved folder's *identity* (id + name), not a
+                    # bare name: a `folder_id:` rule can only match on the id,
+                    # so a name-only membership would deny every chat here while
+                    # a single send to the same chat succeeds.
+                    folder_memberships=[(snapshot.folder_id, snapshot.folder_name)],
                 )
             except AccessDenied:
                 skipped += 1

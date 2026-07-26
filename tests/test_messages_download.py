@@ -107,6 +107,27 @@ async def test_download_to_out_path_returns_written_file(tmp_path: Any) -> None:
     ]
 
 
+async def test_downloaded_file_is_not_world_readable(tmp_path: Any) -> None:
+    """The default download root is the shared system temp dir.
+
+    A READ-only remote caller must not leave private-chat media readable by
+    every other local user, so the claimed placeholder is created 0600.
+    """
+    import stat
+
+    backend = FakeMediaDownloadBackend()
+    dest = str(tmp_path / "private.jpg")
+    await download_media(
+        backend,
+        request=MediaDownloadRequest(
+            telegram_chat_id=-100, message_id=42, out_path=dest
+        ),
+    )
+
+    mode = stat.S_IMODE(os.stat(dest).st_mode)
+    assert mode & (stat.S_IRGRP | stat.S_IROTH) == 0
+
+
 async def test_download_to_out_dir_joins_original_filename(tmp_path: Any) -> None:
     backend = FakeMediaDownloadBackend(
         info=MediaInfo(filename="report.pdf", size=50, mime="application/pdf"),
@@ -126,8 +147,29 @@ async def test_download_to_out_dir_joins_original_filename(tmp_path: Any) -> Non
 async def test_download_to_out_dir_fallback_name_when_no_filename(
     tmp_path: Any,
 ) -> None:
+    """Nameless media (every photo and voice note) gets its extension from the
+    probed MIME — Telethon can't repair it, since the claimed placeholder makes
+    it leave the path untouched."""
     backend = FakeMediaDownloadBackend(
         info=MediaInfo(filename=None, size=50, mime="audio/ogg")
+    )
+    await download_media(
+        backend,
+        request=MediaDownloadRequest(
+            telegram_chat_id=-100, message_id=7, out_dir=str(tmp_path)
+        ),
+    )
+    assert backend.download_calls[0]["target_path"] == os.path.join(
+        str(tmp_path), "message-7.oga"
+    )
+
+
+async def test_download_fallback_name_uses_bin_for_unknown_mime(
+    tmp_path: Any,
+) -> None:
+    """No name and no usable MIME leaves the stable ``.bin`` fallback."""
+    backend = FakeMediaDownloadBackend(
+        info=MediaInfo(filename=None, size=50, mime=None)
     )
     await download_media(
         backend,
@@ -374,6 +416,42 @@ async def test_download_repeat_gets_numbered_name_and_keeps_first(
     # the earlier downloads are untouched
     assert os.path.getsize(first) == 3
     assert os.path.getsize(second) == 7
+
+
+def test_claim_path_hands_racing_callers_distinct_names(tmp_path: Any) -> None:
+    """The ``O_EXCL`` claim *is* the race answer — assert it, not just the docs.
+
+    Every other collision test is sequential, so an "exists? then open()"
+    rewrite would pass them all while letting two genuinely concurrent
+    downloads claim the same path (and dropping the 0600 mode with it). Threads
+    are the only way to reach that window: within one event loop the claims are
+    serialised regardless of how the name is picked.
+    """
+    import stat
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from telegram_assistant.messages.media_download import _claim_path
+
+    target = os.path.join(str(tmp_path), "photo.jpg")
+    workers = 8
+    barrier = threading.Barrier(workers)
+
+    def _claim(_i: int) -> str:
+        barrier.wait()
+        return _claim_path(target)
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        claimed = list(pool.map(_claim, range(workers)))
+
+    assert len(set(claimed)) == workers, claimed
+    assert target in claimed
+    assert set(claimed) == {target} | {
+        os.path.join(str(tmp_path), f"photo ({i}).jpg") for i in range(1, workers)
+    }
+    for path in claimed:
+        assert os.path.exists(path)
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
 
 
 async def test_download_out_path_collision_gets_free_name(tmp_path: Any) -> None:

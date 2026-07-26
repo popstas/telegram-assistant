@@ -243,6 +243,12 @@ async def add_chat_to_folder(
         raise FolderPeerFailureError(
             f"failed to add chat {chat.chat_id} to folder {folder_name!r}: {exc}"
         ) from exc
+    finally:
+        # Membership just changed (or may have changed mid-failure), so the
+        # persistent folder-membership cache is stale for every process sharing
+        # the DB — drop it rather than let folder rules judge the old map.
+        if authorizer is not None:
+            authorizer.invalidate_folder_memberships()
     return {
         "folder_id": snapshot.folder_id,
         "folder_name": snapshot.folder_name,
@@ -305,6 +311,11 @@ async def remove_chat_from_folder(
             f"failed to remove chat {chat.chat_id} from folder "
             f"{folder_name!r}: {exc}"
         ) from exc
+    finally:
+        # Mirror of add_chat_to_folder: a removal that revokes a folder-derived
+        # grant must not stay invisible behind the cached membership map.
+        if authorizer is not None:
+            authorizer.invalidate_folder_memberships()
     return {
         "folder_id": snapshot.folder_id,
         "folder_name": snapshot.folder_name,

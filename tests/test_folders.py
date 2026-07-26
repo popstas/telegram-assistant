@@ -421,6 +421,191 @@ def test_http_inspect_folder_id_mismatch_returns_409(
     assert resp.status_code == 409
 
 
+def test_http_inspect_403_when_folder_not_readable(
+    fake_backend: FakeFolderBackend,
+) -> None:
+    """Listing a folder discloses its chats, so it needs the same READ gate as MCP."""
+    client = _make_app(
+        _config_with_access("access:\n  rules: []\n"),
+        fake_backend,
+    )
+
+    resp = client.get(
+        "/telegram/folders/Planfix clients",
+        headers={"Authorization": "Bearer secret_token"},
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["error"] == "access_denied"
+
+
+def test_http_inspect_403_not_404_for_a_missing_folder_when_denied(
+    fake_backend: FakeFolderBackend,
+) -> None:
+    """A miss must not outrank the denial, or 404-vs-403 enumerates folder names."""
+    client = _make_app(
+        _config_with_access("access:\n  rules: []\n"),
+        fake_backend,
+    )
+
+    resp = client.get(
+        "/telegram/folders/No Such Folder",
+        headers={"Authorization": "Bearer secret_token"},
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["error"] == "access_denied"
+
+
+def test_http_inspect_404_for_a_missing_folder_when_granted(
+    fake_backend: FakeFolderBackend,
+) -> None:
+    """The denial fence must not turn a genuine miss into a 403 for a grantee."""
+    client = _make_app(
+        _config_with_access("access:\n  rules:\n    - all: true\n      permissions: [read]\n"),
+        fake_backend,
+    )
+
+    resp = client.get(
+        "/telegram/folders/No Such Folder",
+        headers={"Authorization": "Bearer secret_token"},
+    )
+
+    assert resp.status_code == 404, resp.text
+
+
+def test_http_inspect_allowed_by_folder_read_rule(
+    fake_backend: FakeFolderBackend,
+) -> None:
+    client = _make_app(
+        _config_with_access(
+            "access:\n"
+            "  rules:\n"
+            '    - folder: "Planfix clients"\n'
+            "      permissions: [read]\n"
+        ),
+        fake_backend,
+    )
+
+    resp = client.get(
+        "/telegram/folders/Planfix clients",
+        headers={"Authorization": "Bearer secret_token"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["folder_id"] == 2
+
+
+def test_http_inspect_allowed_by_folder_id_read_rule(
+    fake_backend: FakeFolderBackend,
+) -> None:
+    """A `folder_id:` rule must grant an inspect by name.
+
+    The caller has no reason to repeat the id in the query string, so gating on
+    the request value instead of the resolved folder's own id would make the id
+    rule kind unusable on this surface.
+    """
+    client = _make_app(
+        _config_with_access(
+            "access:\n  rules:\n    - folder_id: 2\n      permissions: [read]\n"
+        ),
+        fake_backend,
+    )
+
+    resp = client.get(
+        "/telegram/folders/Planfix clients",
+        headers={"Authorization": "Bearer secret_token"},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["folder_id"] == 2
+
+
+def test_http_inspect_folder_id_query_cannot_probe_other_folders(
+    minimal_config_yaml: str,
+) -> None:
+    """A granted `folder_id` in the query must not authorize another name.
+
+    The id is unverified request input on the resolution-failure path: honouring
+    a `folder_id:` rule for it would let READ on one folder unlock the 404/409
+    distinction (and the mismatch message's real ids) for every other title.
+    """
+    backend = FakeFolderBackend(
+        [
+            _sample_folder(),
+            FolderSnapshot(
+                folder_id=7,
+                folder_name="Secret",
+                chats=[FolderChat(chat_id=900, title="Board")],
+            ),
+        ]
+    )
+    client = _make_app(
+        _config_with_access(
+            "access:\n  rules:\n    - folder_id: 2\n      permissions: [read]\n"
+        ),
+        backend,
+    )
+    headers = {"Authorization": "Bearer secret_token"}
+
+    # Existing title the caller has no rule for: 403, not a 409 disclosing id 7.
+    mismatch = client.get("/telegram/folders/Secret?folder_id=2", headers=headers)
+    assert mismatch.status_code == 403, mismatch.text
+    assert "7" not in mismatch.text
+
+    # Absent title: 403 too, so present and absent titles stay indistinguishable.
+    missing = client.get("/telegram/folders/Nope?folder_id=2", headers=headers)
+    assert missing.status_code == 403, missing.text
+
+    # The rule still grants the folder it actually names, id in the query or not.
+    granted = client.get(
+        "/telegram/folders/Planfix clients?folder_id=2", headers=headers
+    )
+    assert granted.status_code == 200, granted.text
+    assert granted.json()["folder_id"] == 2
+
+
+def test_http_inspect_403_when_folder_id_rule_names_another_folder(
+    fake_backend: FakeFolderBackend,
+) -> None:
+    client = _make_app(
+        _config_with_access(
+            "access:\n  rules:\n    - folder_id: 99\n      permissions: [read]\n"
+        ),
+        fake_backend,
+    )
+
+    resp = client.get(
+        "/telegram/folders/Planfix clients",
+        headers={"Authorization": "Bearer secret_token"},
+    )
+
+    assert resp.status_code == 403, resp.text
+    assert "Acme" not in resp.text
+
+
+def test_http_inspect_403_when_only_write_granted(
+    fake_backend: FakeFolderBackend,
+) -> None:
+    """Capabilities are independent: `write` alone must not permit the listing."""
+    client = _make_app(
+        _config_with_access(
+            "access:\n"
+            "  rules:\n"
+            '    - folder: "Planfix clients"\n'
+            "      permissions: [write]\n"
+        ),
+        fake_backend,
+    )
+
+    resp = client.get(
+        "/telegram/folders/Planfix clients",
+        headers={"Authorization": "Bearer secret_token"},
+    )
+
+    assert resp.status_code == 403, resp.text
+
+
 def test_http_inspect_requires_auth(
     minimal_config_yaml: str, fake_backend: FakeFolderBackend
 ) -> None:
@@ -666,6 +851,41 @@ def test_cli_folders_inspect_outputs_payload(
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["folder_id"] == 2
+    assert payload["chats_count"] == 2
+
+
+def test_cli_folders_inspect_stays_ungated_under_a_deny_all_policy(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate is deliberately remote-only — the local CLI must stay open.
+
+    HTTP and MCP inspect are READ-gated because their payload enumerates every
+    chat in the folder; the CLI is local and trusted, like `messages download
+    --out`. Without this test, adding a gate to the CLI would break nothing.
+    """
+    deny_all = minimal_config_yaml.replace(
+        "  defaults:\n", "  access:\n    rules: []\n  defaults:\n", 1
+    )
+    config_file = _write_config(tmp_path, deny_all)
+    backend = FakeFolderBackend([_sample_folder()])
+    _patch_cli_backend(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "folders",
+            "inspect",
+            "--folder-name",
+            "Planfix clients",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
     assert payload["chats_count"] == 2
 
 

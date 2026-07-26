@@ -19,7 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from telegram_assistant.access.service import AccessLevel, Authorizer
+from telegram_assistant.access.service import AccessDenied, AccessLevel, Authorizer
 from telegram_assistant.config.models import TelegramConfig, TopicsLayout
 from telegram_assistant.folders.service import (
     FolderBackend,
@@ -340,6 +340,90 @@ def _dedupe(items: Sequence[str]) -> list[str]:
     return out
 
 
+def destination_folder(
+    *, config: TelegramConfig, request: GroupCreateRequest
+) -> tuple[str, int | None]:
+    """Return the ``(folder_name, folder_id)`` a new group will be placed into.
+
+    The configured ``default_chat_folder.folder_id`` describes *the default
+    folder only*, so it may be used as the ``resolve_folder`` cross-check when
+    the request targets that same folder — whether by naming nothing at all or
+    by naming it explicitly. A request naming a *different* folder must not
+    inherit that id: ``resolve_folder`` would then compare the named folder
+    against an id belonging to another one and raise
+    :class:`FolderIdMismatchError` (in ``_execute_create`` that happens after
+    the supergroup exists, leaving it unplaced in ``needs_review``).
+
+    One helper so the WRITE gate, the actual placement, and the CLI ``--dry-run``
+    preview all resolve the same destination — a gate that disagreed with the
+    placement would deny creates that would have worked (or vice versa).
+    """
+    default = config.default_chat_folder
+    folder_name = request.folder_name or default.folder_name
+    folder_id = request.folder_id
+    if folder_id is None and folder_name == default.folder_name:
+        folder_id = default.folder_id
+    return folder_name, folder_id
+
+
+async def _require_destination_write(
+    *,
+    authorizer: Authorizer,
+    folder_backend: FolderBackend | None,
+    config: TelegramConfig,
+    request: GroupCreateRequest,
+) -> str:
+    """Gate group create on WRITE for its destination folder; return that name.
+
+    The request's ``folder_id`` is **unverified input** — nothing proved it
+    belongs to the folder the request *names*. Handing it straight to a
+    ``folder_id:`` rule would let a caller granted WRITE on one folder id create
+    and fully populate a group by naming any *other* folder: the gate passes,
+    the supergroup is created with members, admins and an invite link, and only
+    then does ``resolve_folder`` raise :class:`FolderIdMismatchError`, leaving
+    the chat in ``needs_review``. This is the same hazard the ``folders
+    inspect`` surfaces fence off.
+
+    So the first check trusts only *config-derived* identity: the operator's own
+    ``default_chat_folder.folder_id``, which describes the default folder alone
+    and is therefore used exactly when the destination **is** that folder.
+
+    Only if that denies do we resolve the named folder and re-gate on the
+    snapshot's **own** id and name, so a ``folder_id:`` rule still grants a
+    create requested by name (the caller need not repeat the id). A resolution
+    failure never outranks the denial — reporting it would hand back the
+    folder-exists/absent distinction the fence exists to withhold — so the
+    original :class:`AccessDenied` is raised instead.
+    """
+    folder_name, _ = destination_folder(config=config, request=request)
+    default = config.default_chat_folder
+    trusted_folder_id = (
+        default.folder_id if folder_name == default.folder_name else None
+    )
+    try:
+        await authorizer.require_folder(
+            folder_name, AccessLevel.WRITE, folder_id=trusted_folder_id
+        )
+        return folder_name
+    except AccessDenied as denial:
+        if folder_backend is None:
+            raise
+        try:
+            snapshot = await resolve_folder(
+                folder_backend,
+                folder_name=folder_name,
+                folder_id=request.folder_id,
+            )
+        except FolderError:
+            raise denial from None
+        await authorizer.require_folder(
+            snapshot.folder_name,
+            AccessLevel.WRITE,
+            folder_id=snapshot.folder_id,
+        )
+        return folder_name
+
+
 def _resolve_client_telegram_id(value: int | str | None) -> str | None:
     """Return the client's Telegram id as a canonical string, or ``None``.
 
@@ -612,13 +696,8 @@ async def _execute_create(
     folder_id: int | None = None
     folder_name: str | None = None
     if not request.skip_folder:
-        target_folder_name = (
-            request.folder_name or config.default_chat_folder.folder_name
-        )
-        target_folder_id = (
-            request.folder_id
-            if request.folder_id is not None
-            else config.default_chat_folder.folder_id
+        target_folder_name, target_folder_id = destination_folder(
+            config=config, request=request
         )
         # The supergroup was already created above, so any folder-related
         # failure (missing folder, mid-mutation error, missing backend)
@@ -720,18 +799,14 @@ async def create_group(
     # operation store or Telegram. ``skip_folder`` creates an unplaced chat with
     # no destination to gate on.
     if authorizer is not None and not request.skip_folder:
-        target_folder_name = (
-            request.folder_name or config.default_chat_folder.folder_name
-        )
-        # The destination folder id (when known) lets a ``folder_id`` rule gate
-        # the create as precisely as a name rule. The configured default id only
-        # applies when the request did not name a different folder — otherwise
-        # it would describe a folder the chat is not headed for.
-        target_folder_id = request.folder_id
-        if target_folder_id is None and request.folder_name is None:
-            target_folder_id = config.default_chat_folder.folder_id
-        await authorizer.require_folder(
-            target_folder_name, AccessLevel.WRITE, folder_id=target_folder_id
+        # Same destination as the placement below (see `destination_folder`),
+        # but the request's own `folder_id` is never trusted to satisfy a
+        # `folder_id:` rule — see `_require_destination_write`.
+        await _require_destination_write(
+            authorizer=authorizer,
+            folder_backend=folder_backend,
+            config=config,
+            request=request,
         )
 
     key = idempotency.group_create_key(
@@ -827,6 +902,14 @@ async def create_group(
     except Exception as exc:
         store.fail_operation(operation_id, str(exc))
         raise
+    finally:
+        # The new chat lands in a folder, so the persistent folder-membership
+        # cache (shared across processes) no longer describes reality — a
+        # follow-up call gated by a ``folder:`` rule would otherwise be denied
+        # until the TTL expired. Also on the failure paths: placement may have
+        # applied before the error surfaced.
+        if authorizer is not None and not request.skip_folder:
+            authorizer.invalidate_folder_memberships()
 
     client_unconnected = any(
         entry.get("step") == "client_invite"

@@ -292,6 +292,7 @@ def _client(
     folder_backend: FakeFolderBackend | None = None,
     required_scopes: tuple[str, ...] = ("mcp", "telegram:read"),
     admin: str = "",
+    resolver: Any = None,
 ) -> TestClient:
     config = load_config_from_text(
         _enabled_mcp_yaml(config_yaml, required_scopes=required_scopes, admin=admin)
@@ -347,7 +348,7 @@ def _client(
             else (lambda _r: None)
         ),
         operation_store=OperationStore(tmp_path / "state.db"),
-        resolver_factory=lambda _r: None,
+        resolver_factory=lambda _r: resolver,
     )
     return TestClient(app)
 
@@ -729,6 +730,78 @@ def test_mcp_pin_message_pins_via_backend(
     assert backend.pins == [
         {"chat_id": -100123, "message_id": 5, "silent": True, "pm_oneside": False}
     ]
+
+
+class FakeResolver:
+    """Entity resolver double: ``@ref -> bare chat id``, as Telethon returns."""
+
+    def __init__(self, mapping: dict[str, int]) -> None:
+        self._mapping = mapping
+        self.calls: list[str] = []
+
+    async def resolve(self, ref: object) -> Any:
+        from telegram_assistant.entities import EntityNotFoundError, ResolvedEntity
+
+        self.calls.append(str(ref))
+        if str(ref) not in self._mapping:
+            raise EntityNotFoundError(str(ref))
+        return ResolvedEntity(
+            chat_id=self._mapping[str(ref)], title=str(ref), kind="channel"
+        )
+
+
+def test_mcp_pin_message_via_entity(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """The MCP tool's `entity` target shape must resolve and reach the backend."""
+    backend = FakePinBackend()
+    resolver = FakeResolver({"@client": 100123})
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"write\"\n",
+    )
+    with _client(
+        config_yaml, tmp_path, pin_backend=backend, resolver=resolver
+    ) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_pin",
+            {"entity": "@client", "message_id": 5},
+        )
+
+    assert result["isError"] is False, result
+    assert result["structuredContent"]["telegram_chat_id"] == 100123
+    assert backend.pins[-1]["chat_id"] == 100123
+    assert resolver.calls == ["@client"]
+
+
+def test_mcp_pin_message_unknown_entity_is_an_error(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakePinBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - all: true\n        permission: \"write\"\n",
+    )
+    with _client(
+        config_yaml, tmp_path, pin_backend=backend, resolver=FakeResolver({})
+    ) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_pin",
+            {"entity": "@nope", "message_id": 5},
+        )
+
+    assert result["isError"] is True
+    assert backend.pins == []
 
 
 def test_mcp_pin_message_denied_without_write(
@@ -1301,6 +1374,113 @@ def test_mcp_folders_inspect_requires_folder_read_access(
     text = result["content"][0]["text"]
     assert '"error": "access_denied"' in text
     assert "Acme" not in text
+
+
+def test_mcp_folders_inspect_denies_before_reporting_a_missing_folder(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """`not_found` must not outrank `access_denied` — otherwise an ungranted
+    caller tells present folders from absent ones and spends an RPC per probe."""
+    folder_backend = FakeFolderBackend(
+        [
+            FolderSnapshot(
+                folder_id=2,
+                folder_name="Clients",
+                chats=[FolderChat(chat_id=-100123, title="Acme")],
+            )
+        ]
+    )
+    config_yaml = _with_access(minimal_config_yaml, "    rules: []\n")
+    with _client(config_yaml, tmp_path, folder_backend=folder_backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_folders_inspect",
+            {"folder_name": "No Such Folder"},
+        )
+
+    assert result["isError"] is True
+    assert '"error": "access_denied"' in result["content"][0]["text"]
+
+
+def test_mcp_folders_inspect_allowed_by_folder_id_rule(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """Mirror of the HTTP route: the gate uses the resolved folder's own id, so
+    a `folder_id:` rule grants an inspect requested by name alone."""
+    folder_backend = FakeFolderBackend(
+        [
+            FolderSnapshot(
+                folder_id=2,
+                folder_name="Clients",
+                chats=[FolderChat(chat_id=-100123, title="Acme")],
+            )
+        ]
+    )
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - folder_id: 2\n        permissions: [read]\n",
+    )
+    with _client(config_yaml, tmp_path, folder_backend=folder_backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_folders_inspect",
+            {"folder_name": "Clients"},
+        )
+
+    assert result["isError"] is False, result
+    assert "Acme" in result["content"][0]["text"]
+
+
+def test_mcp_folders_inspect_folder_id_arg_cannot_probe_other_folders(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """Mirror of the HTTP route: an unresolved request is gated on its name only.
+
+    The `folder_id` argument is unverified input until a snapshot proves the
+    pair, so a `folder_id:` grant must not turn a denial into a not_found /
+    id-mismatch answer for a folder the caller has no rule for.
+    """
+    folder_backend = FakeFolderBackend(
+        [
+            FolderSnapshot(
+                folder_id=2,
+                folder_name="Clients",
+                chats=[FolderChat(chat_id=-100123, title="Acme")],
+            ),
+            FolderSnapshot(
+                folder_id=7,
+                folder_name="Secret",
+                chats=[FolderChat(chat_id=-100999, title="Board")],
+            ),
+        ]
+    )
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        "    rules:\n      - folder_id: 2\n        permissions: [read]\n",
+    )
+    with _client(config_yaml, tmp_path, folder_backend=folder_backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_folders_inspect",
+            {"folder_name": "Secret", "folder_id": 2},
+        )
+
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert '"error": "access_denied"' in text
+    assert "7" not in text
 
 
 def test_mcp_operations_tools_require_admin_scope(

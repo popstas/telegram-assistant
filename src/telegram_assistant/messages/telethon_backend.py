@@ -384,35 +384,91 @@ class TelethonMediaDownloadBackend:
 #: Telegram caps a single ``messages.Search`` page at 100 rows.
 _SEARCH_PAGE_SIZE = 100
 
+#: Hard cap on ``messages.Search`` RPCs per call. Rows dropped by the *local*
+#: filters (the private-chat sender filter, the exact date bounds) do not count
+#: toward ``limit``, so without a cap a query whose matches are mostly filtered
+#: out would page through a chat's entire match set — hundreds of sequential
+#: RPCs and a self-inflicted FLOOD_WAIT. Returning a short result is the better
+#: failure mode.
+_SEARCH_MAX_PAGES = 20
 
-def _search_usernames(users: Any) -> dict[int, str | None]:
-    """Map ``user_id -> username`` from a raw search result's ``users`` list."""
+
+def _search_usernames(result: Any) -> dict[int, str | None]:
+    """Map ``sender_id -> username`` from a raw search result's envelope.
+
+    Both ``users`` **and** ``chats`` are indexed: a broadcast post, an anonymous
+    admin, or a channel-signed supergroup message reports the *channel* as its
+    sender, and those senders only appear in ``chats``. Telethon marks channel
+    sender ids (``-100…``), so chat entries are keyed the same way — that is
+    what :func:`_search_sender` looks them up by.
+    """
+    from telethon import utils
+
     out: dict[int, str | None] = {}
-    for user in users or ():
+    for user in getattr(result, "users", None) or ():
         user_id = getattr(user, "id", None)
         if user_id is None:
             continue
         out[int(user_id)] = getattr(user, "username", None)
+    for chat in getattr(result, "chats", None) or ():
+        chat_id = getattr(chat, "id", None)
+        if chat_id is None:
+            continue
+        try:
+            marked = int(utils.get_peer_id(chat))
+        except (TypeError, ValueError):
+            # A test double or an unknown entity shape: fall back to the bare id
+            # rather than dropping the sender entirely.
+            marked = int(chat_id)
+        out[marked] = getattr(chat, "username", None)
     return out
 
 
 def _search_sender(msg: Any, usernames: dict[int, str | None]) -> str | None:
     """Return the sender username for a raw search hit, if known.
 
-    A message from ``messages.Search`` carries only ``from_id``; the usernames
-    come from the result envelope. Telethon's patched ``Message`` may also carry
-    a resolved ``sender`` (e.g. in fakes or when the client filled it in), so
-    that is preferred when present.
+    A message from ``messages.Search`` never goes through Telethon's
+    ``_finish_init``, so ``msg.sender`` is normally ``None`` and the usernames
+    have to come from the result envelope. The lookup keys on ``sender_id``,
+    which ``Message.__init__`` derives from ``from_id``/``peer_id`` — unlike a
+    bare ``from_id.user_id`` it also covers channel posts, anonymous admins and
+    **incoming private messages** (layer 119+ drops ``from_id`` there), all of
+    which would otherwise report no sender at all while ``messages recent``
+    reports one for the very same message.
     """
     sender = getattr(msg, "sender", None)
     username = getattr(sender, "username", None) if sender is not None else None
     if username is not None:
         return username
-    from_id = getattr(msg, "from_id", None)
-    user_id = getattr(from_id, "user_id", None) if from_id is not None else None
-    if user_id is None:
+    sender_id = getattr(msg, "sender_id", None)
+    if sender_id is None:
+        from_id = getattr(msg, "from_id", None)
+        sender_id = getattr(from_id, "user_id", None) if from_id is not None else None
+    if sender_id is None:
         return None
-    return usernames.get(int(user_id))
+    return usernames.get(int(sender_id))
+
+
+def _is_user_peer(peer: Any) -> bool:
+    """Return ``True`` when ``peer`` addresses a 1:1 chat (a user or ourselves)."""
+    from telethon.tl.types import InputPeerSelf, InputPeerUser, InputPeerUserFromMessage
+
+    return isinstance(peer, InputPeerSelf | InputPeerUser | InputPeerUserFromMessage)
+
+
+def _search_sender_id(msg: Any, *, self_id: int, peer_user_id: int) -> int | None:
+    """Return the numeric sender of a raw private-chat hit.
+
+    ``messages.Search`` rows are real Telethon ``Message`` objects, so
+    ``sender_id`` is already derived from ``from_id``/``peer_id`` without any
+    entity resolution. It stays ``None`` for *outgoing* private messages
+    (layer 119+ drops ``from_id`` there), where the sender can only be us; an
+    incoming one can only be the chat partner.
+    """
+    sender_id = getattr(msg, "sender_id", None)
+    if sender_id is not None:
+        return int(sender_id)
+    return self_id if getattr(msg, "out", False) else peer_user_id
 
 
 def _search_reply_to(msg: Any) -> int | None:
@@ -441,8 +497,16 @@ class TelethonSearchBackend:
     so the contract stays ``from_date <= date <= to_date``.
 
     Pages are collected newest-first via ``offset_id`` until ``limit`` in-range
-    rows are gathered, a page comes back empty/short, or the offset stops
-    advancing. Message ids are deduped across pages. ``FloodWaitError`` is
+    rows are gathered, a page comes back empty, the offset stops advancing, the
+    newest id in a page is not greater than the page size (ids start at 1, so
+    nothing older can exist), or ``_SEARCH_MAX_PAGES`` RPCs have been spent
+    (locally filtered rows do not count toward ``limit``, so the cap keeps a
+    mostly-filtered query from walking a whole chat). A *short* page is
+    deliberately **not** a stop condition: channels may omit undisplayable
+    messages, so ``len(page) < page_size`` would silently truncate the result —
+    Telethon's own iterator refuses the same shortcut. Message ids are deduped
+    across pages, and ``MessageEmpty`` placeholders are skipped (they carry no
+    text or date) while still advancing the offset. ``FloodWaitError`` is
     translated so the worker queue can pause-and-retry rather than mark a
     generic failure.
     """
@@ -462,13 +526,12 @@ class TelethonSearchBackend:
         to_date: datetime | None = None,
     ) -> list[RecentMessage]:
         from telethon.tl.functions.messages import SearchRequest
-        from telethon.tl.types import InputMessagesFilterEmpty
+        from telethon.tl.types import InputMessagesFilterEmpty, MessageEmpty
 
         # Widen the server-side window by a second on each side; the exact
         # inclusive bounds are enforced below on the mapped rows.
         min_date = from_date - timedelta(seconds=1) if from_date is not None else None
         max_date = to_date + timedelta(seconds=1) if to_date is not None else None
-        page_size = max(1, min(limit, _SEARCH_PAGE_SIZE))
 
         try:
             peer = await self._client.get_input_entity(chat_id)
@@ -477,10 +540,58 @@ class TelethonSearchBackend:
                 if from_user is not None
                 else None
             )
+            # Telegram *ignores* `from_id` when the peer is a user, so a private
+            # chat searched with a sender filter would come back with both
+            # sides' messages. Drop the (useless) server-side filter there and
+            # apply it locally instead, the way Telethon's own message iterator
+            # does — otherwise the filter silently does nothing.
+            local_from_id: int | None = None
+            self_id = 0
+            peer_user_id = 0
+            if from_peer is not None and _is_user_peer(peer):
+                from telethon.tl.types import InputPeerSelf
+
+                self_id = int(getattr(await self._client.get_me(), "id", 0) or 0)
+                peer_user_id = (
+                    self_id
+                    if isinstance(peer, InputPeerSelf)
+                    else int(getattr(peer, "user_id", 0) or 0)
+                )
+                local_from_id = (
+                    self_id
+                    if isinstance(from_peer, InputPeerSelf)
+                    else int(getattr(from_peer, "user_id", 0) or 0)
+                )
+                from_peer = None
+                if local_from_id not in (self_id, peer_user_id):
+                    # A 1:1 chat only ever has two senders, so a third party can
+                    # match nothing. Answer without paging: the local filter
+                    # would otherwise discard every row and we would walk the
+                    # whole match set to return an empty list anyway.
+                    return []
+            # Rows dropped by the *local* filters below do not count toward
+            # `limit`, so tying the wire page size to `limit` would shrink the
+            # `_SEARCH_MAX_PAGES` budget to `limit * _SEARCH_MAX_PAGES`
+            # messages: `--limit 1` on a 1:1 chat whose 20 newest matches are
+            # ours would answer `[]` while `--limit 20` finds them, making the
+            # result silently depend on `limit`. Page at full width whenever a
+            # local filter can drop rows; `out[:limit]` stays the only
+            # truncation, and the `page[0].id <= page_size` stop condition holds
+            # for any page size.
+            locally_filtered = (
+                local_from_id is not None or from_date is not None or to_date is not None
+            )
+            page_size = (
+                _SEARCH_PAGE_SIZE
+                if locally_filtered
+                else max(1, min(limit, _SEARCH_PAGE_SIZE))
+            )
             out: list[RecentMessage] = []
             seen: set[int] = set()
             offset_id = 0
-            while len(out) < limit:
+            pages = 0
+            while len(out) < limit and pages < _SEARCH_MAX_PAGES:
+                pages += 1
                 result = await self._client(
                     SearchRequest(
                         peer=peer,
@@ -501,7 +612,7 @@ class TelethonSearchBackend:
                 page = list(getattr(result, "messages", None) or ())
                 if not page:
                     break
-                usernames = _search_usernames(getattr(result, "users", None))
+                usernames = _search_usernames(result)
                 next_offset = offset_id
                 for msg in page:
                     msg_id = int(getattr(msg, "id", 0))
@@ -510,6 +621,18 @@ class TelethonSearchBackend:
                     if msg_id in seen:
                         continue
                     seen.add(msg_id)
+                    # A deleted/undisplayable slot: it has an id (so it already
+                    # moved the offset above) but no text, date or media, and
+                    # emitting it would spend a `limit` slot on an empty row.
+                    if isinstance(msg, MessageEmpty):
+                        continue
+                    if local_from_id is not None and (
+                        _search_sender_id(
+                            msg, self_id=self_id, peer_user_id=peer_user_id
+                        )
+                        != local_from_id
+                    ):
+                        continue
                     date = getattr(msg, "date", None)
                     if from_date is not None or to_date is not None:
                         if date is None:
@@ -540,7 +663,13 @@ class TelethonSearchBackend:
                 if next_offset == offset_id or next_offset <= 0:
                     break
                 offset_id = next_offset
-                if len(page) < page_size:
+                # `len(page) < page_size` is *not* a safe end-of-history signal
+                # — a channel may drop undisplayable messages from a full slice,
+                # and stopping there would hide older in-range matches. The safe
+                # equivalent (Telethon uses the same one): message ids start at
+                # 1, so a page whose newest id is not above the page size has
+                # nothing older behind it.
+                if int(getattr(page[0], "id", 0) or 0) <= page_size:
                     break
         except Exception as exc:
             raise translate_flood_wait(exc) from exc

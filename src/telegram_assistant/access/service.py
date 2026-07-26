@@ -308,6 +308,26 @@ class Authorizer:
             self._memberships = await self._resolve_memberships()
         return self._memberships.get(chat_id, set())
 
+    def invalidate_folder_memberships(self) -> None:
+        """Forget the folder-membership map, in memory and in the shared cache.
+
+        Called by the domain ops that *change* folder membership (folder
+        add-chat/remove-chat, placing a freshly created group). Without this the
+        persistent single-row cache would keep serving the pre-mutation map for
+        up to ``folder_cache_ttl`` seconds — to this process *and* every other
+        one sharing the DB — so a chat just placed into a ``folder:``-granted
+        folder would be denied, and a chat just removed would keep its grant.
+        A cache fault must never break the mutation that already succeeded, so
+        the clear is best-effort.
+        """
+        self._memberships = None
+        if self._cache is None:
+            return
+        try:
+            self._cache.clear()
+        except Exception as exc:  # pragma: no cover - defensive
+            _log.warning("folder_membership_cache_clear_failed", error=str(exc))
+
     async def _resolve_memberships(self) -> dict[int, set[Membership]]:
         """Resolve the ``chat_id -> {(folder_id, folder_name)}`` map, cached.
 
@@ -317,7 +337,9 @@ class Authorizer:
         * a cached row younger than the TTL is used verbatim — no backend
           round-trip (the CLI win: one process per call reuses the last fetch);
         * an expired/missing entry is refetched via the folder backend and
-          written back with the current epoch;
+          written back stamped with the epoch the fetch *started* at — which is
+          also the fence that keeps a fetch overtaken by an
+          :meth:`invalidate_folder_memberships` from restoring the stale map;
         * a fetch failure serves the stale cached map (logging a warning); the
           error only propagates when nothing is cached to fall back to.
 
@@ -326,11 +348,20 @@ class Authorizer:
         """
         ttl = self._config.folder_cache_ttl if self._config is not None else 0
         cache = self._cache if ttl > 0 else None
-        cached: tuple[MembershipMap, float] | None = (
-            cache.load() if cache is not None else None
-        )
+        cached: tuple[MembershipMap, float] | None = None
+        if cache is not None:
+            try:
+                cached = cache.load()
+            except Exception as exc:
+                # A cache fault must degrade to a live fetch, never deny.
+                _log.warning("folder_membership_cache_load_failed", error=str(exc))
         if cached is not None and (time.time() - cached[1]) < ttl:
             return self._invert_folder_map(cached[0])
+        # Stamped *before* the fetch: it is both the age the TTL should count
+        # from and the fence the conditional save below uses, so a mutation that
+        # invalidates the cache mid-fetch is not overwritten by the map we
+        # started reading before it.
+        started = time.time()
         try:
             folder_map = await self._fetch_folder_map()
         except Exception as exc:
@@ -342,8 +373,18 @@ class Authorizer:
                 )
                 return self._invert_folder_map(cached[0])
             raise
-        if cache is not None:
-            cache.save(folder_map, time.time())
+        # Never persist a map we did not actually fetch: with no folder backend
+        # `_fetch_folder_map` returns an empty map, and writing that into the
+        # shared single-row cache would deny every folder rule — for this
+        # process *and* every other one — until the TTL expires.
+        if cache is not None and self._folder_backend is not None:
+            try:
+                cache.save(folder_map, started, not_after=started)
+            except Exception as exc:
+                # Same invariant as the load path: a cache fault must never turn
+                # a decision we already have into a 500 — the map is live and
+                # usable, only the persistence for the *next* process failed.
+                _log.warning("folder_membership_cache_save_failed", error=str(exc))
         return self._invert_folder_map(folder_map)
 
     async def _fetch_folder_map(self) -> MembershipMap:

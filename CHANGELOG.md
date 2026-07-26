@@ -34,6 +34,7 @@
 
 ### Documentation
 
+- Document download no-overwrite, pin pacing, search range and folder_id rules
 - Add rich message send implementation plan
 - Add Features section to README
 

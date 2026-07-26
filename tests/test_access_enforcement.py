@@ -250,6 +250,76 @@ async def test_mass_send_marks_unpermitted_chats_access_denied(
     assert denied[0].status == "skipped"
 
 
+async def test_mass_send_allowed_by_folder_id_rule(store: OperationStore) -> None:
+    """A `folder_id` rule must grant mass send, like the equivalent name rule.
+
+    Mass send hands the authorizer the resolved folder's membership itself; a
+    bare name there can never match an id rule, so every chat would come back
+    ``skipped: access_denied`` while a single send to the same chat succeeds.
+    """
+    topic = TopicSummary(topic_id=7, title="General")
+    folder = FolderSnapshot(
+        folder_id=42,
+        folder_name="Clients",
+        chats=[FolderChat(chat_id=10, title="A"), FolderChat(chat_id=11, title="B")],
+    )
+    backend = FakeMessageBackend(topics_per_chat={10: [topic], 11: [topic]})
+    folder_backend = FakeFolderBackend([folder])
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=42, permissions=["read", "write"])]),
+        folder_backend=folder_backend,
+    )
+
+    result = await mass_send_message(
+        message_backend=backend,
+        topic_backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        request=MassSendRequest(
+            folder_name="Clients", topic_name="General", text="hello"
+        ),
+        authorizer=auth,
+    )
+
+    assert result.skipped == 0
+    assert result.sent == 2
+    assert {s["chat_id"] for s in backend.sent} == {10, 11}
+
+
+async def test_mass_send_denied_by_unrelated_folder_id_rule(
+    store: OperationStore,
+) -> None:
+    """The id rule still has to match — a different folder's id grants nothing."""
+    topic = TopicSummary(topic_id=7, title="General")
+    folder = FolderSnapshot(
+        folder_id=42,
+        folder_name="Clients",
+        chats=[FolderChat(chat_id=10, title="A")],
+    )
+    backend = FakeMessageBackend(topics_per_chat={10: [topic]})
+    folder_backend = FakeFolderBackend([folder])
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=99, permissions=["read", "write"])]),
+        folder_backend=folder_backend,
+    )
+
+    result = await mass_send_message(
+        message_backend=backend,
+        topic_backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        request=MassSendRequest(
+            folder_name="Clients", topic_name="General", text="hello"
+        ),
+        authorizer=auth,
+    )
+
+    assert result.sent == 0
+    assert result.skipped == 1
+    assert result.items[0].reason == "access_denied"
+    assert backend.sent == []
+
+
 # ---------------------------------------------------------------------------
 # topics
 # ---------------------------------------------------------------------------
@@ -483,3 +553,154 @@ async def test_create_group_denied_by_other_folder_id_rule(
         )
     assert backend.created == []
     assert _operation_count(store) == 0
+
+
+async def test_create_group_explicit_default_folder_name_matches_id_rule(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    """Spelling out the default folder's name must still hit its `folder_id` rule.
+
+    The destination is the same folder either way, so the gate must borrow
+    ``default_chat_folder.folder_id`` for it — otherwise a policy written purely
+    with ``folder_id`` rules denies a create that the placement would perform.
+    """
+    config = load_config_from_text(minimal_config_yaml)  # default folder id 2
+    from tests.test_groups import FakeGroupBackend
+
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend(
+        [FolderSnapshot(folder_id=2, folder_name="Planfix clients", chats=[])]
+    )
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=2, permission="write")]),
+        folder_backend=folder_backend,
+    )
+    result, _ = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=GroupCreateRequest(
+            title="Acme", external_ref=1, folder_name="Planfix clients"
+        ),
+        authorizer=auth,
+    )
+    assert result.folder_id == 2
+
+
+async def test_create_group_named_folder_not_covered_by_default_id_rule(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    """The configured default id must not authorize a differently-named folder.
+
+    A rule granting the default folder (id 2) says nothing about "Other"; the
+    gate only borrows ``default_chat_folder.folder_id`` when the request names
+    no folder of its own.
+    """
+    config = load_config_from_text(minimal_config_yaml)  # default folder id 2
+    from tests.test_groups import FakeGroupBackend
+
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend(
+        [
+            FolderSnapshot(folder_id=2, folder_name="Planfix clients", chats=[]),
+            FolderSnapshot(folder_id=7, folder_name="Other", chats=[]),
+        ]
+    )
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=2, permission="write")]),
+        folder_backend=folder_backend,
+    )
+    with pytest.raises(AccessDenied):
+        await create_group(
+            backend=backend,
+            folder_backend=folder_backend,
+            store=store,
+            config=config.telegram,
+            plugins=build_registry(config),
+            request=GroupCreateRequest(
+                title="Acme", external_ref=1, folder_name="Other"
+            ),
+            authorizer=auth,
+        )
+    assert backend.created == []
+    assert _operation_count(store) == 0
+
+
+async def test_create_group_request_folder_id_cannot_satisfy_id_rule(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    """A caller-supplied `folder_id` must not unlock a differently-named folder.
+
+    The request's ``folder_id`` is unverified input — nothing proved it belongs
+    to the folder the request names. If the gate honoured it, WRITE on folder id
+    2 would let the caller create *and fully populate* a group while naming
+    folder "Other": the mismatch is only caught by ``resolve_folder`` after the
+    supergroup exists, leaving it in ``needs_review``.
+    """
+    config = load_config_from_text(minimal_config_yaml)  # default folder id 2
+    from tests.test_groups import FakeGroupBackend
+
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend(
+        [
+            FolderSnapshot(folder_id=2, folder_name="Planfix clients", chats=[]),
+            FolderSnapshot(folder_id=7, folder_name="Other", chats=[]),
+        ]
+    )
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=2, permission="write")]),
+        folder_backend=folder_backend,
+    )
+    with pytest.raises(AccessDenied):
+        await create_group(
+            backend=backend,
+            folder_backend=folder_backend,
+            store=store,
+            config=config.telegram,
+            plugins=build_registry(config),
+            request=GroupCreateRequest(
+                title="Acme", external_ref=1, folder_name="Other", folder_id=2
+            ),
+            authorizer=auth,
+        )
+    # Nothing reached Telegram: the denial outranks the id mismatch, so no
+    # half-built supergroup is left behind.
+    assert backend.created == []
+    assert _operation_count(store) == 0
+
+
+async def test_create_group_folder_id_rule_grants_named_destination(
+    minimal_config_yaml: str, store: OperationStore
+) -> None:
+    """A `folder_id` rule still grants a create that names that folder.
+
+    The caller need not repeat the id: when the name-only check denies, the
+    destination is resolved and re-gated on the folder's **own** id, so the
+    fence above does not break policies written purely with ``folder_id`` rules.
+    """
+    config = load_config_from_text(minimal_config_yaml)  # default folder id 2
+    from tests.test_groups import FakeGroupBackend
+
+    backend = FakeGroupBackend()
+    folder_backend = FakeFolderBackend(
+        [
+            FolderSnapshot(folder_id=2, folder_name="Planfix clients", chats=[]),
+            FolderSnapshot(folder_id=7, folder_name="Other", chats=[]),
+        ]
+    )
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(folder_id=7, permission="write")]),
+        folder_backend=folder_backend,
+    )
+    result, _ = await create_group(
+        backend=backend,
+        folder_backend=folder_backend,
+        store=store,
+        config=config.telegram,
+        plugins=build_registry(config),
+        request=GroupCreateRequest(title="Acme", external_ref=1, folder_name="Other"),
+        authorizer=auth,
+    )
+    assert result.folder_id == 7

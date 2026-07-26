@@ -43,6 +43,15 @@ def _peer_chat_id(peer: Any) -> int | None:
     return None
 
 
+def _is_self_peer(peer: Any) -> bool:
+    """Return ``True`` for ``InputPeerSelf`` — the only id-less peer shape.
+
+    Telegram serialises "Saved Messages" inside a folder as ``InputPeerSelf``,
+    which carries no ``user_id``, so :func:`_peer_chat_id` cannot read one.
+    """
+    return type(peer).__name__ == "InputPeerSelf"
+
+
 def _entity_title(entity: Any) -> str:
     title = getattr(entity, "title", None)
     if title:
@@ -70,6 +79,15 @@ class TelethonFolderBackend:
             raise translate_flood_wait(exc) from exc
         filters = getattr(result, "filters", result)
         return list(filters)
+
+    async def _own_user_id(self) -> int | None:
+        """Return the signed-in account's bare user id (``None`` if unavailable)."""
+        try:
+            me = await self._client.get_me()
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+        user_id = getattr(me, "id", None)
+        return None if user_id is None else int(user_id)
 
     async def list_folders(self) -> list[FolderSnapshot]:
         snapshots: list[FolderSnapshot] = []
@@ -118,8 +136,14 @@ class TelethonFolderBackend:
         permits two folders with the same title, and a title-keyed mapping would
         silently drop all but the last of them — wrongly denying access to every
         chat in the shadowed folder.
+
+        ``InputPeerSelf`` (Saved Messages) is the one peer shape that carries no
+        numeric id; it is resolved once via ``get_me`` — dropping it would leave
+        Saved Messages out of its folder and deny every rule that grants the
+        folder, for the whole cache TTL and every process sharing it.
         """
         memberships: list[FolderChats] = []
+        self_id: int | None = None
         for f in await self._fetch_filters():
             folder_id = getattr(f, "id", None)
             raw_title = getattr(f, "title", None)
@@ -131,6 +155,10 @@ class TelethonFolderBackend:
             ids: set[int] = set()
             for peer in pinned + include:
                 chat_id = _peer_chat_id(peer)
+                if chat_id is None and _is_self_peer(peer):
+                    if self_id is None:
+                        self_id = await self._own_user_id()
+                    chat_id = self_id
                 if chat_id is not None:
                     ids.add(chat_id)
             memberships.append(

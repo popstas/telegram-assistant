@@ -101,12 +101,53 @@ _WRITE_ACCESS = "access:\n  rules:\n    - all: true\n      permission: write\n"
 # ---------------------------------------------------------------------------
 
 
+class FakeResolver:
+    """Entity resolver double: ``@ref -> bare chat id``, as Telethon returns."""
+
+    def __init__(self, mapping: dict[str, int]) -> None:
+        self._mapping = mapping
+        self.calls: list[str] = []
+
+    async def resolve(self, ref: object) -> Any:
+        from telegram_assistant.entities import EntityNotFoundError, ResolvedEntity
+
+        self.calls.append(str(ref))
+        if str(ref) not in self._mapping:
+            raise EntityNotFoundError(str(ref))
+        return ResolvedEntity(
+            chat_id=self._mapping[str(ref)], title=str(ref), kind="channel"
+        )
+
+
+class FakeFolderBackend:
+    """Folder backend double exposing folders with named chats."""
+
+    def __init__(self, folders: dict[str, tuple[int, dict[str, int]]]) -> None:
+        self._folders = folders
+
+    async def list_folders(self) -> list[Any]:
+        from telegram_assistant.folders.service import FolderChat, FolderSnapshot
+
+        return [
+            FolderSnapshot(
+                folder_id=folder_id,
+                folder_name=name,
+                chats=[
+                    FolderChat(chat_id=cid, title=title) for title, cid in chats.items()
+                ],
+            )
+            for name, (folder_id, chats) in self._folders.items()
+        ]
+
+
 def _http_client(
     *,
     access_block: str | None = None,
     download_backend: FakeDownloadBackend | None = None,
     has_download_factory: bool = True,
     download_root: str | None = None,
+    resolver: FakeResolver | None = None,
+    folder_backend: FakeFolderBackend | None = None,
 ) -> TestClient:
     config = load_config_from_text(
         _config_with_access(access_block, download_root=download_root)
@@ -119,8 +160,8 @@ def _http_client(
             if has_download_factory
             else (lambda _r: None)
         ),
-        folder_backend_factory=lambda _r: None,
-        resolver_factory=lambda _r: None,
+        folder_backend_factory=lambda _r: folder_backend,
+        resolver_factory=lambda _r: resolver,
         operation_store=_make_store(),
     )
     return TestClient(app)
@@ -151,6 +192,80 @@ def test_http_download_writes_to_out_dir(tmp_path: Path) -> None:
             "target_path": str(tmp_path / "photo.jpg"),
         }
     ]
+
+
+def test_http_download_via_entity(tmp_path: Path) -> None:
+    """`entity` is a documented target shape; it must reach the backend."""
+    backend = FakeDownloadBackend()
+    resolver = FakeResolver({"@client": 100123})
+    client = _http_client(
+        access_block=_READ_ACCESS, download_backend=backend, resolver=resolver
+    )
+    resp = client.post(
+        "/telegram/messages/download",
+        json={"entity": "@client", "message_id": 7, "out_dir": str(tmp_path)},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["telegram_chat_id"] == 100123
+    assert backend.download_calls[-1]["chat_id"] == 100123
+    assert resolver.calls == ["@client"]
+
+
+def test_http_download_unknown_entity_is_404(tmp_path: Path) -> None:
+    backend = FakeDownloadBackend()
+    client = _http_client(
+        access_block=_READ_ACCESS, download_backend=backend, resolver=FakeResolver({})
+    )
+    resp = client.post(
+        "/telegram/messages/download",
+        json={"entity": "@nope", "message_id": 7, "out_dir": str(tmp_path)},
+        headers=AUTH,
+    )
+    assert resp.status_code == 404, resp.text
+    assert backend.download_calls == []
+
+
+def test_http_download_via_chat_name_in_folder(tmp_path: Path) -> None:
+    backend = FakeDownloadBackend()
+    folders = FakeFolderBackend({"Clients": (2, {"Client chat": -100777})})
+    client = _http_client(
+        access_block=_READ_ACCESS, download_backend=backend, folder_backend=folders
+    )
+    resp = client.post(
+        "/telegram/messages/download",
+        json={
+            "chat_name": "Client chat",
+            "folder_name": "Clients",
+            "message_id": 7,
+            "out_dir": str(tmp_path),
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["telegram_chat_id"] == -100777
+    assert resp.json()["chat_name"] == "Client chat"
+    assert backend.download_calls[-1]["chat_id"] == -100777
+
+
+def test_http_download_unknown_chat_name_is_404(tmp_path: Path) -> None:
+    backend = FakeDownloadBackend()
+    folders = FakeFolderBackend({"Clients": (2, {"Client chat": -100777})})
+    client = _http_client(
+        access_block=_READ_ACCESS, download_backend=backend, folder_backend=folders
+    )
+    resp = client.post(
+        "/telegram/messages/download",
+        json={
+            "chat_name": "Missing",
+            "folder_name": "Clients",
+            "message_id": 7,
+            "out_dir": str(tmp_path),
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 404, resp.text
+    assert backend.download_calls == []
 
 
 def test_http_download_echoes_unique_name_on_collision(tmp_path: Path) -> None:
@@ -206,6 +321,57 @@ def test_http_download_rejects_out_dir_outside_default_root() -> None:
     )
     assert resp.status_code == 400, resp.text
     assert "download root" in resp.json()["detail"]
+    assert backend.download_calls == []
+
+
+def test_http_download_rejects_out_dir_symlinked_outside_root(
+    tmp_path: Path,
+) -> None:
+    """A symlink inside the root must not be a way out of it.
+
+    The default root is the system temp dir, which is world-writable on a normal
+    host — a lexical prefix check would let any pre-existing symlink there turn
+    a READ-only identity into an arbitrary-location writer.
+    """
+    root = tmp_path / "downloads"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "link").symlink_to(outside)
+    backend = FakeDownloadBackend()
+    client = _http_client(
+        access_block=_READ_ACCESS,
+        download_backend=backend,
+        download_root=str(root),
+    )
+    resp = client.post(
+        "/telegram/messages/download",
+        json={"telegram_chat_id": -100123, "message_id": 7, "out_dir": "link"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 400, resp.text
+    assert "download root" in resp.json()["detail"]
+    assert backend.download_calls == []
+
+
+def test_http_download_rejects_out_dir_that_is_a_file(tmp_path: Path) -> None:
+    """An unusable target dir is bad input (400), not an unhandled 500."""
+    root = tmp_path / "downloads"
+    root.mkdir()
+    (root / "taken").write_text("not a directory")
+    backend = FakeDownloadBackend()
+    client = _http_client(
+        access_block=_READ_ACCESS,
+        download_backend=backend,
+        download_root=str(root),
+    )
+    resp = client.post(
+        "/telegram/messages/download",
+        json={"telegram_chat_id": -100123, "message_id": 7, "out_dir": "taken"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 400, resp.text
+    assert "download directory" in resp.json()["detail"]
     assert backend.download_calls == []
 
 

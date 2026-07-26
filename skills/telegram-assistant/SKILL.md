@@ -279,6 +279,14 @@ rule (the folder id is shown by `folders inspect`). `access add` writes only
 `--entity` / `--folder` / `--all` rules; a `folder_id` rule is a hand-edit of
 `data/config.yml`, so the agent reports the need and lets the human make it.
 
+Folder rules also cover the folder *listing* on the remote surfaces: the HTTP
+`GET /telegram/folders/{name}` route and the MCP `telegram_folders_inspect` tool
+require `read` on the folder (403 otherwise) because the payload lists every
+chat in it; the local `folders inspect` CLI is ungated. After `folders add-chat`
+/ `remove-chat` or a `groups create` placement, the cached folder-membership map
+is dropped, so a fresh grant (or revocation) is in force on the very next
+command rather than after `folder_cache_ttl` seconds.
+
 #### `auth` / `login`
 
 - Extract: nothing.
@@ -739,7 +747,9 @@ rule (the folder id is shown by `folders inspect`). `access add` writes only
 - Never overwrites: when the target name is already taken the download goes to
   the first free `name (1).ext`, `name (2).ext`, … instead of replacing the
   existing file (the name is claimed atomically, so parallel downloads get
-  distinct files). A missing target directory is created. The reported `path` in
+  distinct files, each created mode `0600` — owner-only, because the default
+  root is the world-writable system temp dir). A missing target directory is
+  created. The reported `path` in
   the result is the **actual** file written — read it from the output rather
   than assuming the requested name; the `--dry-run` path is the first free name
   at check time and is best-effort (a later download may take it first).
@@ -755,7 +765,8 @@ rule (the folder id is shown by `folders inspect`). `access add` writes only
 
 - Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
   `--query` (the required non-empty search text), optional `--from` (restrict
-  to a sender), optional `--limit` (count), optional `--topic-id` (search inside
+  to a sender), optional `--limit` (max matches, default 20), optional
+  `--topic-id` (search inside
   one forum topic), and **one** time scope: either `--minutes` (relative window,
   only messages newer than `now - minutes`) or the fixed range
   `--from-date` + `--to-date`.
@@ -766,7 +777,11 @@ rule (the folder id is shown by `folders inspect`). `access add` writes only
   сообщения про "..."». No `--dry-run`. Every filter (`--query`, `--from`,
   `--topic-id`, the date range) goes to Telegram in **one** server-side search
   request and is paged until `--limit` matches are collected, so a bounded range
-  finds old messages too. Results are newest-first.
+  finds old messages too. Results are newest-first. Paging is capped at 20
+  search requests, and rows dropped by the local filters do not count toward
+  `--limit`, so a heavily filtered query can come back short of `--limit` even
+  when older matches exist — narrow the date range or the sender rather than
+  reporting "that's all there is".
 - Date range: `--from-date` and `--to-date` take ISO-8601 timestamps **with a
   timezone** (e.g. `2026-07-01T00:00:00+03:00`), are **inclusive** on both ends,
   and must be given together. Map «найди в X сообщения про "оплата" с 1 по 10
