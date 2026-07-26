@@ -794,6 +794,9 @@ def test_mcp_send_rich_markdown_rejects_combinations(
         )
 
     assert result["isError"] is True, result
+    # It must be the exclusivity rule that rejected it, not an unrelated
+    # shape/targeting error that would also set isError.
+    assert "rich_markdown" in result["content"][0]["text"], result
     assert backend.sent == []
 
 
@@ -818,6 +821,10 @@ def test_mcp_send_rich_markdown_bounds(
         )
 
     assert result["isError"] is True, result
+    text = result["content"][0]["text"]
+    assert "rich_markdown" in text, result
+    if markdown.strip():
+        assert str(MAX_RICH_MARKDOWN_CHARS) in text, result
     assert backend.sent == []
 
 
@@ -841,6 +848,7 @@ def test_mcp_send_rich_markdown_requires_write(
         )
 
     assert result["isError"] is True, result
+    assert '"error": "access_denied"' in result["content"][0]["text"], result
     assert backend.sent == []
 
 

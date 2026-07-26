@@ -112,22 +112,18 @@ def _describe(obj: Any, indent: int = 0) -> str:
     return "\n".join(lines)
 
 
-def _extract_message_id(result: Any) -> int | None:
-    """Mirror the id-extraction the backend will need."""
-    updates = getattr(result, "updates", None)
-    candidates = updates if isinstance(updates, list) else [result]
-    # UpdateMessageID carries the id for the random_id we just sent; the
-    # UpdateNew*Message variants carry the full Message object.
-    for update in candidates:
-        if type(update).__name__ == "UpdateMessageID":
-            return getattr(update, "id", None)
-    for update in candidates:
-        if type(update).__name__ in ("UpdateNewMessage", "UpdateNewChannelMessage"):
-            message = getattr(update, "message", None)
-            message_id = getattr(message, "id", None)
-            if message_id is not None:
-                return int(message_id)
-    return getattr(result, "id", None)
+def _extract_message_id(result: Any, *, random_id: int | None) -> int | None:
+    """Report the id exactly as the shipped backend would.
+
+    Imported rather than re-implemented: a local copy would drift from the
+    production helper and stop being evidence about what the backend does. The
+    request's own ``random_id`` is passed for the same reason — the backend always
+    passes it, and without it the helper takes its unkeyed branch and would accept
+    an id the production path refuses.
+    """
+    from telegram_assistant.messages.telethon_backend import _extract_rich_message_id
+
+    return _extract_rich_message_id(result, random_id=random_id)
 
 
 async def _run(args: argparse.Namespace) -> int:
@@ -208,7 +204,9 @@ async def _run(args: argparse.Namespace) -> int:
 
         print("\nresult tree:")
         print(_describe(result))
-        message_id = _extract_message_id(result)
+        message_id = _extract_message_id(
+            result, random_id=getattr(request, "random_id", None)
+        )
         print(f"\nmessage_id: {message_id}")
         return 0
     finally:

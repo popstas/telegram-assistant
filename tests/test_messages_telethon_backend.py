@@ -17,7 +17,11 @@ import pytest
 from telethon.tl.types import MessageEmpty, PeerUser
 
 from telegram_assistant.messages import telethon_backend
-from telegram_assistant.messages.service import MessageSendFailed
+from telegram_assistant.messages.service import (
+    MessageSendFailed,
+    MessageSendUnconfirmed,
+    RichMessageUnsupported,
+)
 from telegram_assistant.messages.telethon_backend import (
     _SEARCH_PAGE_SIZE,
     TelethonDeleteBackend,
@@ -225,7 +229,7 @@ class _RawClient(_RecordingClient):
         super().__init__()
         self.raw_calls: list[Any] = []
         self.peers: list[int] = []
-        self._updates = updates if updates is not None else _rich_updates(4242)
+        self._updates = updates
 
     async def get_input_entity(self, chat_id: int) -> Any:
         self.peers.append(chat_id)
@@ -233,15 +237,19 @@ class _RawClient(_RecordingClient):
 
     async def __call__(self, request: Any) -> Any:
         self.raw_calls.append(request)
+        if self._updates is None:
+            # Telegram echoes the request's own ``random_id`` back; the default
+            # envelope must too, or it looks like another request's update.
+            return _rich_updates(4242, random_id=request.random_id)
         return self._updates
 
 
-def _rich_updates(message_id: int) -> Any:
+def _rich_updates(message_id: int, *, random_id: int) -> Any:
     """An ``Updates`` envelope shaped like the Task 1 spike observed."""
     from telethon.tl.types import UpdateMessageID, Updates
 
     return Updates(
-        updates=[UpdateMessageID(id=message_id, random_id=999)],
+        updates=[UpdateMessageID(id=message_id, random_id=random_id)],
         users=[],
         chats=[],
         date=datetime(2026, 1, 1, tzinfo=UTC),
@@ -360,7 +368,214 @@ async def test_rich_send_extracts_id_from_update_new_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rich_send_without_message_id_raises() -> None:
+async def test_rich_send_extracts_id_from_update_short_sent_message() -> None:
+    """``messages.sendMessage`` answers 1:1 peers with ``UpdateShortSentMessage``
+    — no update list, the new id on the envelope itself. Telethon's own sender
+    special-cases it; missing it would report a delivered article as failed."""
+    from telethon.tl.types import UpdateShortSentMessage
+
+    sent = UpdateShortSentMessage(
+        id=555, pts=2, pts_count=1, date=datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    backend = TelethonMessageBackend(_RawClient(updates=sent))
+
+    assert await backend.send_message(
+        chat_id=1, text="", rich_markdown=RICH_MD
+    ) == 555
+
+
+@pytest.mark.asyncio
+async def test_rich_send_unwraps_update_short_envelope() -> None:
+    """``UpdateShort`` carries a single update under ``.update``."""
+    from telethon.tl.types import UpdateMessageID, UpdateShort
+
+    class _EchoingClient(_RawClient):
+        async def __call__(self, request: Any) -> Any:
+            self.raw_calls.append(request)
+            return UpdateShort(
+                update=UpdateMessageID(id=606, random_id=request.random_id),
+                date=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+
+    backend = TelethonMessageBackend(_EchoingClient())
+
+    assert await backend.send_message(
+        chat_id=1, text="", rich_markdown=RICH_MD
+    ) == 606
+
+
+@pytest.mark.asyncio
+async def test_rich_send_extracts_id_from_update_new_scheduled_message() -> None:
+    """A scheduled send answers with ``UpdateNewScheduledMessage``; Telethon's own
+    extractor handles it, so the fallback must too — otherwise a successfully
+    scheduled article would be reported as a failed send."""
+    from telethon.tl.types import UpdateNewScheduledMessage, Updates
+
+    class _Msg:
+        id = 888
+
+    updates = Updates(
+        updates=[UpdateNewScheduledMessage(message=_Msg())],
+        users=[],
+        chats=[],
+        date=datetime(2026, 1, 1, tzinfo=UTC),
+        seq=0,
+    )
+    backend = TelethonMessageBackend(_RawClient(updates=updates))
+
+    assert await backend.send_message(
+        chat_id=1,
+        text="",
+        rich_markdown=RICH_MD,
+        schedule_at=datetime(2030, 1, 1, tzinfo=UTC),
+    ) == 888
+
+
+@pytest.mark.asyncio
+async def test_rich_send_prefers_update_matching_own_random_id() -> None:
+    """An ``Updates`` container can carry updates belonging to another request.
+    The id must be picked by *this* request's ``random_id``, not by position."""
+    from telethon.tl.types import UpdateMessageID, Updates
+
+    class _EchoingClient(_RawClient):
+        async def __call__(self, request: Any) -> Any:
+            self.raw_calls.append(request)
+            return Updates(
+                updates=[
+                    # A stranger's update arrives first.
+                    UpdateMessageID(id=111, random_id=12345),
+                    UpdateMessageID(id=222, random_id=request.random_id),
+                ],
+                users=[],
+                chats=[],
+                date=datetime(2026, 1, 1, tzinfo=UTC),
+                seq=0,
+            )
+
+    backend = TelethonMessageBackend(_EchoingClient())
+
+    assert await backend.send_message(
+        chat_id=1, text="", rich_markdown=RICH_MD
+    ) == 222
+
+
+@pytest.mark.asyncio
+async def test_rich_send_ignores_foreign_keyed_update_message_id() -> None:
+    """A keyed ``UpdateMessageID`` that isn't ours must never be used as a
+    fallback: its id would be returned as the article's *and* recorded in the
+    ``SentMessageRegistry``, granting this session edit/delete over a message it
+    never sent. Our own ``UpdateNewChannelMessage`` wins instead."""
+    from telethon.tl.types import UpdateMessageID, UpdateNewChannelMessage, Updates
+
+    class _Msg:
+        id = 777
+
+    class _EchoingClient(_RawClient):
+        async def __call__(self, request: Any) -> Any:
+            self.raw_calls.append(request)
+            return Updates(
+                updates=[
+                    # Another request's update — same container, different key.
+                    UpdateMessageID(id=111, random_id=request.random_id + 1),
+                    UpdateNewChannelMessage(
+                        message=_Msg(), pts=1, pts_count=1
+                    ),
+                ],
+                users=[],
+                chats=[],
+                date=datetime(2026, 1, 1, tzinfo=UTC),
+                seq=0,
+            )
+
+    backend = TelethonMessageBackend(_EchoingClient())
+
+    assert await backend.send_message(
+        chat_id=1, text="", rich_markdown=RICH_MD
+    ) == 777
+
+
+@pytest.mark.asyncio
+async def test_rich_send_ignores_update_new_message_paired_with_foreign_id() -> None:
+    """Telegram pairs an ``UpdateMessageID`` with the ``UpdateNew*Message`` for the
+    *same* message, so the ``UpdateNew*Message`` scan must not hand back the id the
+    ``random_id`` check just refused — otherwise the foreign-key guard is a no-op
+    in exactly the shape it exists for."""
+    from telethon.tl.types import UpdateMessageID, UpdateNewChannelMessage, Updates
+
+    class _Msg:
+        id = 111
+
+    class _EchoingClient(_RawClient):
+        async def __call__(self, request: Any) -> Any:
+            self.raw_calls.append(request)
+            return Updates(
+                updates=[
+                    # Another request's pair: both entries name message 111.
+                    UpdateMessageID(id=111, random_id=request.random_id + 1),
+                    UpdateNewChannelMessage(message=_Msg(), pts=1, pts_count=1),
+                ],
+                users=[],
+                chats=[],
+                date=datetime(2026, 1, 1, tzinfo=UTC),
+                seq=0,
+            )
+
+    backend = TelethonMessageBackend(_EchoingClient())
+
+    with pytest.raises(MessageSendUnconfirmed):
+        await backend.send_message(chat_id=1, text="", rich_markdown=RICH_MD)
+
+
+@pytest.mark.asyncio
+async def test_rich_send_ignores_incoming_short_message_envelope_id() -> None:
+    """``UpdateShortMessage`` is an *incoming*-message envelope that also carries
+    an ``id`` — someone else's. Only ``UpdateShortSentMessage`` may be read off the
+    envelope itself (Telethon's own extractor draws the same line)."""
+    from telethon.tl.types import UpdateShortMessage
+
+    envelope = UpdateShortMessage(
+        id=999,
+        user_id=42,
+        message="not ours",
+        pts=2,
+        pts_count=1,
+        date=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    backend = TelethonMessageBackend(_RawClient(updates=envelope))
+
+    with pytest.raises(MessageSendUnconfirmed):
+        await backend.send_message(chat_id=1, text="", rich_markdown=RICH_MD)
+
+
+@pytest.mark.asyncio
+async def test_rich_send_foreign_update_message_id_alone_is_unconfirmed() -> None:
+    """With only a foreign ``UpdateMessageID`` in the envelope there is no id we
+    can claim, so the send is unconfirmed (needs_review) rather than silently
+    reporting a stranger's message id."""
+    from telethon.tl.types import UpdateMessageID, Updates
+
+    class _EchoingClient(_RawClient):
+        async def __call__(self, request: Any) -> Any:
+            self.raw_calls.append(request)
+            return Updates(
+                updates=[UpdateMessageID(id=111, random_id=request.random_id + 1)],
+                users=[],
+                chats=[],
+                date=datetime(2026, 1, 1, tzinfo=UTC),
+                seq=0,
+            )
+
+    backend = TelethonMessageBackend(_EchoingClient())
+
+    with pytest.raises(MessageSendUnconfirmed):
+        await backend.send_message(chat_id=1, text="", rich_markdown=RICH_MD)
+
+
+@pytest.mark.asyncio
+async def test_rich_send_without_message_id_raises_unconfirmed() -> None:
+    """The request succeeded, so delivery is *uncertain*, not failed: this must
+    not be ``MessageSendFailed`` (which the surfaces render as 409
+    previous_attempt_failed) — the service turns it into ``needs_review``."""
     from telethon.tl.types import Updates
 
     updates = Updates(
@@ -372,8 +587,9 @@ async def test_rich_send_without_message_id_raises() -> None:
     )
     backend = TelethonMessageBackend(_RawClient(updates=updates))
 
-    with pytest.raises(MessageSendFailed, match="message id"):
+    with pytest.raises(MessageSendUnconfirmed, match="message id"):
         await backend.send_message(chat_id=1, text="", rich_markdown=RICH_MD)
+    assert not issubclass(MessageSendUnconfirmed, MessageSendFailed)
 
 
 @pytest.mark.asyncio
@@ -392,17 +608,23 @@ async def test_rich_send_on_old_telethon_reports_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Telethon < 1.44 (layer < 227) has no ``InputRichMessageMarkdown``; the
-    caller must learn that, not see an ImportError or AttributeError."""
+    caller must learn that, not see an ImportError or AttributeError.
+
+    It must also not be ``MessageSendFailed``: that is the idempotency-replay
+    class, and the surfaces render it as ``previous_attempt_failed`` (409 / exit
+    2), pointing the operator at a prior attempt instead of the Telethon pin.
+    """
     monkeypatch.setattr(
         telethon_backend, "_import_rich_markdown_type", lambda: None
     )
     client = _RawClient()
     backend = TelethonMessageBackend(client)
 
-    with pytest.raises(MessageSendFailed, match=r"telethon>=1\.44"):
+    with pytest.raises(RichMessageUnsupported, match=r"telethon>=1\.44"):
         await backend.send_message(chat_id=1, text="", rich_markdown=RICH_MD)
 
     assert client.raw_calls == []
+    assert not issubclass(RichMessageUnsupported, MessageSendFailed)
 
 
 @pytest.mark.asyncio
