@@ -186,11 +186,17 @@ Non-blocking observation (symlink hardening of `download_root`) goes to Post-Com
 
 ### Task 9: [Final] Update documentation
 
-- [ ] update `skills/telegram-assistant/SKILL.md` sections for `messages download` (unique-name behavior), `messages pin`/`unpin` (pacing, retry-after), `messages search` (`--from-date`/`--to-date`), access rules (`folder_id` target, same-name union semantics); re-sync to `~/.claude/skills/telegram-assistant/SKILL.md`
-- [ ] update `README.md`: CLI bullets (lines ~97–100), access config block (~130–148: `folder_id` rule example + same-name note), HTTP endpoints (~177–179), MCP catalog args (~221–226), `download_root` section (~318–323), new `pin_min_interval_seconds` knob
-- [ ] update `CLAUDE.md` Config/architecture paragraphs describing `list_folder_chat_ids()` (now id-keyed), the folder cache payload, access rule targets, download no-overwrite, pin pacing
-- [ ] verify `tests/test_skill_inventory.py` and `tests/test_mcp_mount.py` pass (no MCP tool renames expected)
-- [ ] run full test suite one last time
+- [x] update `skills/telegram-assistant/SKILL.md` sections for `messages download` (unique-name behavior), `messages pin`/`unpin` (pacing, retry-after), `messages search` (`--from-date`/`--to-date`), access rules (`folder_id` target, same-name union semantics); re-sync to `~/.claude/skills/telegram-assistant/SKILL.md`
+- [x] update `README.md`: CLI bullets (lines ~97–100), access config block (~130–148: `folder_id` rule example + same-name note), HTTP endpoints (~177–179), MCP catalog args (~221–226), `download_root` section (~318–323), new `pin_min_interval_seconds` knob
+- [x] update `CLAUDE.md` Config/architecture paragraphs describing `list_folder_chat_ids()` (now id-keyed), the folder cache payload, access rule targets, download no-overwrite, pin pacing
+- [x] verify `tests/test_skill_inventory.py` and `tests/test_mcp_mount.py` pass (no MCP tool renames expected)
+- [x] run full test suite one last time
+
+➕ SKILL.md also gained `telegram.pin_min_interval_seconds` under "Notable keys" (so the agent reads a slow pin series as pacing, not a hang) and an explicit note that `access add` cannot write `folder_id` rules — those are a hand-edit of `data/config.yml`.
+
+➕ README's Features bullet and `folder_cache_ttl` paragraph were updated too (folder targets are now by name **or** id; the cache is id-keyed), beyond the line ranges listed above.
+
+➕ Verification: `pytest tests/test_skill_inventory.py tests/test_mcp_mount.py` → 14 passed; full `pytest` → 1507 passed; `ruff check src tests` → All checks passed.
 
 ## Technical Details
 

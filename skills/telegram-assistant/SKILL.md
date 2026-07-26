@@ -24,6 +24,9 @@ This section is the contract that applies to every action.
   `access add` command (and only after a confirmed `--dry-run`). Notable keys:
   - `telegram.default_chat_folder.folder_name` — used as `--folder-name` when
     the human request does not name a folder explicitly.
+  - `telegram.pin_min_interval_seconds` (default `2.0`, `0` disables) — minimum
+    seconds between two pin/unpin calls on one chat. Explains why a pin series
+    is slow; read it before assuming a pin command hung.
   - `mcp` — optional Streamable-HTTP MCP/OAuth config. This skill still uses
     the CLI for Telegram actions; only inspect MCP settings when the human
     explicitly asks about MCP server setup or smoke testing.
@@ -219,10 +222,10 @@ agent stops and asks for clarification — it does not invent a new path.
 | `messages` | `forward` | Forward one or more messages (`--message-id`, repeatable) from a source to a target chat (READ-gated source, WRITE-gated target). | `telegram-assistant messages forward ...` |
 | `messages` | `delete` | Delete one or more messages (`--message-id`, repeatable) from a chat (DELETE-gated; `--revoke`/`--no-revoke`, `--dry-run`, `--force`). Honors `telegram.access.delete_only_session_messages` (default true, overridable per access rule). | `telegram-assistant messages delete ...` |
 | `messages` | `edit` | Edit the text/caption of a sent message (`--message-id`, `--text`, WRITE-gated; `--dry-run`). Honors `telegram.access.edit_only_session_messages` (default true, overridable per access rule). | `telegram-assistant messages edit ...` |
-| `messages` | `pin` | Pin a message in a chat (`--message-id`, WRITE-gated; `--silent`, `--pm-oneside`, `--dry-run`). | `telegram-assistant messages pin ...` |
-| `messages` | `unpin` | Unpin a message (`--message-id`) or all pinned messages (`--all`) in a chat (WRITE-gated; `--dry-run`). | `telegram-assistant messages unpin ...` |
-| `messages` | `download` | Download the media of an existing message to a local file (`--message-id`, `--out` file / `--dir` directory, READ-gated; `--max-bytes`, `--dry-run`). | `telegram-assistant messages download ...` |
-| `messages` | `search` | Read-only: text-search a chat's messages newest-first (`--query`, READ-gated; `--from`, `--limit`, `--minutes`, `--topic-id`). | `telegram-assistant messages search ...` |
+| `messages` | `pin` | Pin a message in a chat (`--message-id`, WRITE-gated; `--silent`, `--pm-oneside`, `--dry-run`). Paced server-side against Telegram's pin `FLOOD_WAIT`. | `telegram-assistant messages pin ...` |
+| `messages` | `unpin` | Unpin a message (`--message-id`) or all pinned messages (`--all`) in a chat (WRITE-gated; `--dry-run`). Shares the pin pacing gate. | `telegram-assistant messages unpin ...` |
+| `messages` | `download` | Download the media of an existing message to a local file (`--message-id`, `--out` file / `--dir` directory, READ-gated; `--max-bytes`, `--dry-run`). Never overwrites — a taken name becomes `report (1).pdf`. | `telegram-assistant messages download ...` |
+| `messages` | `search` | Read-only: text-search a chat's messages newest-first (`--query`, READ-gated; `--from`, `--limit`, `--minutes` or `--from-date`/`--to-date`, `--topic-id`). | `telegram-assistant messages search ...` |
 | `notifications` | `mute` | Mute a chat/contact's notifications, forever or for `--duration` hours. | `telegram-assistant notifications mute ...` |
 | `notifications` | `unmute` | Restore normal notifications for a chat/contact. | `telegram-assistant notifications unmute ...` |
 | `folders` | `inspect` | Read-only: list chats inside a Telegram folder. | `telegram-assistant folders inspect ...` |
@@ -266,6 +269,15 @@ permit a chat or destination folder the CLI exits with code 3 and prints
 widens access on its own initiative. Granting access is only done via an
 explicit human request through `access add` (confirmed after `--dry-run`),
 never silently to get a blocked command through.
+
+A rule targets one chat (`chat`), a list (`chats`), a folder **by name**
+(`folder`), a folder **by id** (`folder_id`), or the wildcard (`all`). Telegram
+allows two folders with the same title, and a `folder:` rule deliberately
+**unions all** folders with that name — every chat in either one is covered. To
+grant on exactly one of two same-named folders, the config needs a `folder_id`
+rule (the folder id is shown by `folders inspect`). `access add` writes only
+`--entity` / `--folder` / `--all` rules; a `folder_id` rule is a hand-edit of
+`data/config.yml`, so the agent reports the need and lets the human make it.
 
 #### `auth` / `login`
 
@@ -670,11 +682,21 @@ never silently to get a blocked command through.
   plan, wait for confirmation, then run without `--dry-run`. Map «закрепи
   сообщение N в чате X» → `--entity X --message-id N`; add `--silent` when the
   human asks to pin without pinging members.
+- Pacing: rapid pin bursts are what Telegram answers with `FLOOD_WAIT`, so the
+  server paces them itself — at most one pin/unpin per chat every
+  `telegram.pin_min_interval_seconds` (default `2.0`; `0` disables). The gate is
+  shared through SQLite, so parallel CLI runs and the HTTP/MCP server wait for
+  each other. A pin series of N messages therefore takes ~N×interval seconds;
+  that is expected, not a hang — do not "work around" it by re-running faster.
+  A `FLOOD_WAIT` from Telegram is slept through and retried within a bounded
+  budget; only an exhausted budget (or a wait past the cap) surfaces as an error.
 - Confirmation: required (bucket 2).
 - Typical errors: `--message-id must be a positive integer`, `exactly one of
   --chat-id, --chat-name, or --entity must be supplied`, `access denied ...`
   (exit code 3 — chat lacks the `write` capability), entity not-found /
-  ambiguous (exit code 2).
+  ambiguous (exit code 2), `messages pin rate-limited by Telegram: ... Retry
+  after Ns (next attempt at <ISO timestamp>)` — surface the next-attempt time
+  verbatim and wait for it instead of retrying immediately.
 
 #### `messages` / `unpin`
 
@@ -687,11 +709,14 @@ never silently to get a blocked command through.
 - Automation: none — WRITE-gated state change. Run `--dry-run` first, show the
   plan, wait for confirmation, then run without `--dry-run`. Map «открепи
   сообщение N в чате X» → `--entity X --message-id N`; «открепи всё» → `--all`.
+- Pacing: same shared per-chat gate as `messages pin` (see above) — pins and
+  unpins on one chat pace against each other.
 - Confirmation: required (bucket 2).
 - Typical errors: `provide either --message-id or --all, not both`,
   `--message-id must be a positive integer`, `exactly one of --chat-id,
   --chat-name, or --entity must be supplied`, `access denied ...` (exit code 3),
-  entity not-found / ambiguous (exit code 2).
+  entity not-found / ambiguous (exit code 2), `messages unpin rate-limited by
+  Telegram: ... Retry after Ns (next attempt at <ISO timestamp>)`.
 
 #### `messages` / `download`
 
@@ -711,8 +736,16 @@ never silently to get a blocked command through.
   `--dry-run` first (resolves + authorizes + reports the planned target path
   without downloading), then run without `--dry-run`. Map «скачай файл из
   сообщения N чата X в /srv/out/» → `--entity X --message-id N --dir /srv/out/`.
+- Never overwrites: when the target name is already taken the download goes to
+  the first free `name (1).ext`, `name (2).ext`, … instead of replacing the
+  existing file (the name is claimed atomically, so parallel downloads get
+  distinct files). A missing target directory is created. The reported `path` in
+  the result is the **actual** file written — read it from the output rather
+  than assuming the requested name; the `--dry-run` path is the first free name
+  at check time and is best-effort (a later download may take it first).
 - Confirmation: not strictly a Telegram state change, but it writes to disk —
-  show the resolved target path in the plan before the real run.
+  show the resolved target path in the plan before the real run, and report the
+  final `path` afterwards when it differs from the planned one.
 - Typical errors: `provide exactly one of --out or --dir`, `--message-id must be
   a positive integer`, message has no downloadable media, media exceeds
   `--max-bytes`, `access denied ...` (exit code 3 — chat lacks the `read`
@@ -722,22 +755,37 @@ never silently to get a blocked command through.
 
 - Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`),
   `--query` (the required non-empty search text), optional `--from` (restrict
-  to a sender), optional `--limit` (count), optional `--minutes` (only messages
-  newer than `now - minutes`), optional `--topic-id` (search inside one forum
-  topic).
+  to a sender), optional `--limit` (count), optional `--topic-id` (search inside
+  one forum topic), and **one** time scope: either `--minutes` (relative window,
+  only messages newer than `now - minutes`) or the fixed range
+  `--from-date` + `--to-date`.
 - Required flags: exactly one chat reference and `--query`.
 - From config: `--folder-name` default when resolving `--chat-name`.
 - Temp file: no.
 - Automation: read-only — run immediately when the human asks «найди в чате X
-  сообщения про "..."». No `--dry-run`. Uses Telegram server-side search;
-  `--minutes` is applied client-side for parity with `recent`. Results are
-  newest-first.
+  сообщения про "..."». No `--dry-run`. Every filter (`--query`, `--from`,
+  `--topic-id`, the date range) goes to Telegram in **one** server-side search
+  request and is paged until `--limit` matches are collected, so a bounded range
+  finds old messages too. Results are newest-first.
+- Date range: `--from-date` and `--to-date` take ISO-8601 timestamps **with a
+  timezone** (e.g. `2026-07-01T00:00:00+03:00`), are **inclusive** on both ends,
+  and must be given together. Map «найди в X сообщения про "оплата" с 1 по 10
+  июля» → `--from-date 2026-07-01T00:00:00+03:00 --to-date
+  2026-07-10T23:59:59+03:00`. Ask for the year/timezone rather than guessing
+  when the human's phrasing is ambiguous. The result echoes the applied bounds
+  normalised to UTC (`from_date`/`to_date`) — quote those when reporting what
+  was actually searched.
 - Confirmation: not required (read-only). Still READ-gated by the
   `telegram.access` policy — if the chat is not permitted the CLI exits with
   `access denied`; surface that and stop.
 - Typical errors: `messages search requires a non-empty --query`, `--limit must
-  be a positive integer`, `--minutes must be a positive integer`, `exactly one
-  of --chat-id, --chat-name, or --entity must be supplied`, `access denied ...`
+  be a positive integer`, `--minutes must be a positive integer`, `--from-date
+  must be an ISO-8601 timestamp with timezone (got ...)`, `search_messages
+  requires both from_date and to_date when using a date range`,
+  `search_messages requires a timezone-aware from_date`, `search_messages
+  requires from_date <= to_date`, `search_messages accepts either minutes or a
+  from_date/to_date range, not both`, `exactly one of --chat-id, --chat-name, or
+  --entity must be supplied` (all exit code 2), `access denied ...`
   (exit code 3), entity not-found / ambiguous (exit code 2).
 
 #### `notifications` / `mute`
