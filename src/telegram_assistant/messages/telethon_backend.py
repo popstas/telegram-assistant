@@ -389,6 +389,10 @@ class TelethonSearchBackend:
     limit=...)`` and maps each hit into a :class:`RecentMessage` row (newest
     first, the Telethon default). ``FloodWaitError`` is translated so the worker
     queue can pause-and-retry rather than mark a generic failure.
+
+    ``from_date``/``to_date`` are accepted (already validated and UTC-normalised
+    by the domain) so the protocol is satisfied; the domain re-applies the
+    inclusive range check to whatever this adapter returns.
     """
 
     def __init__(self, client: Any) -> None:
@@ -402,6 +406,8 @@ class TelethonSearchBackend:
         from_user: str | int | None = None,
         limit: int = 20,
         topic_id: int | None = None,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
     ) -> list[RecentMessage]:
         try:
             entity = await self._client.get_input_entity(chat_id)

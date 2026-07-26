@@ -121,12 +121,20 @@ Non-blocking observation (symlink hardening of `download_root`) goes to Post-Com
 
 ### Task 5: Search date range — domain contract and validation
 
-- [ ] extend `messages/search.py`: `SearchBackend.search_messages` and domain `search_messages(...)` accept `from_date: datetime | None`, `to_date: datetime | None`
-- [ ] domain validation (before any backend/Telegram call, shared by all surfaces): both bounds required together; each must be timezone-aware (reject naive); `from_date <= to_date`; mutually exclusive with `minutes` — clear `ValueError` messages for each case; normalise both to UTC via `astimezone(UTC)`
-- [ ] inclusive semantics: `from_date <= message.date <= to_date`; after the backend returns, the domain re-applies the inclusive UTC check to `RecentMessage.date` (rows without a parseable date are excluded from range results)
-- [ ] domain result exposes the normalised UTC bounds so surfaces can echo them (e.g. return object/tuple carrying `applied_from_date`/`applied_to_date`, or surfaces recompute from the validated values)
-- [ ] write tests in `tests/test_messages_search.py`: messages exactly at both bounds included; just-outside excluded; single bound → error; naive datetime → error; `from > to` → error; `minutes` + range → error; `minutes`-only path unchanged
-- [ ] run tests - must pass before next task
+- [x] extend `messages/search.py`: `SearchBackend.search_messages` and domain `search_messages(...)` accept `from_date: datetime | None`, `to_date: datetime | None`
+- [x] domain validation (before any backend/Telegram call, shared by all surfaces): both bounds required together; each must be timezone-aware (reject naive); `from_date <= to_date`; mutually exclusive with `minutes` — clear `ValueError` messages for each case; normalise both to UTC via `astimezone(UTC)`
+- [x] inclusive semantics: `from_date <= message.date <= to_date`; after the backend returns, the domain re-applies the inclusive UTC check to `RecentMessage.date` (rows without a parseable date are excluded from range results)
+- [x] domain result exposes the normalised UTC bounds so surfaces can echo them (e.g. return object/tuple carrying `applied_from_date`/`applied_to_date`, or surfaces recompute from the validated values)
+- [x] write tests in `tests/test_messages_search.py`: messages exactly at both bounds included; just-outside excluded; single bound → error; naive datetime → error; `from > to` → error; `minutes` + range → error; `minutes`-only path unchanged
+- [x] run tests - must pass before next task
+
+➕ Bounds are exposed via the exported helper `normalize_search_range(from_date=, to_date=, minutes=)` (the plan's "surfaces recompute from the validated values" option) rather than a new return type: `search_messages` keeps returning `list[RecentMessage]`, so HTTP/CLI/MCP need no shape change and Task 7 just calls the helper to echo the applied UTC bounds. It holds *all* range validation, so every surface rejects the same inputs with the same message.
+
+➕ Validation runs before the authorizer/backend (cheap, surface-shared), so a bad range never triggers a Telegram call — covered by `test_search_range_validated_before_access_check`.
+
+➕ The range is pushed *down* to the backend (new protocol kwargs) instead of being a post-filter like `minutes`; the domain re-check is only the inclusive/second-granularity trim. `TelethonSearchBackend.search_messages` accepts the kwargs now but still ignores them — Task 6 wires them into `messages.SearchRequest`.
+
+➕ Existing fakes in `tests/test_messages_search.py`, `test_messages_search_surfaces.py` and `test_mcp_tools.py` gained the two kwargs and record them, so the recorded-call assertions now include `from_date`/`to_date` (both `None` on the unchanged paths).
 
 ### Task 6: Telethon search backend — single `messages.SearchRequest` with pagination
 
