@@ -120,6 +120,8 @@ Confirmation rules:
 Bulk commands (`topics bulk-create`, `members bulk-add`,
 `members bulk-remove`, fan-out `messages send`) take a `--file` argument
 pointing to a CSV or JSON file. The agent prepares those files itself.
+`messages send --rich-markdown` follows the same rules with a UTF-8
+markdown file (e.g. `/tmp/telegram-assistant-article.md`).
 
 Rules:
 
@@ -130,6 +132,7 @@ Rules:
   - `/tmp/telegram-assistant-topics.csv`
   - `/tmp/telegram-assistant-users.csv`
   - `/tmp/telegram-assistant-message.json`
+  - `/tmp/telegram-assistant-article.md` (for `--rich-markdown`)
 - Show the file path and the file contents to the human as part of the plan,
   so the dry-run output can be verified against what the agent actually
   prepared.
@@ -216,7 +219,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `topics` | `rename` | Rename an existing forum topic (change its title). | `telegram-assistant topics rename ...` |
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
-| `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. | `telegram-assistant messages send ...` |
+| `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. `--rich-markdown <file.md>` sends a Telegram rich message (article) instead of plain text. | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
 | `messages` | `forward` | Forward one or more messages (`--message-id`, repeatable) from a source to a target chat (READ-gated source, WRITE-gated target). | `telegram-assistant messages forward ...` |
@@ -533,38 +536,63 @@ command rather than after `folder_cache_ttl` seconds.
   optional attachments (`--file` for a local file path, `--file-url`
   for an http(s) URL — both repeatable), optional scheduling
   (`--schedule-at` ISO-8601 datetime, or `--delay` relative duration
-  like `10m`, `2h`, `1d`), and optional `--reply-to <message_id>` to
+  like `10m`, `2h`, `1d`), optional `--reply-to <message_id>` to
   thread the send as a reply (targeted-only; in a forum it wins over the
-  topic root, keeping the reply inside the topic).
+  topic root, keeping the reply inside the topic), and optional
+  `--rich-markdown <file.md>` to send an article instead of plain text.
 - Required flags: exactly one targeting shape — targeted
   (`--chat-id`/`--chat-name` + optional `--topic-id`/`--topic-name`)
   or mass (`--mass` or no chat ref, plus `--topic-name` and
   `--folder-name`). `--text` is required unless at least one
   `--file`/`--file-url` is supplied (in which case `--text` is the
-  caption). Attachments, scheduling, and `--reply-to` are targeted-only —
-  never combine them with `--mass`.
+  caption) or `--rich-markdown` is used. Attachments, scheduling,
+  `--reply-to`, and `--rich-markdown` are targeted-only — never combine
+  them with `--mass`.
 - From config: `--folder-name` default for both targeted resolution and
   mass mode.
-- Temp file: no — message text goes via `--text`, attachments via
-  repeated `--file`/`--file-url`. `--file` points at a path that exists
-  on the server running the CLI; the agent does not upload bytes. If the
-  human pastes a long multi-line message, escape it for the shell; do not
-  write it to a file the CLI cannot read.
+- Temp file: **only** for `--rich-markdown` — plain message text goes via
+  `--text`, attachments via repeated `--file`/`--file-url`. `--file`
+  points at a path that exists on the server running the CLI; the agent
+  does not upload bytes. If the human pastes a long multi-line message,
+  escape it for the shell; do not write it to a file the CLI cannot read.
+  A rich article, in contrast, *must* be written to a UTF-8 `.md` file
+  (e.g. `/tmp/article.md`) and passed as `--rich-markdown /tmp/article.md`.
 - Automation: pass service commands (`/task 123456`) verbatim. Pass at
   most one of `--schedule-at` / `--delay`. Map «отправь через 2 часа» →
   `--delay 2h`, «запланируй на 2026-06-07T09:00» → `--schedule-at`. The
   dry-run JSON echoes `files`, `file_urls`, `schedule_at`, `scheduled`,
   and `reply_to_message_id` so the plan can show attachments, the resolved
-  send time, and any reply target.
+  send time, and any reply target. For a rich send it echoes the article
+  as a marker only — `rich_markdown: true`, `rich_markdown_chars`,
+  `rich_markdown_file` — never the body; show the human those, plus the
+  file path they can re-read.
+- Rich markdown (`--rich-markdown`): use it when the human asks for a
+  post/article/статья with formatting Telegram's plain text cannot carry
+  — headings, tables, quotes, long-form (>4096 chars, up to 32 768). The
+  server parses the markdown itself; the dialect is `#`…`######`
+  headings, tables with alignment, task lists, `>` quotes, fenced code
+  with a language, `---` dividers, `~~strike~~`, `==marked==`,
+  `||spoiler||`, footnotes, math, and media by **public https URL**
+  (`![](https://…jpg "caption")` — local image files cannot be embedded).
+  Limit: 1..32 768 characters, checked before any Telegram call. Never
+  combine it with `--text`/`--file`/`--file-url`/`--mass`. If a rich send
+  fails, do **not** silently retry it as a plain `--text` message —
+  report the error and ask.
 - Confirmation: required after dry-run. Mass mode plans must list every
   resolved chat row and call out `would_skip` rows with their reason
   (`topic_not_found`, `topic_ambiguous`, `list_topics_failed: ...`).
-- Typical errors: `messages send requires non-empty --text`
-  (when no attachments), `--mass cannot be combined with --chat-id or
-  --chat-name`, `--file/--file-url/--schedule-at/--delay/--reply-to are
+- Typical errors: `messages send requires non-empty --text,
+  --rich-markdown, or at least one --file/--file-url attachment`, `--mass cannot be
+  combined with --chat-id or --chat-name`, `--file/--file-url/--schedule-at/--delay/--reply-to are
   only supported for targeted sends`, `provide only one of --schedule-at or
   --delay`, past-schedule rejection (exit code 2), missing/empty
   attachment file, non-http(s) `--file-url`, `MessageSendNeedsReview`.
+  Rich-specific (all exit code 2, printed to stderr):
+  `--rich-markdown cannot be combined with --text, --file, or --file-url`,
+  `--rich-markdown is only supported for targeted sends, not mass mode`,
+  `--rich-markdown file cannot be read: ...`, `--rich-markdown file is
+  not valid UTF-8: ...`, `--rich-markdown file is empty: ...`,
+  `--rich-markdown exceeds 32768 characters (N given)`.
 
 #### `messages` / `recent`
 
@@ -1281,6 +1309,36 @@ Request: «Отправь файл /srv/exports/report.pdf в чат Клиен�
    absolute send time use `--schedule-at 2026-06-07T09:00:00`. Pass at
    most one of `--schedule-at` / `--delay`.
 4. Wait for confirmation, then re-run without `--dry-run`.
+
+### `messages send` — rich message (article)
+
+Request: «Опубликуй в чате Клиент / проект статью по итогам недели —
+с заголовками и таблицей.»
+
+1. Resource/action: `messages` / `send`. This is the one send shape that
+   needs a temp file: plain `--text` cannot carry headings or tables.
+2. Write the article to a UTF-8 markdown file (`/tmp/weekly.md`) using
+   the Telegram rich dialect — `#`/`##` headings, aligned tables, `>`
+   quotes, fenced code, `---`, and images only as public https URLs
+   (`![](https://…jpg "caption")`). Keep it under 32 768 characters.
+3. Dry-run:
+
+   ```bash
+   telegram-assistant messages send \
+     --chat-name "Клиент / проект" \
+     --rich-markdown /tmp/weekly.md \
+     --dry-run
+   ```
+
+4. Show the resolved chat id and the article markers from the dry-run
+   JSON (`rich_markdown: true`, `rich_markdown_chars`,
+   `rich_markdown_file`) — the body is deliberately not echoed, so quote
+   the file path and, if the human wants to review the text, show the
+   file contents yourself.
+5. Wait for confirmation, then re-run without `--dry-run`. Never add
+   `--text`/`--file`/`--file-url`/`--mass` to a rich send. If it fails,
+   report the error verbatim — do not fall back to a plain text send
+   without asking.
 
 ### `messages recent`
 
