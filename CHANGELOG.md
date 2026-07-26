@@ -29,6 +29,7 @@
 
 ### Bug Fixes
 
+- review: Address PR #17 review findings
 - Address codex review findings
 - review: Rebuild membership cache on access hot-add + cover error/edge paths
 
