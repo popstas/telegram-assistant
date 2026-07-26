@@ -65,6 +65,7 @@ from telegram_assistant.messages.reactions import (
 )
 from telegram_assistant.messages.search import (
     SearchBackend,
+    normalize_search_range,
     search_messages,
 )
 from telegram_assistant.messages.sent_registry import SentMessageRegistry
@@ -150,6 +151,7 @@ __all__ = [
     "ReactionBackend",
     "RecentMessage",
     "SearchBackend",
+    "normalize_search_range",
     "search_messages",
     "ScheduleError",
     "SentMessageRegistry",

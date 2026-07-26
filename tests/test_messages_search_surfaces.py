@@ -9,6 +9,7 @@ entity resolution, and validation errors). MCP wiring lives in
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import tempfile
 import textwrap
@@ -47,6 +48,8 @@ class FakeSearchBackend:
         from_user: str | int | None = None,
         limit: int = 20,
         topic_id: int | None = None,
+        from_date: dt.datetime | None = None,
+        to_date: dt.datetime | None = None,
     ) -> list[RecentMessage]:
         self.calls.append(
             {
@@ -55,6 +58,8 @@ class FakeSearchBackend:
                 "from_user": from_user,
                 "limit": limit,
                 "topic_id": topic_id,
+                "from_date": from_date,
+                "to_date": to_date,
             }
         )
         return self._messages[:limit]
@@ -162,6 +167,8 @@ def test_http_search_returns_rows() -> None:
             "from_user": None,
             "limit": 2,
             "topic_id": None,
+            "from_date": None,
+            "to_date": None,
         }
     ]
 
@@ -357,6 +364,8 @@ def test_cli_search_happy(
             "from_user": None,
             "limit": 2,
             "topic_id": None,
+            "from_date": None,
+            "to_date": None,
         }
     ]
 
