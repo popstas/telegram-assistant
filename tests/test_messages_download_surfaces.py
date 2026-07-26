@@ -153,7 +153,30 @@ def test_http_download_writes_to_out_dir(tmp_path: Path) -> None:
     ]
 
 
-def test_http_download_defaults_out_dir_to_tempdir() -> None:
+def test_http_download_echoes_unique_name_on_collision(tmp_path: Path) -> None:
+    (tmp_path / "photo.jpg").write_bytes(b"already here")
+    backend = FakeDownloadBackend()
+    client = _http_client(access_block=_READ_ACCESS, download_backend=backend)
+    resp = client.post(
+        "/telegram/messages/download",
+        json={
+            "telegram_chat_id": -100123,
+            "message_id": 7,
+            "out_dir": str(tmp_path),
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["path"] == str(tmp_path / "photo (1).jpg")
+    assert (tmp_path / "photo.jpg").read_bytes() == b"already here"
+
+
+def test_http_download_defaults_out_dir_to_tempdir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The download now claims the target name for real, so point the "system
+    # temp dir" at a scratch dir instead of littering /tmp across runs.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     backend = FakeDownloadBackend()
     client = _http_client(access_block=_READ_ACCESS, download_backend=backend)
     resp = client.post(
