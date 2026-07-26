@@ -16,6 +16,8 @@ from typing import Any
 import pytest
 from telethon.tl.types import MessageEmpty, PeerUser
 
+from telegram_assistant.messages import telethon_backend
+from telegram_assistant.messages.service import MessageSendFailed
 from telegram_assistant.messages.telethon_backend import (
     _SEARCH_PAGE_SIZE,
     TelethonDeleteBackend,
@@ -204,6 +206,215 @@ async def test_flood_wait_is_translated_on_file_send() -> None:
     backend = TelethonMessageBackend(_Flooding())
     with pytest.raises(FloodWaitError):
         await backend.send_message(chat_id=1, text="x", files=("/tmp/a.png",))
+
+
+# ---------------------------------------------------------------------------
+# Rich message send (raw SendMessageRequest + InputRichMessageMarkdown)
+# ---------------------------------------------------------------------------
+
+
+class _RawClient(_RecordingClient):
+    """Records raw ``client(request)`` invocations and the resolved peer.
+
+    The rich path cannot go through ``client.send_message`` — Telethon's
+    high-level helper has no ``rich_message`` parameter — so it resolves an
+    input peer and invokes the raw request.
+    """
+
+    def __init__(self, *, updates: Any = None) -> None:
+        super().__init__()
+        self.raw_calls: list[Any] = []
+        self.peers: list[int] = []
+        self._updates = updates if updates is not None else _rich_updates(4242)
+
+    async def get_input_entity(self, chat_id: int) -> Any:
+        self.peers.append(chat_id)
+        return f"peer:{chat_id}"
+
+    async def __call__(self, request: Any) -> Any:
+        self.raw_calls.append(request)
+        return self._updates
+
+
+def _rich_updates(message_id: int) -> Any:
+    """An ``Updates`` envelope shaped like the Task 1 spike observed."""
+    from telethon.tl.types import UpdateMessageID, Updates
+
+    return Updates(
+        updates=[UpdateMessageID(id=message_id, random_id=999)],
+        users=[],
+        chats=[],
+        date=datetime(2026, 1, 1, tzinfo=UTC),
+        seq=0,
+    )
+
+
+RICH_MD = "# Heading\n\nBody paragraph.\n"
+
+
+@pytest.mark.asyncio
+async def test_rich_send_issues_raw_request_with_markdown() -> None:
+    from telethon.tl.functions.messages import SendMessageRequest
+    from telethon.tl.types import InputRichMessageMarkdown
+
+    client = _RawClient()
+    backend = TelethonMessageBackend(client)
+
+    result = await backend.send_message(
+        chat_id=-100123, text="", rich_markdown=RICH_MD
+    )
+
+    assert result == 4242
+    # The high-level helpers are untouched — rich sends are raw-only.
+    assert client.message_calls == []
+    assert client.file_calls == []
+    assert client.peers == [-100123]
+    assert len(client.raw_calls) == 1
+    request = client.raw_calls[0]
+    assert isinstance(request, SendMessageRequest)
+    assert request.peer == "peer:-100123"
+    assert request.message == ""
+    assert isinstance(request.rich_message, InputRichMessageMarkdown)
+    assert request.rich_message.markdown == RICH_MD
+    # v1 never sets the optional flags or inline files.
+    assert request.rich_message.files is None
+    assert not request.rich_message.rtl
+    assert not request.rich_message.noautolink
+    # Telethon fills random_id itself.
+    assert request.random_id is not None
+    assert request.reply_to is None
+    assert request.schedule_date is None
+
+
+@pytest.mark.asyncio
+async def test_rich_send_forwards_schedule_date() -> None:
+    client = _RawClient()
+    backend = TelethonMessageBackend(client)
+    when = datetime(2030, 1, 1, tzinfo=UTC)
+
+    await backend.send_message(
+        chat_id=42, text="", rich_markdown=RICH_MD, schedule_at=when
+    )
+
+    assert client.raw_calls[0].schedule_date == when
+
+
+@pytest.mark.asyncio
+async def test_rich_send_topic_only_replies_to_topic_root() -> None:
+    from telethon.tl.types import InputReplyToMessage
+
+    client = _RawClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=42, text="", rich_markdown=RICH_MD, topic_id=7
+    )
+
+    reply_to = client.raw_calls[0].reply_to
+    assert isinstance(reply_to, InputReplyToMessage)
+    assert reply_to.reply_to_msg_id == 7
+    assert reply_to.top_msg_id is None
+
+
+@pytest.mark.asyncio
+async def test_rich_send_reply_inside_topic_keeps_thread() -> None:
+    """Mirrors the plain path: an explicit reply id wins, but the topic root
+    still rides along as ``top_msg_id`` so the reply stays in the topic."""
+    client = _RawClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=42,
+        text="",
+        rich_markdown=RICH_MD,
+        topic_id=7,
+        reply_to_message_id=99,
+    )
+
+    reply_to = client.raw_calls[0].reply_to
+    assert reply_to.reply_to_msg_id == 99
+    assert reply_to.top_msg_id == 7
+
+
+@pytest.mark.asyncio
+async def test_rich_send_extracts_id_from_update_new_message() -> None:
+    """No ``UpdateMessageID`` in the envelope — fall back to the new-message
+    update's own id."""
+    from telethon.tl.types import UpdateNewChannelMessage, Updates
+
+    class _Msg:
+        id = 777
+
+    updates = Updates(
+        updates=[UpdateNewChannelMessage(message=_Msg(), pts=1, pts_count=1)],
+        users=[],
+        chats=[],
+        date=datetime(2026, 1, 1, tzinfo=UTC),
+        seq=0,
+    )
+    backend = TelethonMessageBackend(_RawClient(updates=updates))
+
+    assert await backend.send_message(
+        chat_id=1, text="", rich_markdown=RICH_MD
+    ) == 777
+
+
+@pytest.mark.asyncio
+async def test_rich_send_without_message_id_raises() -> None:
+    from telethon.tl.types import Updates
+
+    updates = Updates(
+        updates=[],
+        users=[],
+        chats=[],
+        date=datetime(2026, 1, 1, tzinfo=UTC),
+        seq=0,
+    )
+    backend = TelethonMessageBackend(_RawClient(updates=updates))
+
+    with pytest.raises(MessageSendFailed, match="message id"):
+        await backend.send_message(chat_id=1, text="", rich_markdown=RICH_MD)
+
+
+@pytest.mark.asyncio
+async def test_rich_send_flood_wait_is_translated() -> None:
+    class _Flooding(_RawClient):
+        async def __call__(self, request: Any) -> Any:
+            raise _TelethonFloodWaitError(30)
+
+    backend = TelethonMessageBackend(_Flooding())
+    with pytest.raises(FloodWaitError):
+        await backend.send_message(chat_id=1, text="", rich_markdown=RICH_MD)
+
+
+@pytest.mark.asyncio
+async def test_rich_send_on_old_telethon_reports_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Telethon < 1.44 (layer < 227) has no ``InputRichMessageMarkdown``; the
+    caller must learn that, not see an ImportError or AttributeError."""
+    monkeypatch.setattr(
+        telethon_backend, "_import_rich_markdown_type", lambda: None
+    )
+    client = _RawClient()
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(MessageSendFailed, match=r"telethon>=1\.44"):
+        await backend.send_message(chat_id=1, text="", rich_markdown=RICH_MD)
+
+    assert client.raw_calls == []
+
+
+@pytest.mark.asyncio
+async def test_rich_send_rejects_attachments() -> None:
+    """Belt-and-braces: the service already forbids the combination, but the
+    backend must not silently drop either half."""
+    backend = TelethonMessageBackend(_RawClient())
+
+    with pytest.raises(ValueError, match="rich_markdown"):
+        await backend.send_message(
+            chat_id=1, text="", rich_markdown=RICH_MD, files=("/tmp/a.png",)
+        )
 
 
 # ---------------------------------------------------------------------------

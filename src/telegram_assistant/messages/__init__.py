@@ -70,6 +70,7 @@ from telegram_assistant.messages.search import (
 )
 from telegram_assistant.messages.sent_registry import SentMessageRegistry
 from telegram_assistant.messages.service import (
+    MAX_RICH_MARKDOWN_CHARS,
     DeleteBackend,
     DeleteMessagesRequest,
     DeleteMessagesResult,
@@ -100,6 +101,7 @@ from telegram_assistant.messages.service import (
 __all__ = [
     "ALLOWED_BASE64_MIME_TOP_TYPES",
     "DEFAULT_MAX_BASE64_BYTES",
+    "MAX_RICH_MARKDOWN_CHARS",
     "AttachmentError",
     "Base64Attachment",
     "decode_base64_attachment",

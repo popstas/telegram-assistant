@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- Spike live rich-message send via InputRichMessageMarkdown
+
 ### Documentation
 
 - Note access-rule resolve failure task and fix spike session path
