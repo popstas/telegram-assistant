@@ -66,6 +66,10 @@ http:
     assert config.queue.max_parallel_telegram_ops == 1
     assert config.logging.level == "INFO"
     assert config.mcp is None
+    # A config predating the pin pacer keeps loading; the knob defaults to a
+    # conservative interval and access stays allow-all when unconfigured.
+    assert config.telegram.pin_min_interval_seconds == 2.0
+    assert config.telegram.access is None
 
 
 def test_mcp_disabled_block_parses_without_oauth_settings() -> None:

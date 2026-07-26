@@ -5,6 +5,7 @@
 
 ### Features
 
+- Add from_date/to_date search range to CLI, HTTP and MCP
 - Search via single messages.SearchRequest with pagination
 - Add from_date/to_date contract to messages search domain
 - Pace pin/unpin and retry FLOOD_WAIT across surfaces
