@@ -131,32 +131,89 @@ def _import_rich_markdown_type() -> Any:
     adapter importable on an older build so only a rich send fails, and it
     fails with a version hint instead of an ImportError at startup.
     """
-    try:
-        from telethon.tl import types
-    except ImportError:  # pragma: no cover - telethon is a hard dependency
-        return None
+    from telethon.tl import types
+
     return getattr(types, "InputRichMessageMarkdown", None)
 
 
-def _extract_rich_message_id(result: Any) -> int | None:
-    """Find the sent message's id in the raw ``Updates`` envelope.
+def _extract_rich_message_id(result: Any, *, random_id: int | None = None) -> int | None:
+    """Find the sent message's id in the raw ``messages.sendMessage`` result.
 
     ``UpdateMessageID`` is the reliable source — the spike saw it for both
     private and channel peers — with the ``UpdateNew*Message`` variants as a
     fallback for envelopes that omit it.
+
+    An ``Updates`` container may carry updates unrelated to *this* request, so
+    an ``UpdateMessageID`` is picked by the request's own ``random_id``
+    (Telethon's own sender keys strictly on it). A *keyed* update that names a
+    different ``random_id`` is another request's and is never used as a
+    fallback: its id would be reported as ours and recorded in the
+    ``SentMessageRegistry``, handing this session edit/delete rights over a
+    message it did not send. An unkeyed entry — or any entry at all when this
+    request's ``random_id`` could not be read — is still better than reporting a
+    delivered article as failed.
+
+    Telegram pairs each ``UpdateMessageID`` with the ``UpdateNew*Message`` for
+    the *same* message, so the id of a foreign-keyed ``UpdateMessageID`` is
+    excluded from the ``UpdateNew*Message`` scan too — otherwise the fallback
+    would hand back the very id the ``random_id`` check just refused. Any other
+    ``UpdateNew*Message`` may still be ours (our own ``UpdateMessageID`` could
+    be missing from the envelope), so it is not a blanket refusal.
+
+    The envelope itself varies: the spike saw a full ``Updates``, but the same
+    request also answers with ``UpdateShort`` (one update under ``.update``)
+    and with ``UpdateShortSentMessage``, which carries the new id on itself and
+    no update list at all. Telethon's own high-level sender special-cases both,
+    and this path bypasses it — missing them would report a *delivered* article
+    as a failed send and lock the idempotency key on a terminal state. The bare
+    ``result.id`` read is gated on that one type name: ``UpdateShortMessage`` and
+    ``UpdateShortChatMessage`` are *incoming*-message envelopes that also carry
+    an ``id``, and it belongs to someone else's message (Telethon's own
+    extractor returns nothing for them for the same reason).
     """
     updates = getattr(result, "updates", None)
-    candidates = updates if isinstance(updates, list) else [result]
-    for update in candidates:
-        if type(update).__name__ == "UpdateMessageID":
-            message_id = getattr(update, "id", None)
-            if message_id is not None:
+    if isinstance(updates, list):
+        candidates = updates
+    else:
+        single = getattr(result, "update", None)
+        candidates = [single] if single is not None else [result]
+    message_ids = [
+        (getattr(update, "random_id", None), getattr(update, "id", None))
+        for update in candidates
+        if type(update).__name__ == "UpdateMessageID"
+    ]
+    foreign_ids: set[int] = set()
+    if random_id is not None:
+        for update_random_id, message_id in message_ids:
+            if message_id is None:
+                continue
+            if update_random_id == random_id:
                 return int(message_id)
+            if update_random_id is not None:
+                foreign_ids.add(int(message_id))
+    for update_random_id, message_id in message_ids:
+        if random_id is not None and update_random_id is not None:
+            # Keyed, and not ours — belongs to another request in the same
+            # container. Fall through to the UpdateNew*Message scan instead.
+            continue
+        if message_id is not None:
+            return int(message_id)
     for update in candidates:
-        if type(update).__name__ in ("UpdateNewMessage", "UpdateNewChannelMessage"):
+        # ``UpdateNewScheduledMessage`` is the scheduled-send counterpart;
+        # Telethon's own extractor handles all three.
+        if type(update).__name__ in (
+            "UpdateNewMessage",
+            "UpdateNewChannelMessage",
+            "UpdateNewScheduledMessage",
+        ):
             message_id = getattr(getattr(update, "message", None), "id", None)
-            if message_id is not None:
+            if message_id is not None and int(message_id) not in foreign_ids:
                 return int(message_id)
+    # ``UpdateShortSentMessage``: no updates, no nested message — just the id.
+    if type(result).__name__ == "UpdateShortSentMessage":
+        own_id = getattr(result, "id", None)
+        if isinstance(own_id, int) and own_id > 0:
+            return own_id
     return None
 
 
@@ -245,11 +302,18 @@ class TelethonMessageBackend:
         schedule_at: datetime | None,
         reply_to_message_id: int | None,
     ) -> int:
-        from telegram_assistant.messages.service import MessageSendFailed
+        from telegram_assistant.messages.service import (
+            MessageSendUnconfirmed,
+            RichMessageUnsupported,
+        )
 
         rich_type = _import_rich_markdown_type()
         if rich_type is None:
-            raise MessageSendFailed(
+            # Not MessageSendFailed: that class means "a previous attempt with
+            # this idempotency key failed" and the surfaces render it as 409
+            # previous_attempt_failed / exit 2, which would point the operator at
+            # a prior attempt instead of at the Telethon version.
+            raise RichMessageUnsupported(
                 "rich message send requires telethon>=1.44 (layer 227); "
                 "the installed Telethon has no InputRichMessageMarkdown"
             )
@@ -271,22 +335,28 @@ class TelethonMessageBackend:
 
         try:
             peer = await self._client.get_input_entity(chat_id)
-            result = await self._client(
-                SendMessageRequest(
-                    peer=peer,
-                    # A rich message carries its body in ``rich_message``;
-                    # ``message`` must be empty (``random_id`` is auto-filled).
-                    message="",
-                    rich_message=rich_type(markdown=rich_markdown),
-                    **kwargs,
-                )
+            # Built up front so ``random_id`` (auto-filled by the constructor) can
+            # be matched against the ``UpdateMessageID`` in the response.
+            send = SendMessageRequest(
+                peer=peer,
+                # A rich message carries its body in ``rich_message``;
+                # ``message`` must be empty.
+                message="",
+                rich_message=rich_type(markdown=rich_markdown),
+                **kwargs,
             )
+            result = await self._client(send)
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
 
-        message_id = _extract_rich_message_id(result)
+        message_id = _extract_rich_message_id(
+            result, random_id=getattr(send, "random_id", None)
+        )
         if message_id is None:
-            raise MessageSendFailed(
+            # The request itself succeeded, so the article may well be in the
+            # chat — the service quarantines this as ``needs_review`` instead of
+            # a terminal ``failed`` that would invite a duplicate re-send.
+            raise MessageSendUnconfirmed(
                 "rich message send returned no message id in "
                 f"{type(result).__name__}"
             )

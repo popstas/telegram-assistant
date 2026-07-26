@@ -23,6 +23,8 @@ from telegram_assistant.messages import (
     MassSendRequest,
     MessageSendFailed,
     MessageSendNeedsReview,
+    MessageSendUnconfirmed,
+    RichMessageUnsupported,
     SendMessageRequest,
     is_service_command,
     mass_send_message,
@@ -301,6 +303,68 @@ async def test_send_message_flood_wait_marks_needs_review_not_failed(
         await send_message(backend=FloodingBackend(), store=store, request=req)
 
 
+async def test_send_message_unconfirmed_marks_needs_review_not_failed(
+    store: OperationStore,
+) -> None:
+    """A backend that sent the request but could not read the new id reports
+    ``MessageSendUnconfirmed``. Delivery is uncertain, so the row must be
+    quarantined as ``needs_review`` — a terminal ``failed`` tells the caller
+    nothing happened and invites a duplicate re-send.
+    """
+
+    class UnconfirmedBackend:
+        async def send_message(
+            self, *, chat_id: int, text: str, topic_id: int | None = None, **kw: object
+        ) -> int:
+            raise MessageSendUnconfirmed("no message id in Updates")
+
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="",
+        rich_markdown="# Title\n",
+        operation_id="op-unconfirmed",
+    )
+    with pytest.raises(MessageSendNeedsReview, match="no message id"):
+        await send_message(backend=UnconfirmedBackend(), store=store, request=req)
+
+    # The replay discriminates the persisted state: a ``failed`` row would raise
+    # MessageSendFailed here (→ 409 previous_attempt_failed / exit 2).
+    with pytest.raises(MessageSendNeedsReview):
+        await send_message(backend=UnconfirmedBackend(), store=store, request=req)
+
+
+async def test_send_message_rich_unsupported_leaves_key_free(
+    store: OperationStore,
+) -> None:
+    """``RichMessageUnsupported`` is raised before any RPC, so the freshly-opened
+    operation row must be dropped rather than left terminal: after the operator
+    upgrades Telethon, the retry with the *same* operation_id has to send, not
+    report ``previous_attempt_failed`` (or a stuck ``pending``)."""
+
+    class OldTelethonBackend:
+        async def send_message(
+            self, *, chat_id: int, text: str, topic_id: int | None = None, **kw: object
+        ) -> int:
+            raise RichMessageUnsupported("requires telethon>=1.44 (layer 227)")
+
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="",
+        rich_markdown="# Title\n",
+        operation_id="op-old-telethon",
+    )
+    with pytest.raises(RichMessageUnsupported, match=r"telethon>=1\.44"):
+        await send_message(backend=OldTelethonBackend(), store=store, request=req)
+
+    # The same key on an upgraded deployment: a plain send, not MessageSendFailed
+    # / MessageSendPending from the abandoned row.
+    backend = FakeMessageBackend()
+    result, op = await send_message(backend=backend, store=store, request=req)
+    assert result.telegram_message_id is not None
+    assert op.status is OperationStatus.COMPLETED
+    assert backend.sent[0]["rich_markdown"] == "# Title\n"
+
+
 async def test_send_message_service_command_marks_flag(
     store: OperationStore,
 ) -> None:
@@ -395,6 +459,29 @@ async def test_send_message_rich_markdown_passed_to_backend(
     # The markdown source is persisted alongside the (empty) text so a replay
     # audit shows what was actually sent.
     assert op.request_payload["rich_markdown"] == RICH_MD
+
+
+async def test_send_message_rich_markdown_service_command_is_redacted(
+    store: OperationStore,
+) -> None:
+    """An article opening with a slash reads as a service command, so the
+    persisted payload is redacted exactly like ``text`` would be — the backend
+    still receives the full markdown."""
+    backend = FakeMessageBackend()
+    markdown = "/task 12345\n\n# Title\n"
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="",
+        rich_markdown=markdown,
+        operation_id="rich-redact-1",
+    )
+    result, op = await send_message(backend=backend, store=store, request=req)
+
+    assert backend.sent[0]["rich_markdown"] == markdown
+    assert op.request_payload["rich_markdown"] == "/task [redacted]"
+    assert "12345" not in op.request_payload["rich_markdown"]
+    # ``is_service_command`` still describes ``text``, which is empty here.
+    assert result.is_service_command is False
 
 
 async def test_send_message_rich_markdown_allows_topic_reply_and_schedule(

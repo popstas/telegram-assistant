@@ -837,8 +837,14 @@ def test_cli_messages_send_dry_run_rich_markdown_envelope(
     resolved = payload["resolved"]
     assert resolved["rich_markdown"] is True
     assert resolved["rich_markdown_chars"] == len(markdown)
-    # The article body itself is never echoed back.
-    assert markdown not in json.dumps(payload, ensure_ascii=False)
+    assert resolved["rich_markdown_file"] == str(md_file)
+    # The article body itself is never echoed back. Compare against the
+    # *serialized* form: the raw markdown carries real newlines that JSON
+    # escapes, so a plain `markdown not in dumps(...)` would pass vacuously.
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert json.dumps(markdown, ensure_ascii=False)[1:-1] not in serialized
+    assert "Заголовок" not in serialized
+    assert "цитата" not in serialized
     assert "rich message" in payload["would"]
     assert any("rich message" in a for a in payload["planned_actions"])
     assert backend.sent == []

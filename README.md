@@ -117,15 +117,17 @@ Member references in `members`/`admins` (group create) and in `members bulk-add`
 - `folders add-chat` — move an existing chat into a folder.
 - `folders remove-chat` — remove a chat from a folder (idempotent: a no-op if the chat is not in the folder).
 
-#### Rich messages (articles)
+### Rich messages (articles)
 
 `messages send --rich-markdown <file.md>` sends the file's contents as a Telegram **rich message** — the server parses the markdown itself and delivers a single article, so a >4096-character post is *not* split. The same input is `rich_markdown` (a string, not a path) on `POST /telegram/messages` and on the `telegram_messages_send` MCP tool.
 
-- **Dialect** (parsed server-side): `#`…`######` headings, tables with alignment, task lists, `>` quotes, fenced code with a language, `---` dividers, `~~strike~~`, `==marked==`, `||spoiler||`, footnotes, math, `<details>`, and media by public HTTPS URL — `![](https://…jpg "caption")` becomes an image block the server fetches itself. Local-file media inside an article is not supported.
+- **Dialect** (parsed server-side): `#`…`######` headings, tables with alignment, task lists, `>` quotes, fenced code with a language, `---` dividers, `~~strike~~`, `==marked==`, `||spoiler||`, footnotes, math, `<details>`, and media by public HTTPS URL — `![](https://…jpg "caption")` becomes an image block the server fetches itself. Local-file media inside an article is not supported. Headings, lists, tables, quotes, code, dividers and URL media are verified over MTProto; the remaining constructs are documented for the Bot API twin of the same server feature and are unverified here.
 - **Limits**: 1..32 768 characters (validated locally, inclusive); the server additionally caps blocks/nesting/media/table columns and reports its own errors (`RICH_MESSAGE_MARKDOWN_INVALID`, `RICH_MESSAGE_TEXT_TOO_LONG`, …).
 - **Exclusivity**: `--rich-markdown` is a targeted-send-only alternative to the message body — it cannot be combined with `--text`, `--file`, `--file-url` (HTTP/MCP: `text`, `file_urls`, `base64_files`) or with mass mode.
 - Everything else is unchanged: entity resolution, the WRITE gate, `--operation-id` idempotency, topic/reply targeting (`--topic-id`/`--reply-to`), and scheduling (`--schedule-at`/`--delay`) all work. `--dry-run` reports the article as a marker (`rich_markdown`, `rich_markdown_chars`, `rich_markdown_file`) rather than echoing a 32k body.
-- A failed rich send is **not** silently retried as plain text — it surfaces as the normal send error, and the caller decides. Requires `telethon >= 1.44` (layer 227); on an older Telethon the send fails with an explicit version error.
+- A failed rich send is **not** silently retried as plain text — it surfaces as the normal send error, and the caller decides. Requires `telethon >= 1.44` (layer 227), now the project's minimum pin; if an older Telethon is force-installed anyway, only the rich send fails, with an explicit version error (HTTP `500 {"error": "rich_message_unsupported"}`, CLI exit 1, MCP error message) — and the idempotency key is left free, so the same `--operation-id` sends normally once Telethon is upgraded.
+
+> **Migration note (Telethon 1.44 required):** rich messages use `InputRichMessageMarkdown` (layer 227), so the dependency floor moved from `telethon>=1.36` to `telethon>=1.44`. Existing installs must re-run `pip install -e ".[dev]"` (or rebuild the Docker image) when upgrading.
 
 Mutating CLI commands support `--dry-run` before the real run. Local `--file` attachments must exist, be regular files, and be non-empty. `--file-url` must be a valid `http`/`https` URL with a host. `--schedule-at` and `--delay` are mutually exclusive and must resolve to a future time. `messages react` requires exactly one of `--emoji` or `--clear`; `notifications mute --duration` must be positive. `folders remove-chat` accepts `--chat-id`, `--chat-name`, or `--entity`, plus optional `--folder-id`.
 

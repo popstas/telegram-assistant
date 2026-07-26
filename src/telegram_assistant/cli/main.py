@@ -3442,7 +3442,10 @@ def messages_send(
             )
             raise typer.Exit(code=2)
         try:
-            rich_markdown_text = rich_markdown.read_text(encoding="utf-8")
+            # ``utf-8-sig`` drops a leading BOM: a BOM-prefixed file would
+            # otherwise send "﻿# Title" and silently lose its first
+            # heading. Invalid UTF-8 still raises UnicodeDecodeError.
+            rich_markdown_text = rich_markdown.read_text(encoding="utf-8-sig")
         except UnicodeDecodeError as exc:
             typer.echo(
                 f"--rich-markdown file is not valid UTF-8: {rich_markdown}",

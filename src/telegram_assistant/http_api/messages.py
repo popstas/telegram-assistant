@@ -54,6 +54,7 @@ from telegram_assistant.messages import (
     PinBackend,
     PinMessageRequest,
     ReactionBackend,
+    RichMessageUnsupported,
     ScheduleError,
     SearchBackend,
     SendMessageRequest,
@@ -965,6 +966,18 @@ def build_router() -> APIRouter:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail={"error": "previous_attempt_failed", "message": str(exc)},
+            ) from exc
+        except RichMessageUnsupported as exc:
+            # A deployment problem, not a bad request: 500, but with the version
+            # hint in the body. Without this the bare RuntimeError would surface
+            # as Starlette's empty 500 and the caller would never learn that the
+            # fix is upgrading Telethon.
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail={
+                    "error": "rich_message_unsupported",
+                    "message": str(exc),
+                },
             ) from exc
         except ValueError as exc:
             raise HTTPException(

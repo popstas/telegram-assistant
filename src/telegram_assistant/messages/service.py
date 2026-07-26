@@ -161,6 +161,28 @@ class MessageSendNeedsReview(RuntimeError):
     """A previous send attempt resulted in ``needs_review``."""
 
 
+class RichMessageUnsupported(RuntimeError):
+    """The installed Telethon cannot build a rich-message body.
+
+    A deployment error, not an idempotency state — nothing was attempted before.
+    Reporting it as :class:`MessageSendFailed` would travel the
+    ``previous_attempt_failed`` taxonomy (HTTP/MCP 409, CLI exit 2), telling the
+    caller a *previous* attempt is at fault and hiding the actual fix: upgrade
+    to telethon >= 1.44 (layer 227).
+    """
+
+
+class MessageSendUnconfirmed(RuntimeError):
+    """A send left no readable message id, so delivery is uncertain.
+
+    Raised by a backend that issued the request without error but could not find
+    the new id in the response envelope. :func:`send_message` turns it into
+    ``needs_review`` rather than ``failed``: the message may well have been
+    delivered, and a terminal ``failed`` tells the caller nothing happened —
+    which invites a re-send under a fresh key and duplicates the message.
+    """
+
+
 def is_service_command(text: str) -> bool:
     """Return True for slash-prefixed service commands like ``/task 12345``.
 
@@ -494,6 +516,10 @@ async def send_message(
     * ``needs_review`` → raise :class:`MessageSendNeedsReview`
     * ``pending``      → raise :class:`MessageSendPending`
 
+    A backend :class:`MessageSendUnconfirmed` is quarantined as ``needs_review``
+    rather than ``failed``: the message may have been delivered, so the caller
+    must not be told nothing happened.
+
     Sending is a WRITE op: when an ``authorizer`` is supplied it must grant
     WRITE on the target chat or :class:`AccessDenied` is raised before any
     operation row is created.
@@ -629,6 +655,24 @@ async def send_message(
                 operation_id, f"FLOOD_WAIT during message send: {exc}"
             )
             raise MessageSendNeedsReview(str(exc)) from exc
+        except MessageSendUnconfirmed as exc:
+            # The request reached Telegram without error — only its id was
+            # unreadable — so the message may already be delivered. `failed`
+            # would claim nothing happened and invite a duplicate re-send, so
+            # quarantine it for an operator to check the chat first.
+            store.mark_needs_review(
+                operation_id, f"unconfirmed message send: {exc}"
+            )
+            raise MessageSendNeedsReview(str(exc)) from exc
+        except RichMessageUnsupported:
+            # The backend refuses before issuing any RPC, so nothing reached
+            # Telegram. Neither terminal state fits: `failed` would answer the
+            # next attempt — the one made after the Telethon upgrade, with the
+            # same operation_id — with previous_attempt_failed, and a leftover
+            # `pending` row would answer it with MessageSendPending. Drop the row
+            # so the key stays free for the retry that will actually work.
+            store.delete_operation(operation_id)
+            raise
         except Exception as exc:
             store.fail_operation(operation_id, str(exc))
             raise
@@ -1193,7 +1237,9 @@ __all__ = [
     "MessageSendFailed",
     "MessageSendNeedsReview",
     "MessageSendPending",
+    "MessageSendUnconfirmed",
     "RecentMessage",
+    "RichMessageUnsupported",
     "ScheduleError",
     "SendMessageRequest",
     "SendMessageResult",

@@ -11,8 +11,15 @@
 - Rich_markdown send in domain service and Telethon backend
 - Spike live rich-message send via InputRichMessageMarkdown
 
+### Bug Fixes
+
+- Never claim a foreign UpdateMessageID as the rich send's id
+- Keep rich-send env/id failures out of the previous_attempt_failed taxonomy
+- review: Handle UpdateShort* envelopes in rich send id extraction
+
 ### Documentation
 
+- Document rich_markdown send across CLI/HTTP/MCP
 - Note access-rule resolve failure task and fix spike session path
 - Link telegram-download-chat and move ToS warning below features
 
