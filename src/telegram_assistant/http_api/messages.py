@@ -164,6 +164,10 @@ class MessageSendBody(BaseModel):
     delay_seconds: int | None = None
     # Thread the send as a reply to an existing message id (targeted only).
     reply_to_message_id: int | None = None
+    # Send a Telegram rich message (article): markdown source parsed by the
+    # server. Mutually exclusive with text/attachments and with mass mode; the
+    # length bound lives in the domain layer (single source of truth).
+    rich_markdown: str | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> MessageSendBody:
@@ -175,10 +179,19 @@ class MessageSendBody(BaseModel):
         has_topic_id = self.telegram_topic_id is not None
 
         has_attachments = bool(self.files or self.file_urls or self.base64_files)
-        if not (self.text and self.text.strip()) and not has_attachments:
+        has_rich = self.rich_markdown is not None
+        if has_rich:
+            # The article body *is* the markdown; a caption or attachment
+            # alongside it would be silently dropped by the server.
+            if (self.text and self.text.strip()) or has_attachments:
+                raise ValueError(
+                    "rich_markdown cannot be combined with text or "
+                    "files/file_urls/base64_files"
+                )
+        elif not (self.text and self.text.strip()) and not has_attachments:
             raise ValueError(
-                "must provide non-empty text or at least one files/file_urls "
-                "attachment"
+                "must provide non-empty text, rich_markdown, or at least one "
+                "files/file_urls attachment"
             )
         if self.schedule_at is not None and self.delay_seconds is not None:
             raise ValueError("provide only one of schedule_at or delay_seconds")
@@ -208,14 +221,15 @@ class MessageSendBody(BaseModel):
                 )
             if (
                 has_attachments
+                or has_rich
                 or self.schedule_at is not None
                 or self.delay_seconds is not None
                 or self.reply_to_message_id is not None
             ):
                 raise ValueError(
-                    "files/file_urls/base64_files/schedule_at/delay_seconds/"
-                    "reply_to_message_id are only supported for targeted sends, "
-                    "not mass mode"
+                    "files/file_urls/base64_files/rich_markdown/schedule_at/"
+                    "delay_seconds/reply_to_message_id are only supported for "
+                    "targeted sends, not mass mode"
                 )
             return self
 
@@ -915,6 +929,7 @@ def build_router() -> APIRouter:
             base64_files=base64_files,
             schedule_at=resolved_schedule_at,
             reply_to_message_id=body.reply_to_message_id,
+            rich_markdown=body.rich_markdown,
         )
 
         try:

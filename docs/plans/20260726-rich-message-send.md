@@ -94,10 +94,16 @@ Goal: answer two blocking questions before writing feature code: (a) does the se
 
 ### Task 3: HTTP surface — `rich_markdown` field on `POST /telegram/messages`
 
-- [ ] TDD: add failing surface tests (new `tests/test_messages_rich_surfaces.py` or extend existing send surface tests): happy path with fake backend; 400 on `rich_markdown` + `text`; 400 on `rich_markdown` + attachments; 400 in mass mode; 403 without WRITE; dry-run payload includes `rich_markdown: true`/length marker per dry-run contract
-- [ ] add `rich_markdown: str | None` to `MessageSendBody` (`http_api/messages.py:106`) and encode exclusivity in the `_shape` validator (`:132`)
-- [ ] thread the field through the `send` route (`:720`) into `SendMessageRequest`
-- [ ] run tests — must pass before next task
+- [x] TDD: add failing surface tests (new `tests/test_messages_rich_surfaces.py` or extend existing send surface tests): happy path with fake backend; 400 on `rich_markdown` + `text`; 400 on `rich_markdown` + attachments; 400 in mass mode; 403 without WRITE; dry-run payload includes `rich_markdown: true`/length marker per dry-run contract
+- [x] add `rich_markdown: str | None` to `MessageSendBody` (`http_api/messages.py:106`) and encode exclusivity in the `_shape` validator (`:132`)
+- [x] thread the field through the `send` route (`:720`) into `SendMessageRequest`
+- [x] run tests — must pass before next task — **1628 passed**, `ruff check src tests` clean
+
+⚠️ **Exclusivity violations surface as 422, not 400.** They are encoded in the `MessageSendBody._shape` model validator (as the task specifies), so FastAPI reports them as its standard `422 Unprocessable Entity` before the route runs — the same status the pre-existing "missing target" / mass-mode shape errors already return (`test_http_send_rejects_missing_target`). Tests assert 422 for text/attachment/mass-mode conflicts. Domain-level rich validation (blank markdown, > 32 768 chars) still lands on **400** via the route's `ValueError` handler, and the WRITE gate on **403** — both covered by tests.
+
+⚠️ **No dry-run on the HTTP send route.** `POST /telegram/messages` has no `dry_run` field (unlike edit/pin/delete/download); `messages send --dry-run` is CLI-only, so the dry-run payload marker moves to Task 4.
+
+➕ Added `test_http_plain_send_still_omits_rich_markdown` — pins the only-when-set contract end to end through the HTTP surface, not just at the domain level.
 
 ### Task 4: CLI — `--rich-markdown <file.md>` on `messages send`
 
