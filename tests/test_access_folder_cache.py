@@ -15,19 +15,27 @@ import pytest
 
 from telegram_assistant.access import AccessDenied, AccessLevel, Authorizer
 from telegram_assistant.config.models import AccessConfig, AccessRule
+from telegram_assistant.folders import FolderChats
 from telegram_assistant.persistence import FolderMembershipCache
 
 
 class _CountingFastBackend:
     """Fast membership surface that records how often it is called."""
 
-    def __init__(self, folder_map: dict[str, set[int]]) -> None:
-        self._folder_map = folder_map
+    def __init__(self, folders: list[FolderChats]) -> None:
+        self._folders = folders
         self.calls = 0
 
-    async def list_folder_chat_ids(self) -> dict[str, set[int]]:
+    async def list_folder_chat_ids(self) -> list[FolderChats]:
         self.calls += 1
-        return {k: set(v) for k, v in self._folder_map.items()}
+        return [
+            FolderChats(
+                folder_id=f.folder_id,
+                folder_name=f.folder_name,
+                chat_ids=set(f.chat_ids),
+            )
+            for f in self._folders
+        ]
 
 
 class _RaisingBackend:
@@ -36,7 +44,7 @@ class _RaisingBackend:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def list_folder_chat_ids(self) -> dict[str, set[int]]:
+    async def list_folder_chat_ids(self) -> list[FolderChats]:
         self.calls += 1
         raise RuntimeError("boom")
 
@@ -51,8 +59,10 @@ def _cfg(ttl: int = 300) -> AccessConfig:
 @pytest.mark.asyncio
 async def test_fresh_cache_hit_skips_backend(tmp_path: Path) -> None:
     cache = FolderMembershipCache(tmp_path / "state.db")
-    cache.save({"Clients": {10, 11}}, fetched_at=time.time())
-    backend = _CountingFastBackend({"Clients": {10, 11}})
+    cache.save({1: ("Clients", {10, 11})}, fetched_at=time.time())
+    backend = _CountingFastBackend(
+        [FolderChats(folder_id=1, folder_name="Clients", chat_ids={10, 11})]
+    )
     auth = Authorizer(_cfg(ttl=300), folder_backend=backend, cache=cache)
 
     await auth.require(10, AccessLevel.WRITE)
@@ -66,8 +76,10 @@ async def test_fresh_cache_hit_skips_backend(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_fresh_cache_normalises_marked_ids(tmp_path: Path) -> None:
     cache = FolderMembershipCache(tmp_path / "state.db")
-    cache.save({"Clients": {1234567890}}, fetched_at=time.time())
-    backend = _CountingFastBackend({"Clients": {1234567890}})
+    cache.save({1: ("Clients", {1234567890})}, fetched_at=time.time())
+    backend = _CountingFastBackend(
+        [FolderChats(folder_id=1, folder_name="Clients", chat_ids={1234567890})]
+    )
     auth = Authorizer(_cfg(), folder_backend=backend, cache=cache)
 
     # Request carries the -100 marked form; still matches the bare cached id.
@@ -80,8 +92,10 @@ async def test_expired_cache_refetches_and_rewrites(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     cache = FolderMembershipCache(db)
     # Stale row: old chat membership fetched long ago.
-    cache.save({"Clients": {10}}, fetched_at=time.time() - 10_000)
-    backend = _CountingFastBackend({"Clients": {20, 21}})
+    cache.save({1: ("Clients", {10})}, fetched_at=time.time() - 10_000)
+    backend = _CountingFastBackend(
+        [FolderChats(folder_id=1, folder_name="Clients", chat_ids={20, 21})]
+    )
     auth = Authorizer(_cfg(ttl=300), folder_backend=backend, cache=cache)
 
     # Fresh fetch replaces the stale membership.
@@ -92,7 +106,7 @@ async def test_expired_cache_refetches_and_rewrites(tmp_path: Path) -> None:
     reloaded = FolderMembershipCache(db).load()
     assert reloaded is not None
     mapping, fetched_at = reloaded
-    assert mapping == {"Clients": {20, 21}}
+    assert mapping == {1: ("Clients", {20, 21})}
     assert time.time() - fetched_at < 60
 
 
@@ -100,18 +114,20 @@ async def test_expired_cache_refetches_and_rewrites(tmp_path: Path) -> None:
 async def test_empty_cache_fetches_and_populates(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     cache = FolderMembershipCache(db)
-    backend = _CountingFastBackend({"Clients": {10}})
+    backend = _CountingFastBackend(
+        [FolderChats(folder_id=1, folder_name="Clients", chat_ids={10})]
+    )
     auth = Authorizer(_cfg(), folder_backend=backend, cache=cache)
 
     await auth.require(10, AccessLevel.WRITE)
     assert backend.calls == 1
-    assert FolderMembershipCache(db).load()[0] == {"Clients": {10}}
+    assert FolderMembershipCache(db).load()[0] == {1: ("Clients", {10})}
 
 
 @pytest.mark.asyncio
 async def test_backend_error_serves_stale_map(tmp_path: Path) -> None:
     cache = FolderMembershipCache(tmp_path / "state.db")
-    cache.save({"Clients": {10}}, fetched_at=time.time() - 10_000)
+    cache.save({1: ("Clients", {10})}, fetched_at=time.time() - 10_000)
     backend = _RaisingBackend()
     auth = Authorizer(_cfg(ttl=300), folder_backend=backend, cache=cache)
 
@@ -135,8 +151,10 @@ async def test_ttl_zero_bypasses_cache(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     cache = FolderMembershipCache(db)
     # A fresh row exists, but ttl=0 must ignore it and always fetch.
-    cache.save({"Clients": {10}}, fetched_at=time.time())
-    backend = _CountingFastBackend({"Clients": {20}})
+    cache.save({1: ("Clients", {10})}, fetched_at=time.time())
+    backend = _CountingFastBackend(
+        [FolderChats(folder_id=1, folder_name="Clients", chat_ids={20})]
+    )
     auth = Authorizer(_cfg(ttl=0), folder_backend=backend, cache=cache)
 
     await auth.require(20, AccessLevel.WRITE)
@@ -144,12 +162,14 @@ async def test_ttl_zero_bypasses_cache(tmp_path: Path) -> None:
         await auth.require(10, AccessLevel.WRITE)
     assert backend.calls == 1
     # ttl=0 must not write the cache either (stale row untouched).
-    assert FolderMembershipCache(db).load()[0] == {"Clients": {10}}
+    assert FolderMembershipCache(db).load()[0] == {1: ("Clients", {10})}
 
 
 @pytest.mark.asyncio
 async def test_no_cache_matches_pre_cache_behaviour(tmp_path: Path) -> None:
-    backend = _CountingFastBackend({"Clients": {10}})
+    backend = _CountingFastBackend(
+        [FolderChats(folder_id=1, folder_name="Clients", chat_ids={10})]
+    )
     auth = Authorizer(_cfg(), folder_backend=backend, cache=None)
 
     await auth.require(10, AccessLevel.WRITE)
@@ -160,13 +180,15 @@ async def test_no_cache_matches_pre_cache_behaviour(tmp_path: Path) -> None:
 async def test_clear_invalidates_cache(tmp_path: Path) -> None:
     db = tmp_path / "state.db"
     cache = FolderMembershipCache(db)
-    cache.save({"Clients": {10}}, fetched_at=time.time())
+    cache.save({1: ("Clients", {10})}, fetched_at=time.time())
 
     # Simulate a hot-reload dropping the row; the next authorizer refetches.
     cache.clear()
     assert FolderMembershipCache(db).load() is None
 
-    backend = _CountingFastBackend({"Clients": {20}})
+    backend = _CountingFastBackend(
+        [FolderChats(folder_id=1, folder_name="Clients", chat_ids={20})]
+    )
     auth = Authorizer(_cfg(), folder_backend=backend, cache=cache)
     await auth.require(20, AccessLevel.WRITE)
     assert backend.calls == 1
@@ -200,8 +222,8 @@ def test_cli_helper_builds_cache_with_policy(tmp_path: Path) -> None:
     cache = _cli_folder_membership_cache(_Cfg())
     assert isinstance(cache, FolderMembershipCache)
     # Round-trips through the config-derived DB path.
-    cache.save({"Clients": {1}}, fetched_at=1.0)
-    assert cache.load()[0] == {"Clients": {1}}
+    cache.save({1: ("Clients", {1})}, fetched_at=1.0)
+    assert cache.load()[0] == {1: ("Clients", {1})}
 
 
 def test_app_state_cache_only_with_policy(tmp_path: Path) -> None:

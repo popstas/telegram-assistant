@@ -13,6 +13,7 @@ from typing import Any
 
 from telegram_assistant.folders.service import (
     FolderChat,
+    FolderChats,
     FolderNotFoundError,
     FolderSnapshot,
 )
@@ -103,8 +104,8 @@ class TelethonFolderBackend:
             )
         return snapshots
 
-    async def list_folder_chat_ids(self) -> dict[str, set[int]]:
-        """Return ``{folder_name: {chat_id, ...}}`` without resolving titles.
+    async def list_folder_chat_ids(self) -> list[FolderChats]:
+        """Return one :class:`FolderChats` entry per folder, keyed by folder id.
 
         Fetches the dialog filters once (:meth:`_fetch_filters`, already wrapped
         in ``translate_flood_wait``) and reads bare peer ids straight from the
@@ -112,8 +113,13 @@ class TelethonFolderBackend:
         path the authorizer uses for folder-rule membership checks, which only
         need ids, never titles. ``list_folders`` (which does resolve titles) is
         left untouched for ``folders inspect``.
+
+        Entries carry the folder's stable ``id`` alongside its title: Telegram
+        permits two folders with the same title, and a title-keyed mapping would
+        silently drop all but the last of them — wrongly denying access to every
+        chat in the shadowed folder.
         """
-        memberships: dict[str, set[int]] = {}
+        memberships: list[FolderChats] = []
         for f in await self._fetch_filters():
             folder_id = getattr(f, "id", None)
             raw_title = getattr(f, "title", None)
@@ -127,7 +133,13 @@ class TelethonFolderBackend:
                 chat_id = _peer_chat_id(peer)
                 if chat_id is not None:
                     ids.add(chat_id)
-            memberships[_normalise_title(raw_title)] = ids
+            memberships.append(
+                FolderChats(
+                    folder_id=int(folder_id),
+                    folder_name=_normalise_title(raw_title),
+                    chat_ids=ids,
+                )
+            )
         return memberships
 
     async def resolve_chat(self, chat_ref: str | int) -> FolderChat:

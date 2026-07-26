@@ -356,7 +356,7 @@ class _FloodFolderBackend:
     folder memberships; this stands in to make that lookup raise FloodWaitError.
     """
 
-    async def list_folder_chat_ids(self) -> dict[str, set[int]]:
+    async def list_folder_chat_ids(self) -> list:
         raise FloodWaitError(9.0)
 
 
