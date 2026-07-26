@@ -67,11 +67,17 @@ Non-blocking observation (symlink hardening of `download_root`) goes to Post-Com
 
 ### Task 2: Folder membership keyed by folder_id (backend + cache)
 
-- [ ] introduce a folder-membership structure carrying identity: change `folders/telethon_backend.py` `list_folder_chat_ids()` (and the `FolderBackend` protocol users) to return per-folder entries `{folder_id: int, folder_name: str, chat_ids: set[int]}` (e.g. `dict[int, FolderChats]` or `list[FolderChats]` dataclass) instead of `dict[str, set[int]]` — no per-title assignment, so same-named folders no longer collide
-- [ ] update `persistence/folder_cache.py` payload to persist `folder_id` + `folder_name` + ids; bump/version the JSON shape so an old-format cached row is treated as a cache miss (not a crash), and `clear()` still works
-- [ ] update `access/service.py` `_fetch_folder_map` / `_invert_folder_map` to build `chat_id -> set[(folder_id, folder_name)]` memberships; keep the `list_folders()` snapshot fallback path consistent
-- [ ] write tests: `tests/test_folder_membership_ids.py` — two folders with the same title keep **both** id-keyed entries (the collision regression test); `tests/test_folder_membership_cache.py` — new payload round-trip, old-format row treated as miss
-- [ ] run tests - must pass before next task
+- [x] introduce a folder-membership structure carrying identity: change `folders/telethon_backend.py` `list_folder_chat_ids()` (and the `FolderBackend` protocol users) to return per-folder entries `{folder_id: int, folder_name: str, chat_ids: set[int]}` (e.g. `dict[int, FolderChats]` or `list[FolderChats]` dataclass) instead of `dict[str, set[int]]` — no per-title assignment, so same-named folders no longer collide
+- [x] update `persistence/folder_cache.py` payload to persist `folder_id` + `folder_name` + ids; bump/version the JSON shape so an old-format cached row is treated as a cache miss (not a crash), and `clear()` still works
+- [x] update `access/service.py` `_fetch_folder_map` / `_invert_folder_map` to build `chat_id -> set[(folder_id, folder_name)]` memberships; keep the `list_folders()` snapshot fallback path consistent
+- [x] write tests: `tests/test_folder_membership_ids.py` — two folders with the same title keep **both** id-keyed entries (the collision regression test); `tests/test_folder_membership_cache.py` — new payload round-trip, old-format row treated as miss
+- [x] run tests - must pass before next task
+
+➕ `list_folder_chat_ids()` returns `list[FolderChats]` (new dataclass in `folders/service.py`, exported from `telegram_assistant.folders`).
+
+➕ Cache `MembershipMap` is plain builtins — `dict[folder_id, (folder_name, set[chat_id])]` with a `PAYLOAD_VERSION = 2` marker — deliberately *not* the `FolderChats` dataclass: `persistence/__init__` is imported by `worker/queue`, which `folders/service` imports, so importing the domain type into the store would create an import cycle. Unparseable/old/newer payloads all load as a cache miss.
+
+➕ `Authorizer` memberships are now `(folder_id, folder_name)` tuples; caller-supplied `folder_memberships=` still accepts bare folder-name strings (normalised to `(None, name)`), so `messages/service.py` and existing tests are unchanged.
 
 ### Task 3: `folder_id` access rules + name rules union all same-named folders
 

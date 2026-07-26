@@ -94,6 +94,28 @@ def _canonical_chat_id(chat_id: int) -> int:
     return abs(chat_id)
 
 
+# A chat's folder membership: the stable folder id (``None`` when a caller
+# supplied a bare folder name) plus the folder title. Both components exist
+# because folder titles are not unique in Telegram.
+Membership = tuple[int | None, str]
+
+
+def _normalise_memberships(items: Iterable[Membership | str]) -> set[Membership]:
+    """Accept caller-supplied memberships as bare names or ``(id, name)`` pairs.
+
+    Callers that already know the folder (e.g. ``groups create`` passing the
+    destination folder) hand over a plain name; the internal map carries ids.
+    """
+    result: set[Membership] = set()
+    for item in items:
+        if isinstance(item, str):
+            result.add((None, item))
+        else:
+            folder_id, folder_name = item
+            result.add((folder_id, folder_name))
+    return result
+
+
 class AccessDenied(RuntimeError):
     """The configured policy does not grant the required level for a chat/folder.
 
@@ -179,7 +201,7 @@ class Authorizer:
         self._default_edit_only: bool | None = None
         self._chat_edit_only: dict[int, bool] = {}
         self._folder_edit_only: dict[str, bool] = {}
-        self._memberships: dict[int, set[str]] | None = None
+        self._memberships: dict[int, set[Membership]] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -256,7 +278,7 @@ class Authorizer:
         self._folder_edit_only = folder_edit_only
         self._built = True
 
-    async def _folder_memberships(self, chat_id: int) -> set[str]:
+    async def _folder_memberships(self, chat_id: int) -> set[Membership]:
         # No folder rules → folder membership is irrelevant; skip the scan.
         if not self._folder_caps:
             return set()
@@ -264,8 +286,8 @@ class Authorizer:
             self._memberships = await self._resolve_memberships()
         return self._memberships.get(chat_id, set())
 
-    async def _resolve_memberships(self) -> dict[int, set[str]]:
-        """Resolve the ``chat_id -> {folder_name}`` map, read-through the cache.
+    async def _resolve_memberships(self) -> dict[int, set[Membership]]:
+        """Resolve the ``chat_id -> {(folder_id, folder_name)}`` map, cached.
 
         When a persistent cache is injected and the policy sets
         ``folder_cache_ttl > 0``:
@@ -303,45 +325,51 @@ class Authorizer:
         return self._invert_folder_map(folder_map)
 
     async def _fetch_folder_map(self) -> MembershipMap:
-        """Fetch the ``folder_name -> {bare chat id}`` map from the backend.
+        """Fetch the ``folder_id -> (folder_name, {bare chat id})`` map.
 
         Prefers the fast ``list_folder_chat_ids()`` path (bare peer ids, no
         ``get_entity`` round-trips) when the injected backend exposes it, and
         falls back to scanning ``list_folders()`` for simple/fake backends that
-        only implement the title-resolving surface. Ids are canonicalised to the
-        same bare form the rule index, request lookups, and the cache use.
+        only implement the title-resolving surface. Both surfaces report the
+        folder's stable id, so two same-named folders stay distinct entries.
+        Ids are canonicalised to the same bare form the rule index, request
+        lookups, and the cache use.
         """
         folder_map: MembershipMap = {}
         backend = self._folder_backend
         if backend is None:
             return folder_map
+
+        def _add(folder_id: int, folder_name: str, chat_ids: Iterable[int]) -> None:
+            _name, ids = folder_map.setdefault(folder_id, (folder_name, set()))
+            ids.update(_canonical_chat_id(cid) for cid in chat_ids)
+
         list_ids = getattr(backend, "list_folder_chat_ids", None)
         if callable(list_ids):
-            raw = await list_ids()
-            for folder_name, chat_ids in raw.items():
-                folder_map.setdefault(folder_name, set()).update(
-                    _canonical_chat_id(cid) for cid in chat_ids
-                )
+            for entry in await list_ids():
+                _add(entry.folder_id, entry.folder_name, entry.chat_ids)
         else:
             for snapshot in await backend.list_folders():
-                folder_map.setdefault(snapshot.folder_name, set()).update(
-                    _canonical_chat_id(chat.chat_id) for chat in snapshot.chats
+                _add(
+                    snapshot.folder_id,
+                    snapshot.folder_name,
+                    (chat.chat_id for chat in snapshot.chats),
                 )
         return folder_map
 
     @staticmethod
-    def _invert_folder_map(folder_map: MembershipMap) -> dict[int, set[str]]:
-        """Invert ``folder_name -> {chat id}`` to ``chat id -> {folder_name}``."""
-        memberships: dict[int, set[str]] = {}
-        for folder_name, chat_ids in folder_map.items():
+    def _invert_folder_map(folder_map: MembershipMap) -> dict[int, set[Membership]]:
+        """Invert the folder map into ``chat id -> {(folder_id, folder_name)}``."""
+        memberships: dict[int, set[Membership]] = {}
+        for folder_id, (folder_name, chat_ids) in folder_map.items():
             for cid in chat_ids:
-                memberships.setdefault(
-                    _canonical_chat_id(cid), set()
-                ).add(folder_name)
+                memberships.setdefault(_canonical_chat_id(cid), set()).add(
+                    (folder_id, folder_name)
+                )
         return memberships
 
     def _effective_chat_caps(
-        self, chat_id: int, memberships: Iterable[str]
+        self, chat_id: int, memberships: Iterable[Membership]
     ) -> tuple[set[AccessLevel], str | None]:
         """Return ``(granted_caps, matched_rule_description)`` for a chat.
 
@@ -354,11 +382,11 @@ class Authorizer:
         if self._default_caps:
             caps |= self._default_caps
             matched = "all"
-        for folder in memberships:
-            folder_caps = self._folder_caps.get(folder)
+        for _folder_id, folder_name in memberships:
+            folder_caps = self._folder_caps.get(folder_name)
             if folder_caps:
                 caps |= folder_caps
-                matched = f"folder:{folder}"
+                matched = f"folder:{folder_name}"
         chat_caps = self._chat_caps.get(chat_id)
         if chat_caps:
             caps |= chat_caps
@@ -368,14 +396,16 @@ class Authorizer:
     async def _chat_access(
         self,
         chat_id: int,
-        folder_memberships: Iterable[str] | None,
+        folder_memberships: Iterable[Membership | str] | None,
     ) -> tuple[int, set[AccessLevel], str | None]:
         await self._ensure_index()
         lookup_id = _canonical_chat_id(chat_id)
         if folder_memberships is None:
-            memberships: Iterable[str] = await self._folder_memberships(lookup_id)
+            memberships: Iterable[Membership] = await self._folder_memberships(
+                lookup_id
+            )
         else:
-            memberships = set(folder_memberships)
+            memberships = _normalise_memberships(folder_memberships)
         caps, matched = self._effective_chat_caps(lookup_id, memberships)
         return lookup_id, caps, matched
 
@@ -384,7 +414,7 @@ class Authorizer:
         chat_id: int,
         level: AccessLevel,
         *,
-        folder_memberships: Iterable[str] | None = None,
+        folder_memberships: Iterable[Membership | str] | None = None,
     ) -> bool:
         """Return whether ``chat_id`` has ``level`` without logging or raising."""
         if self._config is None:
@@ -398,7 +428,7 @@ class Authorizer:
         self,
         chat_id: int,
         *,
-        folder_memberships: Iterable[str] | None = None,
+        folder_memberships: Iterable[Membership | str] | None = None,
     ) -> tuple[frozenset[AccessLevel], str | None]:
         """Return ``(granted_caps, matched_rule)`` for ``chat_id`` without raising.
 
@@ -421,7 +451,7 @@ class Authorizer:
         *,
         which: str,
         default: bool,
-        folder_memberships: Iterable[str] | None,
+        folder_memberships: Iterable[Membership | str] | None,
     ) -> bool:
         """Resolve a ``*_only_session_messages`` flag by specificity.
 
@@ -442,16 +472,18 @@ class Authorizer:
             chat_overrides_map = self._chat_edit_only
         lookup_id = _canonical_chat_id(chat_id)
         if folder_memberships is None:
-            memberships: Iterable[str] = await self._folder_memberships(lookup_id)
+            memberships: Iterable[Membership] = await self._folder_memberships(
+                lookup_id
+            )
         else:
-            memberships = set(folder_memberships)
+            memberships = _normalise_memberships(folder_memberships)
         effective = default
         if default_override is not None:
             effective = default_override
         folder_overrides = [
-            folder_overrides_map[folder]
-            for folder in memberships
-            if folder in folder_overrides_map
+            folder_overrides_map[folder_name]
+            for _folder_id, folder_name in memberships
+            if folder_name in folder_overrides_map
         ]
         if folder_overrides:
             # Multiple folders may match; restrictive (True) wins.
@@ -465,7 +497,7 @@ class Authorizer:
         chat_id: int,
         *,
         default: bool,
-        folder_memberships: Iterable[str] | None = None,
+        folder_memberships: Iterable[Membership | str] | None = None,
     ) -> bool:
         """Resolve the effective ``delete_only_session_messages`` for a chat.
 
@@ -488,7 +520,7 @@ class Authorizer:
         chat_id: int,
         *,
         default: bool,
-        folder_memberships: Iterable[str] | None = None,
+        folder_memberships: Iterable[Membership | str] | None = None,
     ) -> bool:
         """Resolve the effective ``edit_only_session_messages`` for a chat.
 
@@ -510,7 +542,7 @@ class Authorizer:
         chat_id: int,
         level: AccessLevel,
         *,
-        folder_memberships: Iterable[str] | None = None,
+        folder_memberships: Iterable[Membership | str] | None = None,
     ) -> None:
         """Raise :class:`AccessDenied` unless ``chat_id`` is granted ``level``.
 

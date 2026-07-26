@@ -65,6 +65,20 @@ class FolderChat:
 
 
 @dataclass
+class FolderChats:
+    """Bare chat-id membership of one folder, carrying the folder's identity.
+
+    Telegram allows two folders to share a title, so membership can only be
+    keyed by the stable ``folder_id``; ``folder_name`` rides along for
+    name-targeted access rules (which union every same-named folder).
+    """
+
+    folder_id: int
+    folder_name: str
+    chat_ids: set[int] = field(default_factory=set)
+
+
+@dataclass
 class FolderSnapshot:
     """Read-model for a Telegram folder and its current chat list."""
 
