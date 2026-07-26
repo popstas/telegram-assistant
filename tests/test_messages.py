@@ -579,6 +579,42 @@ async def test_send_message_rich_markdown_is_write_gated(
     assert backend.sent == []
 
 
+async def test_send_message_rich_markdown_records_in_sent_registry(
+    store: OperationStore,
+) -> None:
+    """A rich send goes through the same success path as a plain send, so the
+    article's id lands in the registry that session-limited delete/edit
+    consult. A replay does not re-record — it belongs to the original sender."""
+    from telegram_assistant.messages import SentMessageRegistry
+
+    registry = SentMessageRegistry()
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="",
+        rich_markdown=RICH_MD,
+        operation_id="rich-registry",
+    )
+    result, _ = await send_message(
+        backend=backend, store=store, request=req, sent_registry=registry
+    )
+
+    assert result.telegram_message_id is not None
+    assert registry.contains(-100, result.telegram_message_id) is True
+    # A different id in the same chat was never sent by this process.
+    assert registry.contains(-100, result.telegram_message_id + 1) is False
+
+    replay_registry = SentMessageRegistry()
+    replayed, _ = await send_message(
+        backend=FakeMessageBackend(),
+        store=store,
+        request=req,
+        sent_registry=replay_registry,
+    )
+    assert replayed.replayed is True
+    assert replay_registry.contains(-100, result.telegram_message_id) is False
+
+
 async def test_send_message_media_only(store: OperationStore) -> None:
     backend = FakeMessageBackend()
     req = SendMessageRequest(

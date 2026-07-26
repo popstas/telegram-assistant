@@ -132,11 +132,35 @@ Goal: answer two blocking questions before writing feature code: (a) does the se
 
 ### Task 6: Verify acceptance criteria
 
-- [ ] verify all Overview requirements implemented: rich send works on CLI+HTTP+MCP; markdown-only; exclusivity enforced; WRITE gate + registry + idempotency apply; graceful error on Telethon <1.44
-- [ ] verify edge cases: empty markdown, mass mode, scheduled rich send, topic-targeted rich send, replay of the same operation id
-- [ ] run full test suite (`pytest`)
-- [ ] run `ruff check src tests` — all issues fixed
-- [ ] re-run `scripts/spike_rich_message.py` as a live sanity check if an authorized session is available (record skipped otherwise)
+- [x] verify all Overview requirements implemented: rich send works on CLI+HTTP+MCP; markdown-only; exclusivity enforced; WRITE gate + registry + idempotency apply; graceful error on Telethon <1.44
+- [x] verify edge cases: empty markdown, mass mode, scheduled rich send, topic-targeted rich send, replay of the same operation id
+- [x] run full test suite (`pytest`) — **1653 passed**
+- [x] run `ruff check src tests` — clean, no issues
+- [x] re-run `scripts/spike_rich_message.py` as a live sanity check — **ran live**, message id `407139`; plus a live send through the *shipped* CLI path (see below)
+
+**Verification matrix** (every Overview claim has a named test):
+
+| Requirement | Domain | HTTP | CLI | MCP |
+|---|---|---|---|---|
+| rich send reaches backend | `test_send_message_rich_markdown_passed_to_backend` | `test_http_rich_send_passes_markdown_to_backend` | `test_cli_rich_send_reads_file_and_passes_markdown` | `test_mcp_send_rich_markdown_reaches_backend` |
+| only-when-set kwarg (legacy backends) | `LegacySendBackend` | `test_http_plain_send_still_omits_rich_markdown` | `CliLegacyMessageBackend` | `test_mcp_plain_send_omits_rich_markdown_kwarg` |
+| exclusivity: text / attachments | `..._rejects_text`, `..._rejects_attachments` | `..._rejects_text`, `..._rejects_attachments`, `..._rejects_base64_attachments` | `test_cli_rich_send_rejects_conflicting_inputs` | `test_mcp_send_rich_markdown_rejects_combinations` |
+| exclusivity: mass mode | n/a (see Task 2 ⚠️) | `test_http_rich_send_rejects_mass_mode` | `test_cli_rich_send_rejects_mass_mode` | unreachable (see Task 5 ⚠️) |
+| empty / blank markdown | `..._rejects_empty` | `..._rejects_blank_markdown` | `test_cli_rich_send_empty_file_errors` | `test_mcp_send_rich_markdown_bounds` |
+| 32 768 bound (inclusive) | `..._rejects_over_limit`, `..._accepts_exact_limit` | `..._rejects_oversize_markdown` | `test_cli_rich_send_oversize_file_errors` | `test_mcp_send_rich_markdown_bounds` |
+| scheduled + topic + reply | `..._allows_topic_reply_and_schedule` | `..._allows_topic_reply_and_schedule` | `test_cli_rich_send_allows_topic_and_schedule` | `test_mcp_send_rich_markdown_with_topic_and_schedule` |
+| WRITE gate | `..._is_write_gated` | `..._denied_without_write`, `..._allowed_by_wildcard_write` | (shared domain gate) | `test_mcp_send_rich_markdown_requires_write` |
+| idempotency replay | `..._replays_same_operation_id` | (shared `OperationStore`) | (shared) | (shared) |
+| graceful Telethon <1.44 | `test_rich_send_on_old_telethon_reports_version` | — | — | — |
+| raw request shape / id extraction | `test_rich_send_issues_raw_request_with_markdown`, `..._forwards_schedule_date`, `..._topic_only_replies_to_topic_root`, `..._reply_inside_topic_keeps_thread`, `..._extracts_id_from_update_new_message`, `..._without_message_id_raises`, `..._flood_wait_is_translated` | — | — | — |
+| markdown-only (no HTML) | `grep InputRichMessageHTML\|rich_html src/` → no matches | | | |
+
+➕ Added `test_send_message_rich_markdown_records_in_sent_registry` — the one Overview claim that had **no** test: that a rich send lands in the `SentMessageRegistry` that session-limited delete/edit consult. It also pins the negative half (a *replay* does not re-record — the message belongs to whichever process originally sent it).
+
+**Live verification through the shipped stack** (2026-07-27, account `241225329`, target Saved Messages) — the spike only exercises raw MTProto, so the production code path was checked separately:
+- `telegram-assistant messages send --entity me --rich-markdown … --dry-run` → correct marker envelope (`rich_markdown: true`, `rich_markdown_chars: 373`, body absent).
+- Same command live → `telegram_message_id: 407140`, `operation_status: completed`. Reading it back, `Message.message` is `''` and `Message.rich_message.blocks` is `[PageBlockHeading1, PageBlockParagraph, PageBlockHeading2, PageBlockTable, PageBlockBlockquote, PageBlockPreformatted]` — so `TelethonMessageBackend._send_rich_message` really produces a server-parsed article, not a plain-text fallback.
+- Live idempotency: two sends with one explicit `--operation-id` → first `replayed: false` id `407141`, second `replayed: true` **same** id `407141`, no second message.
 
 ### Task 7: Update documentation
 
