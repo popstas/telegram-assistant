@@ -191,6 +191,132 @@ def test_http_search_passes_optional_args() -> None:
     assert backend.calls[-1]["topic_id"] == 7
 
 
+def test_http_search_accepts_date_range_and_echoes_utc_bounds() -> None:
+    backend = FakeSearchBackend(
+        [
+            RecentMessage(
+                id=1,
+                sender="u1",
+                date="2026-07-05T12:00:00+00:00",
+                reply_to=None,
+                text="needle",
+            )
+        ]
+    )
+    client = _http_client(access_block=_READ_ACCESS, search_backend=backend)
+    resp = client.get(
+        "/telegram/messages/search",
+        params={
+            "chat_id": -100123,
+            "query": "needle",
+            "from_date": "2026-07-01T00:00:00+03:00",
+            "to_date": "2026-07-10T23:59:59+03:00",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["from_date"] == "2026-06-30T21:00:00+00:00"
+    assert body["to_date"] == "2026-07-10T20:59:59+00:00"
+    assert body["count"] == 1
+    call = backend.calls[-1]
+    assert call["from_date"] == dt.datetime(2026, 6, 30, 21, 0, tzinfo=dt.UTC)
+    assert call["to_date"] == dt.datetime(2026, 7, 10, 20, 59, 59, tzinfo=dt.UTC)
+
+
+def test_http_search_range_echoes_none_without_range() -> None:
+    backend = FakeSearchBackend(_messages(1))
+    client = _http_client(access_block=_READ_ACCESS, search_backend=backend)
+    resp = client.get(
+        "/telegram/messages/search",
+        params={"chat_id": -100123, "query": "needle"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["from_date"] is None
+    assert resp.json()["to_date"] is None
+
+
+def test_http_search_passes_full_filter_combination() -> None:
+    backend = FakeSearchBackend(
+        [
+            RecentMessage(
+                id=9,
+                sender="bob",
+                date="2026-07-05T12:00:00+00:00",
+                reply_to=None,
+                text="needle",
+            )
+        ]
+    )
+    client = _http_client(access_block=_READ_ACCESS, search_backend=backend)
+    resp = client.get(
+        "/telegram/messages/search",
+        params={
+            "chat_id": -100123,
+            "query": "needle",
+            "from_user": "@bob",
+            "topic_id": 7,
+            "limit": 3,
+            "from_date": "2026-07-01T00:00:00+00:00",
+            "to_date": "2026-07-10T00:00:00+00:00",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    assert backend.calls == [
+        {
+            "chat_id": -100123,
+            "query": "needle",
+            "from_user": "@bob",
+            "limit": 3,
+            "topic_id": 7,
+            "from_date": dt.datetime(2026, 7, 1, tzinfo=dt.UTC),
+            "to_date": dt.datetime(2026, 7, 10, tzinfo=dt.UTC),
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        # naive bounds (no timezone)
+        {
+            "from_date": "2026-07-01T00:00:00",
+            "to_date": "2026-07-10T00:00:00+00:00",
+        },
+        {
+            "from_date": "2026-07-01T00:00:00+00:00",
+            "to_date": "2026-07-10T00:00:00",
+        },
+        # only one bound
+        {"from_date": "2026-07-01T00:00:00+00:00"},
+        {"to_date": "2026-07-10T00:00:00+00:00"},
+        # inverted range
+        {
+            "from_date": "2026-07-10T00:00:00+00:00",
+            "to_date": "2026-07-01T00:00:00+00:00",
+        },
+        # minutes + range
+        {
+            "minutes": 60,
+            "from_date": "2026-07-01T00:00:00+00:00",
+            "to_date": "2026-07-10T00:00:00+00:00",
+        },
+    ],
+)
+def test_http_search_rejects_bad_range_with_400(params: dict[str, Any]) -> None:
+    backend = FakeSearchBackend(_messages(3))
+    client = _http_client(access_block=_READ_ACCESS, search_backend=backend)
+    resp = client.get(
+        "/telegram/messages/search",
+        params={"chat_id": -100123, "query": "needle", **params},
+        headers=AUTH,
+    )
+    assert resp.status_code == 400, resp.text
+    assert backend.calls == []
+
+
 def test_http_search_via_entity() -> None:
     backend = FakeSearchBackend(_messages(2))
     resolver = FakeResolver({"@client": -100777})
@@ -473,6 +599,183 @@ def test_cli_search_requires_one_target(
         ],
     )
     assert result.exit_code == 2
+
+
+def test_cli_search_accepts_date_range_and_echoes_utc_bounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = _write_config(tmp_path, _config_with_access(_READ_ACCESS))
+    backend = FakeSearchBackend(
+        [
+            RecentMessage(
+                id=1,
+                sender="u1",
+                date="2026-07-05T12:00:00+00:00",
+                reply_to=None,
+                text="needle",
+            )
+        ]
+    )
+    _patch_cli_search_backends(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "search",
+            "--chat-id",
+            "-100123",
+            "--query",
+            "needle",
+            "--from-date",
+            "2026-07-01T00:00:00+03:00",
+            "--to-date",
+            "2026-07-10T23:59:59+03:00",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["from_date"] == "2026-06-30T21:00:00+00:00"
+    assert payload["to_date"] == "2026-07-10T20:59:59+00:00"
+    assert payload["count"] == 1
+    call = backend.calls[-1]
+    assert call["from_date"] == dt.datetime(2026, 6, 30, 21, 0, tzinfo=dt.UTC)
+    assert call["to_date"] == dt.datetime(2026, 7, 10, 20, 59, 59, tzinfo=dt.UTC)
+
+
+def test_cli_search_passes_full_filter_combination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = _write_config(tmp_path, _config_with_access(_READ_ACCESS))
+    backend = FakeSearchBackend(
+        [
+            RecentMessage(
+                id=9,
+                sender="bob",
+                date="2026-07-05T12:00:00+00:00",
+                reply_to=None,
+                text="needle",
+            )
+        ]
+    )
+    _patch_cli_search_backends(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "search",
+            "--chat-id",
+            "-100123",
+            "--query",
+            "needle",
+            "--from",
+            "@bob",
+            "--topic-id",
+            "7",
+            "--limit",
+            "3",
+            "--from-date",
+            "2026-07-01T00:00:00+00:00",
+            "--to-date",
+            "2026-07-10T00:00:00+00:00",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    assert backend.calls == [
+        {
+            "chat_id": -100123,
+            "query": "needle",
+            "from_user": "@bob",
+            "limit": 3,
+            "topic_id": 7,
+            "from_date": dt.datetime(2026, 7, 1, tzinfo=dt.UTC),
+            "to_date": dt.datetime(2026, 7, 10, tzinfo=dt.UTC),
+        }
+    ]
+
+
+def test_cli_search_range_echoes_none_without_range(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file = _write_config(tmp_path, _config_with_access(_READ_ACCESS))
+    backend = FakeSearchBackend(_messages(1))
+    _patch_cli_search_backends(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "search",
+            "--chat-id",
+            "-100123",
+            "--query",
+            "needle",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["from_date"] is None
+    assert payload["to_date"] is None
+
+
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        # naive bounds (no timezone)
+        ["--from-date", "2026-07-01T00:00:00", "--to-date", "2026-07-10T00:00:00+00:00"],
+        ["--from-date", "2026-07-01T00:00:00+00:00", "--to-date", "2026-07-10T00:00:00"],
+        # only one bound
+        ["--from-date", "2026-07-01T00:00:00+00:00"],
+        ["--to-date", "2026-07-10T00:00:00+00:00"],
+        # inverted range
+        ["--from-date", "2026-07-10T00:00:00+00:00", "--to-date", "2026-07-01T00:00:00+00:00"],
+        # minutes + range
+        [
+            "--minutes",
+            "60",
+            "--from-date",
+            "2026-07-01T00:00:00+00:00",
+            "--to-date",
+            "2026-07-10T00:00:00+00:00",
+        ],
+        # unparseable timestamp
+        ["--from-date", "yesterday", "--to-date", "2026-07-10T00:00:00+00:00"],
+    ],
+)
+def test_cli_search_rejects_bad_range_exit_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra_args: list[str]
+) -> None:
+    config_file = _write_config(tmp_path, _config_with_access(_READ_ACCESS))
+    backend = FakeSearchBackend(_messages(3))
+    _patch_cli_search_backends(monkeypatch, backend)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "search",
+            "--chat-id",
+            "-100123",
+            "--query",
+            "needle",
+            *extra_args,
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 2, result.stdout
+    assert backend.calls == []
 
 
 def test_cli_search_rejects_empty_query(

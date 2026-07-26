@@ -6,6 +6,7 @@ import datetime as dt
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from telegram_assistant.config import load_config_from_text
@@ -434,6 +435,97 @@ def test_mcp_search_messages_via_backend(
             "to_date": None,
         }
     ]
+
+
+def test_mcp_search_accepts_date_range_and_echoes_utc_bounds(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeSearchBackend(
+        [
+            RecentMessage(
+                id=1,
+                sender="u1",
+                date="2026-07-05T12:00:00+00:00",
+                reply_to=None,
+                text="needle",
+            )
+        ]
+    )
+    with _client(minimal_config_yaml, tmp_path, search_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_search",
+            {
+                "chat_id": -100123,
+                "query": "needle",
+                "from_user": "@bob",
+                "topic_id": 7,
+                "from_date": "2026-07-01T00:00:00+03:00",
+                "to_date": "2026-07-10T23:59:59+03:00",
+            },
+        )
+
+    assert result["isError"] is False
+    payload = result["structuredContent"]
+    assert payload["from_date"] == "2026-06-30T21:00:00+00:00"
+    assert payload["to_date"] == "2026-07-10T20:59:59+00:00"
+    assert payload["count"] == 1
+    assert backend.calls == [
+        {
+            "chat_id": -100123,
+            "query": "needle",
+            "from_user": "@bob",
+            "limit": 20,
+            "topic_id": 7,
+            "from_date": dt.datetime(2026, 6, 30, 21, 0, tzinfo=dt.UTC),
+            "to_date": dt.datetime(2026, 7, 10, 20, 59, 59, tzinfo=dt.UTC),
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "range_args",
+    [
+        # naive bounds (no timezone)
+        {"from_date": "2026-07-01T00:00:00", "to_date": "2026-07-10T00:00:00+00:00"},
+        {"from_date": "2026-07-01T00:00:00+00:00", "to_date": "2026-07-10T00:00:00"},
+        # only one bound
+        {"from_date": "2026-07-01T00:00:00+00:00"},
+        {"to_date": "2026-07-10T00:00:00+00:00"},
+        # inverted range
+        {
+            "from_date": "2026-07-10T00:00:00+00:00",
+            "to_date": "2026-07-01T00:00:00+00:00",
+        },
+        # minutes + range
+        {
+            "minutes": 60,
+            "from_date": "2026-07-01T00:00:00+00:00",
+            "to_date": "2026-07-10T00:00:00+00:00",
+        },
+    ],
+)
+def test_mcp_search_rejects_bad_range(
+    minimal_config_yaml: str, tmp_path: Path, range_args: dict[str, Any]
+) -> None:
+    backend = FakeSearchBackend(_messages())
+    with _client(minimal_config_yaml, tmp_path, search_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_search",
+            {"chat_id": -100123, "query": "needle", **range_args},
+        )
+
+    assert result["isError"] is True
+    assert backend.calls == []
 
 
 def test_mcp_search_denied_without_read(

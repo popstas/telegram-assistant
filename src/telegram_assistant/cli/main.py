@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import UTC
+from datetime import UTC, datetime
 from pathlib import Path
 
 import typer
@@ -208,8 +208,6 @@ def _raise_for_flood_wait(exc: BaseException, action: str) -> None:
     Only fires for errors carrying retry-after information (pacing gave up);
     plain flood-wait errors fall through to the caller's generic handler.
     """
-    from datetime import datetime
-
     from telegram_assistant.messages import retry_after_details
 
     details = retry_after_details(exc)
@@ -4069,6 +4067,19 @@ def messages_search(
         "--topic-id",
         help="Scope the search to one forum topic id.",
     ),
+    from_date: str | None = typer.Option(
+        None,
+        "--from-date",
+        help="Start of a fixed, inclusive date range (ISO-8601 with timezone, "
+        "e.g. 2026-07-01T00:00:00+03:00). Requires --to-date; not combinable "
+        "with --minutes.",
+    ),
+    to_date: str | None = typer.Option(
+        None,
+        "--to-date",
+        help="End of the fixed, inclusive date range (ISO-8601 with timezone). "
+        "Requires --from-date.",
+    ),
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
         "--config",
@@ -4082,7 +4093,7 @@ def messages_search(
         FolderError,
         resolve_chat_in_folder,
     )
-    from telegram_assistant.messages import search_messages
+    from telegram_assistant.messages import normalize_search_range, search_messages
 
     refs = sum([chat_id is not None, chat_name is not None, entity is not None])
     if refs != 1:
@@ -4100,6 +4111,31 @@ def messages_search(
     if minutes is not None and minutes <= 0:
         typer.echo("--minutes must be a positive integer", err=True)
         raise typer.Exit(code=2)
+
+    def _parse_iso(option: str, raw: str | None) -> datetime | None:
+        if raw is None:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            typer.echo(
+                f"{option} must be an ISO-8601 timestamp with timezone (got {raw!r})",
+                err=True,
+            )
+            raise typer.Exit(code=2) from None
+
+    parsed_from = _parse_iso("--from-date", from_date)
+    parsed_to = _parse_iso("--to-date", to_date)
+    # Shared domain validation (both bounds, aware, ordered, not with --minutes)
+    # runs here too so the CLI fails fast with exit code 2 and the same message
+    # the other surfaces use — and so the applied UTC bounds can be echoed.
+    try:
+        applied_range = normalize_search_range(
+            from_date=parsed_from, to_date=parsed_to, minutes=minutes
+        )
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
 
     config, manager, open_backends = _build_search_backends(config_path)
 
@@ -4139,6 +4175,8 @@ def messages_search(
                 limit=limit,
                 minutes=minutes,
                 topic_id=topic_id,
+                from_date=parsed_from,
+                to_date=parsed_to,
                 authorizer=authorizer,
             )
             return {
@@ -4148,6 +4186,12 @@ def messages_search(
                 "limit": limit,
                 "minutes": minutes,
                 "topic_id": topic_id,
+                "from_date": (
+                    applied_range[0].isoformat() if applied_range is not None else None
+                ),
+                "to_date": (
+                    applied_range[1].isoformat() if applied_range is not None else None
+                ),
                 "count": len(messages),
                 "messages": [m.to_dict() for m in messages],
             }

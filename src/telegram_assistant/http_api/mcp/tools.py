@@ -193,6 +193,7 @@ from telegram_assistant.messages import (
     get_recent_messages,
     make_url_downloader,
     mass_send_message,
+    normalize_search_range,
     pin_message,
     resolve_schedule_at,
     retry_after_details,
@@ -1112,6 +1113,8 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         limit: int = 20,
         minutes: int | None = None,
         topic_id: int | None = None,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
     ) -> dict[str, Any]:
         """Text-search a chat's messages, newest-first (READ).
 
@@ -1119,11 +1122,20 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         ``topic_id`` scopes the search to one forum topic, and ``minutes``
         restricts the result to messages newer than ``now - minutes`` (composed
         with ``limit``).
+
+        ``from_date``/``to_date`` are the fixed-range alternative to ``minutes``:
+        both required together, timezone-aware, inclusive, and validated by the
+        shared domain rules. The result echoes them normalised to UTC.
         """
         request = _request(provider)
         try:
             if (chat_id is None) == (entity is None):
                 raise ValueError("provide exactly one of chat_id or entity")
+            # Validated before the backend lookup so a bad range never reaches
+            # Telegram; the same ValueError text every surface reports.
+            applied_range = normalize_search_range(
+                from_date=from_date, to_date=to_date, minutes=minutes
+            )
             backend = _search_backend_or_503(request)  # type: ignore[arg-type]
             resolved_chat_id = (
                 await resolve_entity_chat_id(request, entity)  # type: ignore[arg-type]
@@ -1142,6 +1154,8 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 limit=limit,
                 minutes=minutes,
                 topic_id=topic_id,
+                from_date=from_date,
+                to_date=to_date,
                 authorizer=authorizer,
             )
             return {
@@ -1151,6 +1165,16 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 "limit": limit,
                 "minutes": minutes,
                 "topic_id": topic_id,
+                "from_date": (
+                    applied_range[0].isoformat()
+                    if applied_range is not None
+                    else None
+                ),
+                "to_date": (
+                    applied_range[1].isoformat()
+                    if applied_range is not None
+                    else None
+                ),
                 "count": len(messages),
                 "messages": [message.to_dict() for message in messages],
             }

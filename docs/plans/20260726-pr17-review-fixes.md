@@ -152,12 +152,20 @@ Non-blocking observation (symlink hardening of `download_root`) goes to Post-Com
 
 ### Task 7: Date range on CLI, HTTP and MCP surfaces
 
-- [ ] CLI `messages search` (`cli/main.py:3971`): add `--from-date` / `--to-date` (ISO-8601 strings parsed to aware datetimes; parse errors → clear message, exit 2 semantics consistent with existing validation)
-- [ ] HTTP `GET /telegram/messages/search` (`http_api/messages.py:1394`): add `from_date` / `to_date` query params typed Pydantic `AwareDatetime`; domain `ValueError` → existing HTTP 400 path; response echoes normalised UTC `from_date`/`to_date` alongside the existing echoed params
-- [ ] MCP `telegram_messages_search` (`http_api/mcp/tools.py:1100`): add `from_date: datetime | None` / `to_date: datetime | None` args delegating to the same domain validation (no duplicate business validation in MCP)
-- [ ] CLI and MCP outputs also include the applied UTC bounds for reproducibility
-- [ ] write tests in `tests/test_messages_search_surfaces.py`: all three surfaces accept the range and return echoed UTC bounds; all three reject naive dates / single bound / `minutes`+range with 400 / exit-code / tool-error respectively; combination `query + from_user + topic_id + range` passes through to the domain intact
-- [ ] run tests - must pass before next task
+- [x] CLI `messages search` (`cli/main.py:3971`): add `--from-date` / `--to-date` (ISO-8601 strings parsed to aware datetimes; parse errors → clear message, exit 2 semantics consistent with existing validation)
+- [x] HTTP `GET /telegram/messages/search` (`http_api/messages.py:1394`): add `from_date` / `to_date` query params typed Pydantic `AwareDatetime`; domain `ValueError` → existing HTTP 400 path; response echoes normalised UTC `from_date`/`to_date` alongside the existing echoed params
+- [x] MCP `telegram_messages_search` (`http_api/mcp/tools.py:1100`): add `from_date: datetime | None` / `to_date: datetime | None` args delegating to the same domain validation (no duplicate business validation in MCP)
+- [x] CLI and MCP outputs also include the applied UTC bounds for reproducibility
+- [x] write tests in `tests/test_messages_search_surfaces.py`: all three surfaces accept the range and return echoed UTC bounds; all three reject naive dates / single bound / `minutes`+range with 400 / exit-code / tool-error respectively; combination `query + from_user + topic_id + range` passes through to the domain intact
+- [x] run tests - must pass before next task
+
+➕ HTTP query params are plain `datetime | None`, **not** `AwareDatetime`: with `AwareDatetime` a naive bound fails in Pydantic and returns **422**, while the plan's own acceptance criterion (and the other two surfaces) require the shared domain message with **400**. Typing them loosely and letting `normalize_search_range` reject naive/one-sided/inverted/`minutes`-combined ranges keeps one validator and one message per failure across CLI/HTTP/MCP.
+
+➕ All three surfaces call `normalize_search_range` *before* the backend/entity lookup, so a bad range never costs a Telegram round-trip (CLI: before opening the session; HTTP: before `_search_backend_or_503`; MCP: before `_search_backend_or_503`). The bounds still go to the domain `search_messages` too, which re-validates — cheap and keeps the domain self-contained.
+
+➕ MCP range tests live in `tests/test_mcp_tools.py` (where the MCP client harness is), matching the Task 4 precedent; HTTP + CLI range tests are in `tests/test_messages_search_surfaces.py`.
+
+➕ `cli/main.py` now imports `datetime` at module level (was a function-local import in `_raise_for_flood_wait`, which is now redundant and removed).
 
 ### Task 8: Verify acceptance criteria
 
