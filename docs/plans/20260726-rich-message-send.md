@@ -69,11 +69,15 @@ Key external facts (verified 2026-07-26):
 
 Goal: answer two blocking questions before writing feature code: (a) does the server accept `InputRichMessageMarkdown` from this (non-)Premium technical account, (b) what does the success/error surface look like (result Updates shape, error codes like `PREMIUM_ACCOUNT_REQUIRED`, markdown dialect quirks).
 
-- [ ] bump `pyproject.toml` pin to `telethon>=1.44,<2.0`; reinstall into `.venv` (`pip install -e ".[dev]"`)
-- [ ] run existing unit test suite on Telethon 1.44 — must pass (regression check for the upgrade itself)
-- [ ] write `scripts/spike_rich_message.py`: connect via existing session (`data/sessions/popstas/session.session`), send raw `functions.messages.SendMessageRequest(peer=<Client chat test>, message="", random_id auto, rich_message=types.InputRichMessageMarkdown(markdown=...))` with a sample covering the grammY-documented dialect: heading, list, table with alignment, quote, fenced code, and one media-by-URL block `![](https://…jpg "caption")`; print resulting message id or the exact RPC error
-- [ ] run the spike against the live test account (same preconditions as `scripts/e2e_*.sh`; if no authorized session is available, record as skipped and note it here with ⚠️)
-- [ ] record findings in this plan under Technical Details (Premium requirement yes/no for a user account — bots don't need it, error taxonomy, how to extract message id from the Updates result, whether media-by-URL works via MTProto markdown); ⚠️ if the server rejects for non-Premium — STOP and surface to the user before continuing to Task 2
+- [x] bump `pyproject.toml` pin to `telethon>=1.44,<2.0`; reinstall into `.venv` (`pip install -e ".[dev]"`)
+- [x] run existing unit test suite on Telethon 1.44 — must pass (regression check for the upgrade itself) — **1595 passed**
+- [x] write `scripts/spike_rich_message.py`: connect via existing session (`data/sessions/popstas/session.session`), send raw `functions.messages.SendMessageRequest(peer=<Client chat test>, message="", random_id auto, rich_message=types.InputRichMessageMarkdown(markdown=...))` with a sample covering the grammY-documented dialect: heading, list, table with alignment, quote, fenced code, and one media-by-URL block `![](https://…jpg "caption")`; print resulting message id or the exact RPC error
+- [x] run the spike against the live test account (same preconditions as `scripts/e2e_*.sh`; if no authorized session is available, record as skipped and note it here with ⚠️) — **sent successfully**, see findings below
+- [x] record findings in this plan under Technical Details (Premium requirement yes/no for a user account — bots don't need it, error taxonomy, how to extract message id from the Updates result, whether media-by-URL works via MTProto markdown); ⚠️ if the server rejects for non-Premium — STOP and surface to the user before continuing to Task 2
+
+⚠️ **`Client chat test` is currently unusable as a spike/e2e target**: any send to it (raw *or* rich) fails with `ChatRestrictedError` / 400 `BAD_REQUEST`. Verified this is **not** rich-specific — a plain `SendMessageRequest` with no `rich_message` to the same `InputPeerChannel` fails identically. The spike therefore defaults to `--entity me` (Saved Messages). This likely also breaks `scripts/e2e_*.sh`; out of scope here, worth its own task.
+
+⚠️ **The Premium question is NOT answered.** The technical account (`id=241225329`) reports `premium=True`, so the successful send proves only that a *Premium* user account may send rich messages. Whether a non-Premium user account can is still unknown, and no `PREMIUM_ACCOUNT_REQUIRED`-style error was observable from here. Per the "no silent fallback" decision this does not block Task 2: if the server does gate on Premium, that surfaces as a normal RPC error through the existing `MessageSendFailed` taxonomy. Re-test on a non-Premium account before relying on the feature there.
 
 ### Task 2: Domain layer — `rich_markdown` in service + Telethon backend
 
@@ -128,12 +132,19 @@ Goal: answer two blocking questions before writing feature code: (a) does the se
 - **Validation matrix**: `rich_markdown` XOR (`text` | attachments); forbidden with `mass`; allowed with `topic_id`, `reply_to_message_id`, `schedule_at`, `entity`/`chat_id`/`chat_name` targeting. Length: 1..32 768 chars.
 - **Backward compat**: backend kwarg passed only when set, so `FakeMessageBackend` and any legacy backends without the kwarg keep working for non-rich sends.
 - **Idempotency**: unchanged — same `begin_operation` path; `rich_markdown` participates in the persisted payload like `text` (same service-command redaction rule).
-- **Spike findings** (fill in during Task 1):
-  - Premium required for programmatic user-account send: _TBD_ (bots via Bot API: not required)
-  - Error taxonomy observed: _TBD_
-  - Message-id extraction: _TBD_
-  - Markdown dialect notes (tables/headings render as expected via MTProto): _TBD_
-  - Media-by-URL (`![](https://…)`) works via MTProto markdown: _TBD_
+- **Spike findings** (Task 1, run 2026-07-26 via `scripts/spike_rich_message.py` on Telethon 1.44.0, layer 227, account `241225329`, target Saved Messages):
+  - **Rich send works over MTProto from a user account.** `functions.messages.SendMessageRequest(peer=…, message="", rich_message=types.InputRichMessageMarkdown(markdown=md))` returned `Updates` and produced message id `407137`. `random_id` is auto-filled by Telethon; `message=""` is accepted alongside `rich_message`.
+  - Premium required for programmatic user-account send: **UNRESOLVED** — the test account is itself Premium (`me.premium is True`), so the success does not generalize. See the ⚠️ under Task 1. (Bots via Bot API: not required.)
+  - Error taxonomy observed (all `BadRequestError`, HTTP-equivalent 400):
+    - empty markdown → `RICH_MESSAGE_MARKDOWN_INVALID`
+    - markdown of 33 000 chars → `RICH_MESSAGE_TEXT_TOO_LONG`
+    - exactly 32 768 chars → **accepted** (id `407138`), so the documented limit is inclusive (`len <= 32768`), which is what the surface validation should enforce
+    - restricted chat → `ChatRestrictedError` (400 `BAD_REQUEST`) — a *generic* send error, raised identically for plain sends, so it needs no rich-specific handling
+    - no rich-specific error class exists in Telethon; these arrive as bare `BadRequestError`/`RPCError`, so the existing `translate_flood_wait` + `MessageSendFailed` path covers them unchanged
+  - **Message-id extraction**: the result is a top-level `Updates` whose `.updates` list was `[UpdateMessageID(id=407137, random_id=…), UpdateNewMessage(message=Message, pts=…), UpdateReadHistoryInbox(pts=…)]`. `UpdateMessageID.id` is the reliable source (present for both private and channel peers); fall back to `UpdateNewMessage`/`UpdateNewChannelMessage` → `.message.id`. Implemented as `_extract_message_id()` in the spike script — Task 2 should port that shape.
+  - **Markdown dialect renders as documented via MTProto.** Reading the sent message back, `Message.rich_message` is a `RichMessage(blocks, photos, documents, rtl, part)` and the sample produced 10 blocks in source order: `PageBlockHeading1`, `PageBlockParagraph`, `PageBlockHeading2`, `PageBlockList`, `PageBlockTable`, `PageBlockBlockquote`, `PageBlockPreformatted`, `PageBlockDivider`, `PageBlockPhoto`, `PageBlockParagraph`. So headings, aligned tables, quotes, fenced code and dividers all survive the MTProto path — the server does the parsing, exactly as on the Bot API side.
+  - **Media-by-URL works**: `![](https://telegram.org/img/t_logo.png "caption")` became a `PageBlockPhoto` with one entry in `RichMessage.photos` — the server fetched the public URL itself. This confirms v1 needs **no** `InputRichFile` for URL-addressable media.
+  - Read-back note: on a rich message `Message.message` is `""` and `Message.media`/`Message.entities` are `None`; the content lives only in `Message.rich_message`. Any future rich *read* support must go through that field (or `messages.getRichMessage`), which is why rich read stays out of v1 scope.
 
 ## Post-Completion
 

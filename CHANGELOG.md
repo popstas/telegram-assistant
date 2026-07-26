@@ -5,6 +5,7 @@
 
 ### Documentation
 
+- Note access-rule resolve failure task and fix spike session path
 - Link telegram-download-chat and move ToS warning below features
 
 ## v0.8.0 - 2026-07-26

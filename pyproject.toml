@@ -19,7 +19,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
 ]
 dependencies = [
-    "telethon>=1.36,<2.0",
+    "telethon>=1.44,<2.0",
     "fastapi>=0.115,<1.0",
     "uvicorn[standard]>=0.30,<1.0",
     "pydantic>=2.7,<3.0",
