@@ -26,3 +26,9 @@
   - **Фильтры:** `--query` (обязательно), опционально `--from` (отправитель), `--limit`, окно по времени `--minutes` (как в `recent`), возможно `--topic-id`.
   - **Access-гейт:** READ на резолвнутый чат (как `recent`).
   - **Обвязка:** SKILL.md (+ ресинк), README, `EXPECTED_TOOL_NAMES`, тесты.
+- [ ] При ошибке резолвинга `chat:`-правила в `telegram.access` — писать warning и пропускать правило, а не ронять команду
+  - **Симптом:** устаревшее правило (`- chat: expertizemeAssistant` в `data/config.yml`) → любая gated-команда падает с `no entity found for reference 'expertizemeAssistant'` и exit 2. Пример: `telegram-assistant messages recent --entity @wyrtensi` не отработал, хотя к самому `@wyrtensi` правило есть и доступ разрешён.
+  - **Причина:** `access/service.py` (`_build`, ~строки 270-287) резолвит каждый `chat_refs` через `self._resolver.resolve(ref)`; `EntityNotFoundError`/`AmbiguousEntityError` пробрасывается наружу и валит всю команду.
+  - **Что сделать:** ловить ошибки резолва отдельного правила, логировать warning (с текстом ref и причиной) и пропускать только это правило; остальная политика строится как обычно. Продумать fail-safe: пропуск правила сужает права (deny-by-default), а не расширяет — это безопасно, но должно быть заметно в выводе CLI.
+  - **Проверить:** `access list` / `access check` при этом отрабатывали успешно — разобраться, почему поведение расходится с `messages recent`, и привести к единому.
+  - **Обвязка:** тесты на нерезолвимое `chat:`-правило (команда отрабатывает, warning есть, правило не действует); при необходимости — упоминание в README/SKILL.md.
