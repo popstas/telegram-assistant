@@ -441,22 +441,22 @@ class _FakeMsg:
 
 
 class _FakeClient:
+    """Client double answering the single ``messages.Search`` RPC."""
+
     def __init__(self, msgs):
         self._msgs = msgs
-        self.iter_kwargs: dict[str, Any] = {}
+        self.requests: list[Any] = []
 
-    async def get_input_entity(self, chat_id):
-        return chat_id
+    async def get_input_entity(self, ref):
+        return ref
 
-    def iter_messages(self, entity, **kwargs):
-        self.iter_kwargs = {"entity": entity, **kwargs}
-        msgs = self._msgs[: kwargs.get("limit", 20)]
-
-        async def _gen():
-            for m in msgs:
-                yield m
-
-        return _gen()
+    async def __call__(self, request):
+        self.requests.append(request)
+        if len(self.requests) > 1:
+            return type("_Page", (), {"messages": [], "users": []})()
+        return type(
+            "_Page", (), {"messages": self._msgs[: request.limit], "users": []}
+        )()
 
 
 @pytest.mark.asyncio
@@ -475,13 +475,15 @@ async def test_telethon_search_passes_args_and_maps_rows() -> None:
     out = await backend.search_messages(
         chat_id=42, query="needle", from_user="@bob", limit=5, topic_id=7
     )
-    assert client.iter_kwargs == {
-        "entity": 42,
-        "search": "needle",
-        "from_user": "@bob",
-        "reply_to": 7,
-        "limit": 5,
-    }
+    assert len(client.requests) == 1
+    request = client.requests[0]
+    assert request.peer == 42
+    assert request.q == "needle"
+    assert request.from_id == "@bob"
+    assert request.top_msg_id == 7
+    assert request.limit == 5
+    assert request.min_date is None
+    assert request.max_date is None
     assert out[0].id == 2
     assert out[0].text == "[photo]"  # media-only summary
     assert out[0].sender == "bob"

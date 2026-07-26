@@ -138,11 +138,17 @@ Non-blocking observation (symlink hardening of `download_root`) goes to Post-Com
 
 ### Task 6: Telethon search backend — single `messages.SearchRequest` with pagination
 
-- [ ] rewrite `TelethonSearchBackend.search_messages` (`messages/telethon_backend.py:397`) to call `functions.messages.SearchRequest` directly: `peer` + `q=query` + `filter=InputMessagesFilterEmpty()` + `min_date=from_date` / `max_date=to_date` + `from_id` (resolved `from_user` input entity) + `top_msg_id=topic_id` + `offset_id`/`limit` — all filters in **one** request, fixing the flagged `query`+`topic_id` combination
-- [ ] paginate: request pages, keep only rows passing the final inclusive range check, dedupe message ids, advance `offset_id` to the last processed message, stop on `limit` collected / empty page / non-advancing offset; preserve newest-first order
-- [ ] keep `translate_flood_wait` wrapping and the existing row mapping (`_media_summary` fallback, `reply_to_msg_id`, ISO date)
-- [ ] write tests in `tests/test_messages_telethon_backend.py` with a fake client: the built `SearchRequest` contains `q`, `from_id`, `top_msg_id`, both dates and `limit` simultaneously; multi-page collection returns exactly `limit` in-range messages newest-first; dedupe and non-advancing-offset termination; no-range and `query`+`topic_id`-only calls still work
-- [ ] run tests - must pass before next task
+- [x] rewrite `TelethonSearchBackend.search_messages` (`messages/telethon_backend.py:397`) to call `functions.messages.SearchRequest` directly: `peer` + `q=query` + `filter=InputMessagesFilterEmpty()` + `min_date=from_date` / `max_date=to_date` + `from_id` (resolved `from_user` input entity) + `top_msg_id=topic_id` + `offset_id`/`limit` — all filters in **one** request, fixing the flagged `query`+`topic_id` combination
+- [x] paginate: request pages, keep only rows passing the final inclusive range check, dedupe message ids, advance `offset_id` to the last processed message, stop on `limit` collected / empty page / non-advancing offset; preserve newest-first order
+- [x] keep `translate_flood_wait` wrapping and the existing row mapping (`_media_summary` fallback, `reply_to_msg_id`, ISO date)
+- [x] write tests in `tests/test_messages_telethon_backend.py` with a fake client: the built `SearchRequest` contains `q`, `from_id`, `top_msg_id`, both dates and `limit` simultaneously; multi-page collection returns exactly `limit` in-range messages newest-first; dedupe and non-advancing-offset termination; no-range and `query`+`topic_id`-only calls still work
+- [x] run tests - must pass before next task
+
+➕ The `min_date`/`max_date` sent to Telegram are widened by 1s on each side (its bounds are second-granular/exclusive in places); the exact inclusive check runs on the mapped rows in the adapter and again in the domain.
+
+➕ A raw `messages.Search` hit has no resolved `.sender` and carries a nested `reply_to` header, so `_search_usernames`/`_search_sender`/`_search_reply_to` map the sender via the result's `users` list (`from_id.user_id`) and unwrap the header; `.sender`/`.reply_to_msg_id` are still preferred when present, so patched-Message callers keep working.
+
+➕ Page size is `min(limit, 100)` (Telegram's per-page cap); paging also stops on a short page, and the existing `test_telethon_search_passes_args_and_maps_rows` in `tests/test_messages_search.py` was retargeted from the removed `iter_messages` path to the new request.
 
 ### Task 7: Date range on CLI, HTTP and MCP surfaces
 
