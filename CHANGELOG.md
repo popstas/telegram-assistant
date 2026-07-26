@@ -27,6 +27,7 @@
 
 ### Documentation
 
+- Add rich message send implementation plan
 - Add Features section to README
 
 ### Miscellaneous

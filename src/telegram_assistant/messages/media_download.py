@@ -14,11 +14,16 @@ Following the project's service/backend split, the domain depends on the narrow
 cheap :meth:`probe_media` (metadata only) and :meth:`download_media` (the actual
 transfer) so target-path resolution, the no-media error, and the optional
 size guard all live in the pure service and run before (and during) a dry-run.
+
+Downloads never overwrite an existing file: the service claims a free name
+(``report.pdf`` → ``report (1).pdf`` → …) atomically before handing it to the
+backend, and removes the claimed placeholder when the transfer fails.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -132,7 +137,8 @@ class MediaDownloadRequest:
 class MediaDownloadResult:
     """Result of a download operation.
 
-    ``path`` is the resolved (dry-run) or actually-written target path;
+    ``path`` is the resolved (dry-run) or actually-written target path — it
+    carries the ``(N)`` suffix when the requested name was already taken;
     ``size`` and ``mime`` come from the probe on a dry-run and from the written
     file otherwise. ``dry_run`` is ``True`` when nothing was actually written.
     """
@@ -175,6 +181,76 @@ def _resolve_target_path(
     return os.path.join(out_dir, name)
 
 
+_MAX_NAME_ATTEMPTS = 1000
+
+
+def _split_name(name: str) -> tuple[str, str]:
+    """Split a file name into ``(stem, extension)`` on the last dot.
+
+    Names without a dot — and dotfiles like ``.env``, whose only dot starts the
+    name — have no extension, so the whole name is the stem and the counter is
+    appended at the end.
+    """
+    stem, dot, ext = name.rpartition(".")
+    if not stem:
+        return name, ""
+    return stem, dot + ext
+
+
+def _candidate_paths(path: str) -> Iterator[str]:
+    """Yield ``path``, then ``stem (1).ext``, ``stem (2).ext``, … in the same dir."""
+    directory, name = os.path.split(path)
+    stem, ext = _split_name(name)
+    yield path
+    for index in range(1, _MAX_NAME_ATTEMPTS):
+        yield os.path.join(directory, f"{stem} ({index}){ext}")
+
+
+def _first_free_path(path: str) -> str:
+    """First candidate name that does not exist yet — *without* claiming it.
+
+    Used by ``dry_run`` only: the answer is best-effort, since another writer
+    may take the name between the check and a later real download.
+    """
+    for candidate in _candidate_paths(path):
+        if not os.path.exists(candidate):
+            return candidate
+    raise ValueError(
+        f"no free filename for {path} after {_MAX_NAME_ATTEMPTS} attempts"
+    )
+
+
+def _claim_path(path: str) -> str:
+    """Atomically reserve the first free candidate name and return it.
+
+    Downloads never overwrite: the name is claimed by creating an **empty**
+    placeholder with ``O_CREAT | O_EXCL``, so two concurrent downloads of the
+    same file name can't pick the same target — the loser sees ``EEXIST`` and
+    moves on to the next candidate. Telethon then writes into the placeholder.
+    The parent directory is created when missing.
+    """
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    for candidate in _candidate_paths(path):
+        try:
+            fd = os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+        except FileExistsError:
+            continue
+        os.close(fd)
+        return candidate
+    raise ValueError(
+        f"no free filename for {path} after {_MAX_NAME_ATTEMPTS} attempts"
+    )
+
+
+def _unlink_quiet(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
 async def download_media(
     backend: MediaDownloadBackend,
     *,
@@ -202,6 +278,12 @@ async def download_media(
     silently bypassed by missing metadata. ``dry_run`` runs the access check,
     the probe, the size guard, and the path resolution, then returns without
     writing anything.
+
+    An existing file is never overwritten: the resolved target is turned into
+    the first free ``name (N).ext`` variant, claimed atomically, and returned as
+    ``result.path`` so callers see where the bytes actually landed. On a
+    dry-run the reported path is the first free name *at check time* — a
+    best-effort preview, not a reservation.
     """
     if request.message_id <= 0:
         raise ValueError("message_id must be a positive integer")
@@ -239,25 +321,30 @@ async def download_media(
         return MediaDownloadResult(
             telegram_chat_id=request.telegram_chat_id,
             telegram_message_id=request.message_id,
-            path=target_path,
+            path=_first_free_path(target_path),
             size=info.size,
             mime=info.mime,
             dry_run=True,
             chat_name=request.chat_name,
         )
 
-    downloaded = await backend.download_media(
-        chat_id=request.telegram_chat_id,
-        message_id=request.message_id,
-        target_path=target_path,
-    )
+    claimed_path = _claim_path(target_path)
+    try:
+        downloaded = await backend.download_media(
+            chat_id=request.telegram_chat_id,
+            message_id=request.message_id,
+            target_path=claimed_path,
+        )
+    except BaseException:
+        # The transfer never happened — don't leave the empty placeholder behind.
+        _unlink_quiet(claimed_path)
+        raise
     if request.max_bytes is not None and downloaded.size > request.max_bytes:
         # The probe reported no size (or under-reported); enforce the cap on the
         # bytes actually written so a missing-metadata download can't bypass it.
-        try:
-            os.remove(downloaded.path)
-        except OSError:
-            pass
+        _unlink_quiet(downloaded.path)
+        if downloaded.path != claimed_path:
+            _unlink_quiet(claimed_path)
         raise MediaTooLargeError(size=downloaded.size, max_bytes=request.max_bytes)
     return MediaDownloadResult(
         telegram_chat_id=request.telegram_chat_id,
