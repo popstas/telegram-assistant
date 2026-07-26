@@ -3340,6 +3340,14 @@ def messages_send(
         "--reply-to",
         help="Thread the send as a reply to an existing message id (targeted send).",
     ),
+    rich_markdown: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--rich-markdown",
+        help="Path to a UTF-8 markdown file sent as a Telegram rich message "
+        "(article: headings, tables, quotes, code, media by https URL). "
+        "Targeted sends only; mutually exclusive with --text/--file/--file-url.",
+        exists=False,
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -3360,6 +3368,7 @@ def messages_send(
         resolve_folder,
     )
     from telegram_assistant.messages import (
+        MAX_RICH_MARKDOWN_CHARS,
         AttachmentError,
         MassSendRequest,
         MessageSendFailed,
@@ -3413,6 +3422,47 @@ def messages_send(
     has_attachments = bool(files or file_urls)
     has_schedule_input = schedule_at is not None or delay is not None
 
+    # A rich message carries its whole body in the markdown source: a caption or
+    # attachment alongside it would be silently dropped by the server, and mass
+    # mode has no single-article semantics (same rules as MessageSendBody._shape).
+    # Read and bound the file here so bad input costs no backend connection, in
+    # dry-run and real runs alike.
+    rich_markdown_text: str | None = None
+    if rich_markdown is not None:
+        if (text and text.strip()) or has_attachments:
+            typer.echo(
+                "--rich-markdown cannot be combined with --text, --file, or --file-url",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        if is_mass:
+            typer.echo(
+                "--rich-markdown is only supported for targeted sends, not mass mode",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        try:
+            rich_markdown_text = rich_markdown.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            typer.echo(
+                f"--rich-markdown file is not valid UTF-8: {rich_markdown}",
+                err=True,
+            )
+            raise typer.Exit(code=2) from exc
+        except OSError as exc:
+            typer.echo(f"--rich-markdown file cannot be read: {exc}", err=True)
+            raise typer.Exit(code=2) from exc
+        if not rich_markdown_text.strip():
+            typer.echo(f"--rich-markdown file is empty: {rich_markdown}", err=True)
+            raise typer.Exit(code=2)
+        if len(rich_markdown_text) > MAX_RICH_MARKDOWN_CHARS:
+            typer.echo(
+                f"--rich-markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
+                f"({len(rich_markdown_text)} given)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+
     # Media, scheduling, and reply threading are targeted-only; mass mode
     # iterates many chats and has no single attachment/schedule/reply semantics.
     if is_mass and (has_attachments or has_schedule_input or reply_to is not None):
@@ -3462,10 +3512,14 @@ def messages_send(
         effective_folder_id = folder_id
 
     if dry_run:
-        if not (text and text.strip()) and not has_attachments:
+        if (
+            not (text and text.strip())
+            and not has_attachments
+            and rich_markdown_text is None
+        ):
             typer.echo(
-                "messages send requires non-empty --text or at least one "
-                "--file/--file-url attachment",
+                "messages send requires non-empty --text, --rich-markdown, or at "
+                "least one --file/--file-url attachment",
                 err=True,
             )
             raise typer.Exit(code=2)
@@ -3660,6 +3714,7 @@ def messages_send(
             rch_id = info["telegram_chat_id"]
             rch_name = info.get("chat_name")
             rtopic_id = info["telegram_topic_id"]
+            is_rich = rich_markdown_text is not None
             resolved_payload = {
                 "mode": "targeted",
                 "telegram_chat_id": rch_id,
@@ -3678,6 +3733,14 @@ def messages_send(
                 ),
                 "scheduled": resolved_schedule_at is not None,
                 "reply_to_message_id": reply_to,
+                # The article body can be up to 32k chars and is the payload of
+                # the send, not a routing decision — report a marker + length
+                # and the source path, never the markdown itself.
+                "rich_markdown": is_rich,
+                "rich_markdown_chars": (
+                    len(rich_markdown_text) if is_rich else None
+                ),
+                "rich_markdown_file": (str(rich_markdown) if is_rich else None),
             }
             if chat_name is not None:
                 resolved_payload["folder_name"] = resolved_folder_name
@@ -3686,13 +3749,18 @@ def messages_send(
                 if rtopic_id is not None
                 else f"chat {rch_id}"
             )
+            what = (
+                f"rich message ({len(rich_markdown_text or '')} chars)"
+                if is_rich
+                else "message"
+            )
             payload = {
                 "status": "dry_run",
                 "dry_run": True,
                 "command": "messages.send",
-                "would": f"send message to {target}",
+                "would": f"send {what} to {target}",
                 "resolved": resolved_payload,
-                "planned_actions": [f"would send to {target}"],
+                "planned_actions": [f"would send {what} to {target}"],
                 "warnings": [],
             }
         typer.echo(json.dumps(payload, sort_keys=True, default=str))
@@ -3774,6 +3842,7 @@ def messages_send(
                 file_urls=file_urls,
                 schedule_at=resolved_schedule_at,
                 reply_to_message_id=reply_to,
+                rich_markdown=rich_markdown_text,
             )
             result_single, op = await send_message(
                 backend=message_backend,

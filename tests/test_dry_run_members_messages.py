@@ -792,6 +792,122 @@ def test_cli_messages_send_dry_run_missing_topic_errors(
     assert _operation_count(store) == 0
 
 
+def test_cli_messages_send_dry_run_rich_markdown_envelope(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rich send previews the markdown as a marker + length, not its body."""
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    markdown = "# Заголовок\n\n> цитата\n"
+    md_file = tmp_path / "article.md"
+    md_file.write_text(markdown, encoding="utf-8")
+    backend = RecordingMessageBackend()
+    folder_backend = RecordingFolderBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert_dry_run_envelope(
+        payload,
+        command="messages.send",
+        resolved_keys=(
+            "mode",
+            "telegram_chat_id",
+            "rich_markdown",
+            "rich_markdown_chars",
+        ),
+    )
+    resolved = payload["resolved"]
+    assert resolved["rich_markdown"] is True
+    assert resolved["rich_markdown_chars"] == len(markdown)
+    # The article body itself is never echoed back.
+    assert markdown not in json.dumps(payload, ensure_ascii=False)
+    assert "rich message" in payload["would"]
+    assert any("rich message" in a for a in payload["planned_actions"])
+    assert backend.sent == []
+    assert _operation_count(store) == 0
+
+
+def test_cli_messages_send_dry_run_plain_marks_rich_false(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = RecordingMessageBackend()
+    folder_backend = RecordingFolderBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--text",
+            "hello",
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["resolved"]["rich_markdown"] is False
+    assert payload["resolved"]["rich_markdown_chars"] is None
+
+
+def test_cli_messages_send_dry_run_rich_markdown_missing_file_errors(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bad ``--rich-markdown`` input fails fast in dry-run too (exit 2)."""
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = RecordingMessageBackend()
+    folder_backend = RecordingFolderBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_message_backends(monkeypatch, backend, folder_backend, store)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli_main.app,
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(tmp_path / "nope.md"),
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ],
+    )
+    assert result.exit_code == 2, result.stdout
+    assert _operation_count(store) == 0
+
+
 # ---------------------------------------------------------------------------
 # messages send (mass)
 # ---------------------------------------------------------------------------

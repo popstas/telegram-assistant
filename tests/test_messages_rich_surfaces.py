@@ -7,18 +7,28 @@ mass mode), the domain-level length bound, and the shared WRITE gate.
 Body-shape violations arrive as FastAPI's ``422`` (the model validator runs
 before the route), while domain-level ``ValueError``s (empty / oversize
 markdown) map to ``400`` through the route's existing handler.
+
+The CLI section covers ``messages send --rich-markdown <file.md>``: the file is
+read as UTF-8 and handed to the same domain op, and every input error (bad
+combination, missing/unreadable/empty/oversize file) fails fast with exit code
+2 before any backend is opened.
 """
 
 from __future__ import annotations
 
+import json
 import tempfile
 import textwrap
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
+from typer.testing import CliRunner
 
+from telegram_assistant.cli import main as cli_main
 from telegram_assistant.config import load_config_from_text
+from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.http_api import create_app
 from telegram_assistant.messages import MAX_RICH_MARKDOWN_CHARS
 from telegram_assistant.persistence import OperationStore
@@ -327,3 +337,383 @@ def test_http_rich_send_allowed_by_wildcard_write() -> None:
     )
     assert resp.status_code == 200, resp.text
     assert backend.sent[0]["rich_markdown"] == SAMPLE_MARKDOWN
+
+
+# ---------------------------------------------------------------------------
+# CLI — helpers
+# ---------------------------------------------------------------------------
+
+
+class CliRecordingMessageBackend(RecordingMessageBackend):
+    """Same recorder, plus the topic listing the CLI resolves names against."""
+
+
+class CliLegacyMessageBackend:
+    """A backend whose signature predates ``rich_markdown``.
+
+    Pins the only-when-set contract through the CLI: a plain ``--text`` send
+    must not start passing ``rich_markdown=None`` down, or this raises
+    ``TypeError``.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def send_message(self, *, chat_id: int, text: str, topic_id: int | None = None) -> int:
+        self.sent.append({"chat_id": chat_id, "text": text, "topic_id": topic_id})
+        return 555
+
+    async def list_topics(self, *, chat_id: int) -> list[TopicSummary]:
+        return []
+
+
+class CliFolderBackend:
+    def __init__(self) -> None:
+        self.snapshot = FolderSnapshot(
+            folder_id=2,
+            folder_name="Planfix clients",
+            chats=[FolderChat(chat_id=-100, title="Client chat")],
+        )
+
+    async def list_folders(self) -> list[FolderSnapshot]:
+        return [self.snapshot]
+
+
+def _patch_cli_backends(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: Any,
+    store: OperationStore,
+) -> None:
+    class _FakeManager:
+        async def disconnect(self) -> None:
+            return None
+
+    def _factory(config_path: Path | None) -> Any:
+        from telegram_assistant.config import load_config
+
+        config = load_config(config_path)
+        folder_backend = CliFolderBackend()
+
+        async def _open() -> Any:
+            # Production returns (message_backend, topic_backend, folder_backend);
+            # the fake doubles as message and topic backend.
+            return backend, backend, folder_backend
+
+        return config, _FakeManager(), store, _open
+
+    monkeypatch.setattr(cli_main, "_build_message_backends", _factory)
+
+
+def _write_config(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "config.yml"
+    path.write_text(body)
+    return path
+
+
+def _write_markdown(tmp_path: Path, body: str, name: str = "article.md") -> Path:
+    path = tmp_path / name
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def _run_cli(args: list[str]) -> Any:
+    return CliRunner().invoke(cli_main.app, args)
+
+
+def _cli_output(result: Any) -> str:
+    """Click 8.3 keeps stderr separate; error messages go there."""
+    return (result.stdout or "") + (result.stderr or "")
+
+
+# ---------------------------------------------------------------------------
+# CLI — happy paths
+# ---------------------------------------------------------------------------
+
+
+def test_cli_rich_send_reads_file_and_passes_markdown(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    # Non-ASCII body: the file must be read as UTF-8, not the platform default.
+    markdown = "# Заголовок\n\n> цитата — 🚀\n"
+    md_file = _write_markdown(tmp_path, markdown)
+    backend = CliRecordingMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--operation-id",
+            "cli-rich-1",
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["mode"] == "targeted"
+    assert payload["telegram_message_id"] == 777
+    assert backend.sent[0]["rich_markdown"] == markdown
+    assert backend.sent[0]["text"] == ""
+
+
+def test_cli_rich_send_allows_topic_and_schedule(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    md_file = _write_markdown(tmp_path, SAMPLE_MARKDOWN)
+    backend = CliRecordingMessageBackend(
+        topics_per_chat={-100: [TopicSummary(topic_id=42, title="Documents")]}
+    )
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--topic-name",
+            "Documents",
+            "--rich-markdown",
+            str(md_file),
+            "--delay",
+            "10m",
+            "--operation-id",
+            "cli-rich-2",
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 0, result.stdout
+    call = backend.sent[0]
+    assert call["rich_markdown"] == SAMPLE_MARKDOWN
+    assert call["topic_id"] == 42
+    assert call["schedule_at"] is not None
+
+
+def test_cli_plain_send_still_omits_rich_markdown(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = CliLegacyMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--text",
+            "hello",
+            "--operation-id",
+            "cli-plain-1",
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 0, result.stdout
+    assert backend.sent[0]["text"] == "hello"
+
+
+# ---------------------------------------------------------------------------
+# CLI — exclusivity (exit code 2, nothing sent)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        pytest.param(["--text", "hello"], id="text"),
+        pytest.param(["--file", "/tmp/whatever.jpg"], id="file"),
+        pytest.param(["--file-url", "https://example.com/a.jpg"], id="file_url"),
+    ],
+)
+def test_cli_rich_send_rejects_conflicting_inputs(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra: list[str],
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    md_file = _write_markdown(tmp_path, SAMPLE_MARKDOWN)
+    backend = CliRecordingMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            *extra,
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 2, _cli_output(result)
+    assert "--rich-markdown" in _cli_output(result)
+    assert backend.sent == []
+
+
+def test_cli_rich_send_rejects_mass_mode(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    md_file = _write_markdown(tmp_path, SAMPLE_MARKDOWN)
+    backend = CliRecordingMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--topic-name",
+            "Daily",
+            "--rich-markdown",
+            str(md_file),
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 2, _cli_output(result)
+    assert "mass mode" in _cli_output(result)
+    assert backend.sent == []
+
+
+# ---------------------------------------------------------------------------
+# CLI — file errors (exit code 2, nothing sent)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_rich_send_missing_file_errors(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    backend = CliRecordingMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(tmp_path / "nope.md"),
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 2, _cli_output(result)
+    assert "--rich-markdown" in _cli_output(result)
+    assert backend.sent == []
+
+
+def test_cli_rich_send_empty_file_errors(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    md_file = _write_markdown(tmp_path, "   \n\n")
+    backend = CliRecordingMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 2, _cli_output(result)
+    assert "empty" in _cli_output(result)
+    assert backend.sent == []
+
+
+def test_cli_rich_send_non_utf8_file_errors(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    md_file = tmp_path / "latin1.md"
+    md_file.write_bytes(b"# Titre\n\ncaf\xe9\n")
+    backend = CliRecordingMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 2, _cli_output(result)
+    assert "UTF-8" in _cli_output(result)
+    assert backend.sent == []
+
+
+def test_cli_rich_send_oversize_file_errors(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    md_file = _write_markdown(tmp_path, "x" * (MAX_RICH_MARKDOWN_CHARS + 1))
+    backend = CliRecordingMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 2, _cli_output(result)
+    assert str(MAX_RICH_MARKDOWN_CHARS) in _cli_output(result)
+    assert backend.sent == []
