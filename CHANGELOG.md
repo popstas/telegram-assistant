@@ -41,6 +41,10 @@
 
 - Pin bump-my-version to 1.x to fix release bump crash
 
+### Testing
+
+- Verify PR #17 acceptance criteria and knob-less config defaults
+
 ### Task
 
 - Clear completed items from TODO

@@ -36,7 +36,7 @@ Runs on MTProto via Telethon under a technical Telegram user account.
 - **Queue & operations** — a worker performs Telegram actions with throttling and `FLOOD_WAIT` handling; inspect and retry queued operations.
 - **Idempotency** — group/topic creation is idempotent on a generic `external_ref`.
 - **Surfaces** — one domain layer behind three interfaces: HTTP API (FastAPI, bearer auth), CLI (`telegram-assistant`), and an optional MCP server (Streamable HTTP with local OAuth).
-- **Access control** — deny-by-default `read` / `write` / `delete` rules per chat, chat list, folder, or wildcard, hot-reloaded from config within ~2s.
+- **Access control** — deny-by-default `read` / `write` / `delete` rules per chat, chat list, folder (by name or id), or wildcard, hot-reloaded from config within ~2s.
 - **Planfix plugin** — optional, off by default: `/task <ref>` service messages and `@planfix_bot` welcome cleanup for the Planfix ↔ Telegram integration.
 
 > **Just watching and forwarding messages?** If you only need to *match and
@@ -94,10 +94,10 @@ Top-level:
 - `messages forward` — forward one or more messages (`--message-id`, repeatable) from a source (`--from-chat-id`/`--from-entity`) to a target (`--to-chat-id`/`--to-entity`, or the usual target aliases `--chat-id`/`--chat-name`/`--entity`); READ-gated on the source, WRITE-gated on the target.
 - `messages delete` — delete one or more messages (`--message-id`, repeatable) from a chat (DELETE-gated). `--revoke`/`--no-revoke` toggles delete-for-everyone (default revoke); `--dry-run` resolves + authorizes without deleting; `--force` is carried for surface consistency. Honors `telegram.access.delete_only_session_messages` (default `true`, overridable per access rule): when active, only messages this server process sent may be deleted.
 - `messages edit` — edit the text/caption of a sent message (`--message-id`, `--text`, WRITE-gated; `--dry-run`). Honors `telegram.access.edit_only_session_messages` (default `true`, overridable per access rule): when active, only messages this server process sent may be edited. Telegram edit limits (own messages only, ~48h window, text must change) surface as clear domain errors, not 500s.
-- `messages pin` — pin a message in a chat (`--message-id`, WRITE-gated; `--silent` to pin without notifying, `--pm-oneside` to pin only on your side in a private chat, `--dry-run`).
-- `messages unpin` — unpin a message (`--message-id`) or every pinned message (`--all`) in a chat (WRITE-gated; `--dry-run`).
-- `messages download` — download the media/document/voice of an existing message to a local server-side file (`--message-id`, READ-gated). Choose exactly one of `--out` (target file) / `--dir` (target directory, keeps the original filename); `--max-bytes` rejects oversized media; `--dry-run` reports the planned path without downloading.
-- `messages search` — text-search a chat's messages newest-first (`--query` required, READ-gated). Optional `--from` (sender), `--limit` (count), `--minutes` (client-side time window like `recent`), `--topic-id` (search inside one forum topic). Read-only, no `--dry-run`.
+- `messages pin` — pin a message in a chat (`--message-id`, WRITE-gated; `--silent` to pin without notifying, `--pm-oneside` to pin only on your side in a private chat, `--dry-run`). Pin/unpin calls are paced per chat (`telegram.pin_min_interval_seconds`, default `2.0`) and retry `FLOOD_WAIT` automatically; a paced-out call prints the next allowed attempt time.
+- `messages unpin` — unpin a message (`--message-id`) or every pinned message (`--all`) in a chat (WRITE-gated; `--dry-run`). Shares the per-chat pin pacing gate.
+- `messages download` — download the media/document/voice of an existing message to a local server-side file (`--message-id`, READ-gated). Choose exactly one of `--out` (target file) / `--dir` (target directory, keeps the original filename); `--max-bytes` rejects oversized media; `--dry-run` reports the planned path without downloading. Downloads never overwrite: a taken name becomes `report (1).pdf`, `report (2).pdf`, … and the response returns the actual path written.
+- `messages search` — text-search a chat's messages newest-first (`--query` required, READ-gated). Optional `--from` (sender), `--limit` (count), `--topic-id` (search inside one forum topic), and one time scope — either `--minutes` (relative window like `recent`) or the fixed inclusive range `--from-date` + `--to-date` (ISO-8601 with timezone, both required together, not combinable with `--minutes`). All filters go to Telegram in a single server-side search request and are paged until `--limit` matches are collected; the output echoes the applied UTC bounds. Read-only, no `--dry-run`.
 
 `notifications` — mute and unmute chat/contact notifications:
 
@@ -120,7 +120,7 @@ Mutating CLI commands support `--dry-run` before the real run. Local `--file` at
 
 `telegram.access` in `data/config.yml` gates which chats/folders this instance may read, write, or delete in. Omitting it means allow-all (backward compatible); once present it is deny-by-default. Capabilities are **independent** — `read`, `write`, and `delete` each grant *only* themselves, so `write` no longer implies `read`. Matching rules combine as a set-union of capabilities. Denials surface as a non-zero CLI exit (code 3) and `HTTP 403` on the API.
 
-Each rule names exactly one *target kind* — a single chat (`chat`/`--entity`), a list of chats (`chats`), a folder (`folder`), or the wildcard (`all`) — and a capability set via `permissions: [read, write, delete]` (or the legacy singular `permission`, default `write`). Legacy single-target / singular-permission rules still parse and apply. A common shape is a wildcard `all: read` baseline layered with targeted `[write]` or `[write, delete]` rules:
+Each rule names exactly one *target kind* — a single chat (`chat`/`--entity`), a list of chats (`chats`), a folder by name (`folder`), a folder by id (`folder_id`), or the wildcard (`all`) — and a capability set via `permissions: [read, write, delete]` (or the legacy singular `permission`, default `write`). Legacy single-target / singular-permission rules still parse and apply. A common shape is a wildcard `all: read` baseline layered with targeted `[write]` or `[write, delete]` rules:
 
 ```yaml
 telegram:
@@ -131,8 +131,10 @@ telegram:
     rules:
       - all: true
         permissions: [read]
-      - folder: "Planfix clients"
+      - folder: "Planfix clients"         # by name: unions *all* folders with this title
         permissions: [read, write]
+      - folder_id: 5                      # by id: exactly one folder, even if the title repeats
+        permissions: [read, write, delete]
       - chats: ["@some_chat", -1001234567890]
         permissions: [read, write, delete]
       - chat: me                          # per-rule exception: prune your own Saved Messages
@@ -141,11 +143,13 @@ telegram:
         edit_only_session_messages: false
 ```
 
+Telegram allows **two folders with the same title**. A `folder:` rule is therefore a union: it grants on every chat in *any* folder with that name — safe by construction, but not selective. To target exactly one of two same-named folders, use `folder_id:` with the folder's numeric id (`folders inspect` prints it). Both kinds count as folder-level for `delete_only_session_messages` / `edit_only_session_messages` specificity, and both may carry their own per-rule override. The `access add` CLI writes `--entity` / `--folder` / `--all` rules; a `folder_id` rule is added by editing `data/config.yml` directly (hot-reload picks it up within ~2s).
+
 `delete_only_session_messages` also accepts a **per-rule override**: any rule may set it to `true`/`false` for the chats/folders it targets, keeping the safe global default while relaxing (or tightening) a specific target. The effective value for a delete is resolved by specificity — chat rule > folder rule > `all` rule > policy default — and a restrictive `true` wins over `false` when rules at the same level conflict.
 
 `edit_only_session_messages` (default `true`) is the exact mirror for `messages edit`: when active, only messages this server process sent (tracked in an in-memory registry, fresh per CLI run) may be edited. It accepts the same per-rule override with the same specificity resolution (chat > folder > `all` > policy default, restrictive `true` wins). Set it `false` (globally or per rule) to allow editing arbitrary own messages.
 
-`folder_cache_ttl` (seconds, default `300`; `0` disables persistent caching) tunes the folder-membership cache that speeds up access checks when any `folder:` rule is present. Without it, every gated operation would re-fetch each folder's chat membership from Telegram; instead the membership map is built once from `InputPeer` ids (no per-chat `get_entity`) and persisted to SQLite. A subsequent call within the TTL reuses the cached map — the big win for the CLI, where each invocation is a fresh process. When a refetch fails, a stale cached map is served (bounded by TTL + the outage window); the cache is cleared automatically on config hot-reload so access-rule edits apply cleanly.
+`folder_cache_ttl` (seconds, default `300`; `0` disables persistent caching) tunes the folder-membership cache that speeds up access checks when any `folder:` / `folder_id:` rule is present. Without it, every gated operation would re-fetch each folder's chat membership from Telegram; instead the membership map is built once from `InputPeer` ids (no per-chat `get_entity`), keyed by **folder id** (so same-named folders stay separate), and persisted to SQLite. A subsequent call within the TTL reuses the cached map — the big win for the CLI, where each invocation is a fresh process. When a refetch fails, a stale cached map is served (bounded by TTL + the outage window); the cache is cleared automatically on config hot-reload so access-rule edits apply cleanly.
 
 Config edits are hot-reloaded: a `watchdog` observer on `data/config.yml` re-runs the loader with a 2s debounce and atomically swaps the live config on success (a parse/validation error keeps the last-good config), so access-rule changes apply within ~2s without restarting the server.
 
@@ -174,9 +178,9 @@ All `/telegram/*` endpoints require `Authorization: Bearer <token>` and use the 
 - `POST /telegram/messages/forward` forwards `message_ids` from `from_chat_id`/`from_entity` to `to_chat_id`/`to_entity`.
 - `POST /telegram/messages/delete` deletes `message_ids` from a target chat (DELETE-gated). Optional `revoke` (default `true`), `dry_run`, and `force`. Honors `telegram.access.delete_only_session_messages`; the backend factory returns `503` when the session is not connected.
 - `POST /telegram/messages/edit` edits the text/caption of a sent message (`message_id`, `text`, WRITE-gated). Optional `dry_run`. Honors `telegram.access.edit_only_session_messages`; Telegram edit-limit errors map to `400`, access denial to `403`, and the backend factory returns `503` when the session is not connected.
-- `POST /telegram/messages/pin` pins a message (`message_id`, WRITE-gated) with optional `silent` and `pm_oneside`; `POST /telegram/messages/unpin` unpins one `message_id` or, with `unpin_all: true`, every pinned message. Both accept `dry_run` and return `503` when the session is not connected.
-- `POST /telegram/messages/download` downloads an existing message's media to a **server-side** file (READ-gated). Body carries `message_id` plus optional `out_dir` and `max_bytes`; `out_dir` is confined to `telegram.download_root` (default: the system temp dir) — a relative value is resolved inside the root, one escaping it is rejected with `400`, and omitting it uses the root — so a READ-only caller cannot pick an arbitrary write location. The response returns the saved path, size, and mime (no base64/streaming in this iteration). Returns `503` when the session is not connected.
-- `GET /telegram/messages/search` text-searches a chat newest-first (READ-gated); query params mirror `recent` (`query` required, plus `from_user`, `limit`, `minutes`, `topic_id`). Returns `503` when the session is not connected.
+- `POST /telegram/messages/pin` pins a message (`message_id`, WRITE-gated) with optional `silent` and `pm_oneside`; `POST /telegram/messages/unpin` unpins one `message_id` or, with `unpin_all: true`, every pinned message. Both accept `dry_run` and return `503` when the session is not connected. Both are paced per chat (`telegram.pin_min_interval_seconds`) and retry `FLOOD_WAIT` internally; when the retry budget is exhausted the flood-wait response body carries `retry_after_seconds`/`retry_at` and the standard `Retry-After` header.
+- `POST /telegram/messages/download` downloads an existing message's media to a **server-side** file (READ-gated). Body carries `message_id` plus optional `out_dir` and `max_bytes`; `out_dir` is confined to `telegram.download_root` (default: the system temp dir) — a relative value is resolved inside the root, one escaping it is rejected with `400`, and omitting it uses the root — so a READ-only caller cannot pick an arbitrary write location. An existing file is never overwritten: the download goes to the first free `name (1).ext` and the response's `path` is the file actually written (plus size and mime; no base64/streaming in this iteration). Returns `503` when the session is not connected.
+- `GET /telegram/messages/search` text-searches a chat newest-first (READ-gated); query params mirror `recent` (`query` required, plus `from_user`, `limit`, `minutes`, `topic_id`) and add the fixed inclusive range `from_date`/`to_date` (ISO-8601 with timezone, required together, mutually exclusive with `minutes`; invalid ranges → `400`). The response echoes the applied bounds normalised to UTC. Returns `503` when the session is not connected.
 - `POST /telegram/notifications/mute` and `/telegram/notifications/unmute` mute or unmute a target chat/contact; mute accepts positive `duration_hours`.
 - `DELETE /telegram/folders/{folder_name}/chats` removes `chat_id`, `chat_name`, or `entity` from a folder and returns `already_absent` when no change was needed.
 
@@ -220,10 +224,10 @@ MCP tool catalog:
 | `telegram_messages_forward` | `from_chat_id`/`from_entity`, `to_chat_id`/`to_entity`, `message_ids`, `operation_id` |
 | `telegram_messages_delete` | `telegram_chat_id`/`entity`, `message_ids`, `revoke`, `dry_run`, `force`; gated on DELETE, honors `delete_only_session_messages` |
 | `telegram_messages_edit` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `text`, `dry_run`; WRITE-gated, honors `edit_only_session_messages` |
-| `telegram_messages_pin` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `silent`, `pm_oneside`, `dry_run`; WRITE-gated |
-| `telegram_messages_unpin` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id` or `unpin_all`, `dry_run`; WRITE-gated |
-| `telegram_messages_download` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `out_dir` (confined to `telegram.download_root`), `max_bytes`, `dry_run`; READ-gated, writes a server-side file (returns saved path/size/mime, no byte streaming) |
-| `telegram_messages_search` | `chat_id`/`entity`, `query`, `from_user`, `limit`, `minutes`, `topic_id`; READ-gated, newest-first |
+| `telegram_messages_pin` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `silent`, `pm_oneside`, `dry_run`; WRITE-gated, per-chat paced, flood-wait errors carry `retry_after_seconds`/`retry_at` |
+| `telegram_messages_unpin` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id` or `unpin_all`, `dry_run`; WRITE-gated, shares the pin pacing gate |
+| `telegram_messages_download` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `out_dir` (confined to `telegram.download_root`), `max_bytes`, `dry_run`; READ-gated, writes a server-side file without ever overwriting (`name (1).ext` on collision; returns the saved path/size/mime, no byte streaming) |
+| `telegram_messages_search` | `chat_id`/`entity`, `query`, `from_user`, `limit`, `topic_id`, and either `minutes` or the inclusive `from_date`/`to_date` range (aware datetimes, required together); READ-gated, newest-first, echoes the applied UTC bounds |
 | `telegram_messages_react` | `telegram_chat_id`/`entity`/`chat_name` + `folder_name`, `message_id`, `emoji` or `clear` |
 | `telegram_groups_create` | `title`, `about`, `admins`, `members`, `managers` (alias of `members`), `contacts` (`[{phone, name}]` — imported to contacts then added), `folder_name`/`folder_id`, `external_ref`, `topics_layout`, reserve/skip flags |
 | `telegram_groups_rename` | `new_title`, `telegram_chat_id`/`entity`/`chat_name` + `folder_name`/`folder_id`, optional `reason`; WRITE-gated, idempotent by target title |
@@ -315,11 +319,18 @@ telegram:
 
 Leave it unset (or remove the line) to connect directly.
 
-`telegram.download_root` confines where remote (HTTP/MCP) `messages download` calls may write. It defaults to the system temp directory; a caller-supplied `out_dir` is resolved against this root and rejected when it escapes, so a READ-only remote identity cannot pick an arbitrary write location. The CLI (local, trusted) is not confined.
+`telegram.download_root` confines where remote (HTTP/MCP) `messages download` calls may write. It defaults to the system temp directory; a caller-supplied `out_dir` is resolved against this root and rejected when it escapes, so a READ-only remote identity cannot pick an arbitrary write location. The CLI (local, trusted) is not confined. Regardless of surface, a download never overwrites an existing file — the target name is claimed atomically and a taken name becomes `report (1).pdf`, `report (2).pdf`, … — and a missing target directory is created.
 
 ```yaml
 telegram:
   download_root: "/data/downloads"   # default: the system temp dir
+```
+
+`telegram.pin_min_interval_seconds` paces `messages pin` / `messages unpin`. Telegram answers rapid pin bursts with `FLOOD_WAIT`, so the server enforces a minimum interval between two pin-ops on the same chat before calling Telegram, and sleeps through + retries a `FLOOD_WAIT` within a bounded budget. The gate lives in SQLite (`rate_gate` table), so separate CLI processes and the HTTP/MCP server pace against each other rather than each keeping its own timer. When the retry budget is exhausted — or a single wait exceeds the internal cap — the error reports `retry_after_seconds` / the next allowed attempt time instead of blocking.
+
+```yaml
+telegram:
+  pin_min_interval_seconds: 2.0   # default; 0 disables pacing
 ```
 
 Defaults applied to new supergroups live under `telegram.defaults`:
