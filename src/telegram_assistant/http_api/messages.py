@@ -66,6 +66,7 @@ from telegram_assistant.messages import (
     get_recent_messages,
     make_url_downloader,
     mass_send_message,
+    normalize_search_range,
     pin_message,
     resolve_schedule_at,
     retry_after_details,
@@ -1436,6 +1437,8 @@ def build_router() -> APIRouter:
         limit: int = 20,
         minutes: int | None = None,
         topic_id: int | None = None,
+        from_date: datetime | None = None,
+        to_date: datetime | None = None,
     ) -> dict[str, Any]:
         """Text-search a chat's messages, newest-first (READ-gated).
 
@@ -1445,6 +1448,13 @@ def build_router() -> APIRouter:
         ``from_user`` optionally narrows to one sender, ``topic_id`` scopes the
         search to one forum topic, and ``minutes`` restricts the result to
         messages newer than ``now - minutes`` (composed with ``limit``).
+
+        ``from_date``/``to_date`` are the fixed-range alternative to ``minutes``
+        (ISO-8601, both required together, must carry a timezone, inclusive).
+        Range validation is the shared domain one
+        (:func:`normalize_search_range`), so a naive/one-sided/inverted range or
+        one combined with ``minutes`` is a 400 with the same message on every
+        surface. The response echoes the bounds normalised to UTC.
         """
         if (chat_id is None) == (entity is None):
             raise HTTPException(
@@ -1466,6 +1476,16 @@ def build_router() -> APIRouter:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="minutes must be a positive integer",
             )
+        # Validated before the backend/entity lookup: a bad range must not cost
+        # a Telegram round-trip.
+        try:
+            applied_range = normalize_search_range(
+                from_date=from_date, to_date=to_date, minutes=minutes
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
 
         backend = _search_backend_or_503(request)
         if entity is not None:
@@ -1485,6 +1505,8 @@ def build_router() -> APIRouter:
                 limit=limit,
                 minutes=minutes,
                 topic_id=topic_id,
+                from_date=from_date,
+                to_date=to_date,
                 authorizer=authorizer,
             )
         except AccessDenied as exc:
@@ -1503,6 +1525,12 @@ def build_router() -> APIRouter:
             "limit": limit,
             "minutes": minutes,
             "topic_id": topic_id,
+            "from_date": (
+                applied_range[0].isoformat() if applied_range is not None else None
+            ),
+            "to_date": (
+                applied_range[1].isoformat() if applied_range is not None else None
+            ),
             "count": len(messages),
             "messages": [m.to_dict() for m in messages],
         }
