@@ -51,6 +51,14 @@ from telegram_assistant.persistence.store import OperationStore
 from telegram_assistant.topics import TopicBackend, TopicSummary
 from telegram_assistant.worker.queue import FloodWaitError
 
+#: Server-side ceiling for a rich message's markdown source, in characters.
+#: Telegram accepts exactly this many (verified in the Task 1 spike:
+#: 32 768 was delivered, 32 769 answered ``RICH_MESSAGE_TEXT_TOO_LONG``), so
+#: the bound is inclusive. Everything else about the markdown — block count,
+#: nesting, table width — is left to the server, whose errors are more
+#: authoritative than any local lint.
+MAX_RICH_MARKDOWN_CHARS = 32_768
+
 
 class ScheduleError(ValueError):
     """Invalid scheduling input — bad delay, conflicting modes, or a past time.
@@ -238,6 +246,11 @@ class MessageBackend(Protocol):
     Return value is a single message id for a plain/text send and a list of
     ids for an album (multiple attachments). The service normalises both into
     :class:`SendMessageResult`.
+
+    ``rich_markdown`` sends a Telegram *rich message* (article) whose markdown
+    source the server parses itself; it is mutually exclusive with ``text`` and
+    ``files``, and — like the other optional kwargs — the service only passes it
+    when set, so backends predating rich sends keep working.
     """
 
     async def send_message(
@@ -249,6 +262,7 @@ class MessageBackend(Protocol):
         files: tuple[str, ...] = (),
         schedule_at: datetime | None = None,
         reply_to_message_id: int | None = None,
+        rich_markdown: str | None = None,
     ) -> int | list[int]:
         ...
 
@@ -317,6 +331,13 @@ class SendMessageRequest:
     (``{filename, mime, content_b64}``); each is decoded to a temp file under
     ``base64_max_bytes`` (default 1 MB) and cleaned up after the send. They are
     appended to the attachment list after ``files`` and ``file_urls``.
+
+    ``rich_markdown`` turns the send into a Telegram *rich message* (article):
+    the markdown source is handed to the server, which parses it into the
+    article blocks (headings, tables, quotes, code, media by public URL). It is
+    mutually exclusive with ``text`` and every attachment kind, and is bounded
+    by :data:`MAX_RICH_MARKDOWN_CHARS`; targeting, ``topic_id``,
+    ``reply_to_message_id`` and ``schedule_at`` all apply as usual.
     """
 
     telegram_chat_id: int
@@ -331,6 +352,7 @@ class SendMessageRequest:
     base64_max_bytes: int = DEFAULT_MAX_BASE64_BYTES
     schedule_at: datetime | None = None
     reply_to_message_id: int | None = None
+    rich_markdown: str | None = None
 
     @property
     def attachment_refs(self) -> tuple[str, ...]:
@@ -374,6 +396,17 @@ class SendMessageRequest:
                 else None
             ),
             "reply_to_message_id": self.reply_to_message_id,
+            # The markdown source is persisted like ``text`` (same redaction
+            # rule) so the audit trail shows what a replayed op actually sent.
+            "rich_markdown": (
+                None
+                if self.rich_markdown is None
+                else (
+                    redact_message_text(self.rich_markdown)
+                    if is_service_command(self.rich_markdown)
+                    else self.rich_markdown
+                )
+            ),
         }
 
 
@@ -485,7 +518,22 @@ async def send_message(
     send calls the backend exactly as before for backward compatibility.
     """
     has_text = bool(request.text and request.text.strip())
-    if not has_text and not request.has_attachments:
+    if request.rich_markdown is not None:
+        # A rich message carries its whole body in the markdown source; a
+        # caption or attachment alongside it would be silently dropped by the
+        # server, so reject the combination instead of half-sending it.
+        if has_text or request.has_attachments:
+            raise ValueError(
+                "rich_markdown cannot be combined with text or attachments"
+            )
+        if not request.rich_markdown.strip():
+            raise ValueError("rich_markdown must be non-empty")
+        if len(request.rich_markdown) > MAX_RICH_MARKDOWN_CHARS:
+            raise ValueError(
+                f"rich_markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
+                f"({len(request.rich_markdown)} given)"
+            )
+    elif not has_text and not request.has_attachments:
         raise ValueError(
             "send_message requires non-empty text or at least one attachment"
         )
@@ -563,6 +611,8 @@ async def send_message(
                 extra["schedule_at"] = request.schedule_at
             if request.reply_to_message_id is not None:
                 extra["reply_to_message_id"] = request.reply_to_message_id
+            if request.rich_markdown is not None:
+                extra["rich_markdown"] = request.rich_markdown
             raw_id = await backend.send_message(
                 chat_id=request.telegram_chat_id,
                 text=request.text,

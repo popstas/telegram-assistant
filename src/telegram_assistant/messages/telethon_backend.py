@@ -123,6 +123,43 @@ def _forwarded_message_ids(sent: Any, source_message_ids: tuple[int, ...]) -> li
     return forwarded
 
 
+def _import_rich_markdown_type() -> Any:
+    """Return ``InputRichMessageMarkdown``, or ``None`` on an older Telethon.
+
+    The rich-message constructor arrived in Telethon 1.44 (layer 227). Probing
+    for it here — rather than importing at module level — keeps the whole
+    adapter importable on an older build so only a rich send fails, and it
+    fails with a version hint instead of an ImportError at startup.
+    """
+    try:
+        from telethon.tl import types
+    except ImportError:  # pragma: no cover - telethon is a hard dependency
+        return None
+    return getattr(types, "InputRichMessageMarkdown", None)
+
+
+def _extract_rich_message_id(result: Any) -> int | None:
+    """Find the sent message's id in the raw ``Updates`` envelope.
+
+    ``UpdateMessageID`` is the reliable source — the spike saw it for both
+    private and channel peers — with the ``UpdateNew*Message`` variants as a
+    fallback for envelopes that omit it.
+    """
+    updates = getattr(result, "updates", None)
+    candidates = updates if isinstance(updates, list) else [result]
+    for update in candidates:
+        if type(update).__name__ == "UpdateMessageID":
+            message_id = getattr(update, "id", None)
+            if message_id is not None:
+                return int(message_id)
+    for update in candidates:
+        if type(update).__name__ in ("UpdateNewMessage", "UpdateNewChannelMessage"):
+            message_id = getattr(getattr(update, "message", None), "id", None)
+            if message_id is not None:
+                return int(message_id)
+    return None
+
+
 class TelethonMessageBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`MessageBackend`.
 
@@ -131,6 +168,12 @@ class TelethonMessageBackend:
     doubles as the caption when attachments are present and may be empty for a
     media-only send. ``FloodWaitError`` is translated so the worker queue can
     pause-and-retry instead of marking the operation as a generic failure.
+
+    A ``rich_markdown`` send (Telegram article) takes a separate path: the
+    high-level ``client.send_message`` has no ``rich_message`` parameter, so it
+    issues the raw ``messages.SendMessageRequest`` with an
+    ``InputRichMessageMarkdown`` body. The server parses the markdown; nothing
+    is validated or rewritten here beyond the domain-level checks.
     """
 
     def __init__(self, client: Any) -> None:
@@ -145,6 +188,7 @@ class TelethonMessageBackend:
         files: tuple[str, ...] = (),
         schedule_at: datetime | None = None,
         reply_to_message_id: int | None = None,
+        rich_markdown: str | None = None,
     ) -> int | list[int]:
         files = tuple(files)
         # ``reply_to`` carries either an explicit reply target or, in a forum,
@@ -153,6 +197,18 @@ class TelethonMessageBackend:
         reply_to = (
             reply_to_message_id if reply_to_message_id is not None else topic_id
         )
+        if rich_markdown is not None:
+            if files:
+                raise ValueError(
+                    "rich_markdown cannot be combined with file attachments"
+                )
+            return await self._send_rich_message(
+                chat_id=chat_id,
+                rich_markdown=rich_markdown,
+                topic_id=topic_id,
+                schedule_at=schedule_at,
+                reply_to_message_id=reply_to_message_id,
+            )
         try:
             if files:
                 kwargs: dict[str, Any] = {
@@ -179,6 +235,62 @@ class TelethonMessageBackend:
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
         return _message_ids(sent)
+
+    async def _send_rich_message(
+        self,
+        *,
+        chat_id: int,
+        rich_markdown: str,
+        topic_id: int | None,
+        schedule_at: datetime | None,
+        reply_to_message_id: int | None,
+    ) -> int:
+        from telegram_assistant.messages.service import MessageSendFailed
+
+        rich_type = _import_rich_markdown_type()
+        if rich_type is None:
+            raise MessageSendFailed(
+                "rich message send requires telethon>=1.44 (layer 227); "
+                "the installed Telethon has no InputRichMessageMarkdown"
+            )
+
+        from telethon.tl.functions.messages import SendMessageRequest
+        from telethon.tl.types import InputReplyToMessage
+
+        kwargs: dict[str, Any] = {}
+        if reply_to_message_id is not None:
+            # Replying inside a forum topic: the topic root rides along as
+            # ``top_msg_id`` so the reply stays in the topic.
+            kwargs["reply_to"] = InputReplyToMessage(
+                reply_to_msg_id=reply_to_message_id, top_msg_id=topic_id
+            )
+        elif topic_id is not None:
+            kwargs["reply_to"] = InputReplyToMessage(reply_to_msg_id=topic_id)
+        if schedule_at is not None:
+            kwargs["schedule_date"] = schedule_at
+
+        try:
+            peer = await self._client.get_input_entity(chat_id)
+            result = await self._client(
+                SendMessageRequest(
+                    peer=peer,
+                    # A rich message carries its body in ``rich_message``;
+                    # ``message`` must be empty (``random_id`` is auto-filled).
+                    message="",
+                    rich_message=rich_type(markdown=rich_markdown),
+                    **kwargs,
+                )
+            )
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+
+        message_id = _extract_rich_message_id(result)
+        if message_id is None:
+            raise MessageSendFailed(
+                "rich message send returned no message id in "
+                f"{type(result).__name__}"
+            )
+        return message_id
 
 
 class TelethonDeleteBackend:

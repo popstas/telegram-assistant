@@ -18,6 +18,8 @@ from telegram_assistant.folders import (
 )
 from telegram_assistant.http_api import create_app
 from telegram_assistant.messages import (
+    MAX_RICH_MARKDOWN_CHARS,
+    Base64Attachment,
     MassSendRequest,
     MessageSendFailed,
     MessageSendNeedsReview,
@@ -63,6 +65,7 @@ class FakeMessageBackend:
         files: tuple[str, ...] = (),
         schedule_at: Any = None,
         reply_to_message_id: int | None = None,
+        rich_markdown: str | None = None,
     ) -> int | list[int]:
         if self._fail_send:
             raise RuntimeError("telegram error")
@@ -79,6 +82,7 @@ class FakeMessageBackend:
                     "files": files,
                     "schedule_at": schedule_at,
                     "reply_to_message_id": reply_to_message_id,
+                    "rich_markdown": rich_markdown,
                     "id": ids[0],
                     "ids": ids,
                 }
@@ -94,6 +98,7 @@ class FakeMessageBackend:
                 "files": files,
                 "schedule_at": schedule_at,
                 "reply_to_message_id": reply_to_message_id,
+                "rich_markdown": rich_markdown,
                 "id": msg_id,
             }
         )
@@ -133,6 +138,27 @@ class MalformedMessageBackend(FakeMessageBackend):
             }
         )
         return self._returned
+
+
+class LegacySendBackend:
+    """Backend predating rich sends — its signature has no ``rich_markdown``.
+
+    Pins the only-when-set kwarg contract: a plain send must still reach a
+    backend that never learned about the newer kwargs.
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        topic_id: int | None = None,
+    ) -> int:
+        self.sent.append({"chat_id": chat_id, "text": text, "topic_id": topic_id})
+        return 7
 
 
 class FakeFolderBackend:
@@ -323,6 +349,234 @@ async def test_send_message_text_only_still_omits_media_kwargs(
     # No attachments recorded for a plain send.
     assert backend.sent[0]["files"] == ()
     assert backend.sent[0]["schedule_at"] is None
+    assert backend.sent[0]["rich_markdown"] is None
+
+
+async def test_send_message_text_only_reaches_legacy_backend(
+    store: OperationStore,
+) -> None:
+    """The only-when-set contract, proven against a signature that would raise
+    TypeError if the service passed the newer kwargs unconditionally."""
+    backend = LegacySendBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100, text="plain", operation_id="legacy"
+    )
+    result, _ = await send_message(backend=backend, store=store, request=req)
+    assert result.telegram_message_id == 7
+    assert backend.sent == [{"chat_id": -100, "text": "plain", "topic_id": None}]
+
+
+# ---------------------------------------------------------------------------
+# Domain tests — rich message send (markdown article)
+# ---------------------------------------------------------------------------
+
+RICH_MD = "# Title\n\nA paragraph.\n"
+
+
+async def test_send_message_rich_markdown_passed_to_backend(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="",
+        rich_markdown=RICH_MD,
+        operation_id="rich-1",
+    )
+    result, op = await send_message(backend=backend, store=store, request=req)
+
+    assert op.status is OperationStatus.COMPLETED
+    assert result.telegram_message_id is not None
+    assert result.is_service_command is False
+    call = backend.sent[0]
+    assert call["rich_markdown"] == RICH_MD
+    assert call["text"] == ""
+    assert call["files"] == ()
+    # The markdown source is persisted alongside the (empty) text so a replay
+    # audit shows what was actually sent.
+    assert op.request_payload["rich_markdown"] == RICH_MD
+
+
+async def test_send_message_rich_markdown_allows_topic_reply_and_schedule(
+    store: OperationStore,
+) -> None:
+    from datetime import UTC, datetime
+
+    backend = FakeMessageBackend()
+    when = datetime(2030, 1, 1, tzinfo=UTC)
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="",
+        rich_markdown=RICH_MD,
+        telegram_topic_id=42,
+        reply_to_message_id=11,
+        schedule_at=when,
+        operation_id="rich-topic",
+    )
+    result, _ = await send_message(backend=backend, store=store, request=req)
+
+    assert result.scheduled is True
+    call = backend.sent[0]
+    assert call["topic_id"] == 42
+    assert call["reply_to_message_id"] == 11
+    assert call["schedule_at"] == when
+    assert call["rich_markdown"] == RICH_MD
+
+
+async def test_send_message_rich_markdown_replays_same_operation_id(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    req = SendMessageRequest(
+        telegram_chat_id=-100,
+        text="",
+        rich_markdown=RICH_MD,
+        operation_id="rich-dup",
+    )
+    first, _ = await send_message(backend=backend, store=store, request=req)
+    backend2 = FakeMessageBackend()
+    second, _ = await send_message(backend=backend2, store=store, request=req)
+
+    assert second.replayed is True
+    assert backend2.sent == []
+    assert second.telegram_message_id == first.telegram_message_id
+
+
+async def test_send_message_rich_markdown_rejects_text(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    with pytest.raises(ValueError, match="rich_markdown"):
+        await send_message(
+            backend=backend,
+            store=store,
+            request=SendMessageRequest(
+                telegram_chat_id=-100,
+                text="plain",
+                rich_markdown=RICH_MD,
+                operation_id="rich-text",
+            ),
+        )
+    assert backend.sent == []
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"files": ("/data/a.png",)},
+        {"file_urls": ("https://example.com/a.png",)},
+        {
+            "base64_files": (
+                Base64Attachment(
+                    filename="a.txt", mime="text/plain", content_b64="aGk="
+                ),
+            )
+        },
+    ],
+    ids=["files", "file_urls", "base64_files"],
+)
+async def test_send_message_rich_markdown_rejects_attachments(
+    store: OperationStore, kwargs: dict[str, Any]
+) -> None:
+    backend = FakeMessageBackend()
+    with pytest.raises(ValueError, match="rich_markdown"):
+        await send_message(
+            backend=backend,
+            store=store,
+            request=SendMessageRequest(
+                telegram_chat_id=-100,
+                text="",
+                rich_markdown=RICH_MD,
+                operation_id="rich-att",
+                **kwargs,
+            ),
+        )
+    assert backend.sent == []
+
+
+@pytest.mark.parametrize("markdown", ["", "   \n\t "], ids=["empty", "blank"])
+async def test_send_message_rich_markdown_rejects_empty(
+    store: OperationStore, markdown: str
+) -> None:
+    backend = FakeMessageBackend()
+    with pytest.raises(ValueError, match="rich_markdown"):
+        await send_message(
+            backend=backend,
+            store=store,
+            request=SendMessageRequest(
+                telegram_chat_id=-100,
+                text="",
+                rich_markdown=markdown,
+                operation_id="rich-empty",
+            ),
+        )
+    assert backend.sent == []
+
+
+async def test_send_message_rich_markdown_rejects_over_limit(
+    store: OperationStore,
+) -> None:
+    backend = FakeMessageBackend()
+    with pytest.raises(ValueError, match="32768"):
+        await send_message(
+            backend=backend,
+            store=store,
+            request=SendMessageRequest(
+                telegram_chat_id=-100,
+                text="",
+                rich_markdown="x" * (MAX_RICH_MARKDOWN_CHARS + 1),
+                operation_id="rich-long",
+            ),
+        )
+    assert backend.sent == []
+
+
+async def test_send_message_rich_markdown_accepts_exact_limit(
+    store: OperationStore,
+) -> None:
+    """The server accepted exactly 32 768 chars in the Task 1 spike, so the
+    limit is inclusive."""
+    backend = FakeMessageBackend()
+    markdown = "x" * MAX_RICH_MARKDOWN_CHARS
+    result, _ = await send_message(
+        backend=backend,
+        store=store,
+        request=SendMessageRequest(
+            telegram_chat_id=-100,
+            text="",
+            rich_markdown=markdown,
+            operation_id="rich-max",
+        ),
+    )
+    assert result.telegram_message_id is not None
+    assert backend.sent[0]["rich_markdown"] == markdown
+
+
+async def test_send_message_rich_markdown_is_write_gated(
+    store: OperationStore,
+) -> None:
+    """The WRITE gate covers rich sends like any other send — no operation row
+    is created for a denied caller."""
+    from telegram_assistant.access import AccessDenied, Authorizer
+    from telegram_assistant.config.models import AccessConfig, AccessRule
+
+    authorizer = Authorizer(
+        AccessConfig(rules=[AccessRule(all=True, permission="read")])
+    )
+    backend = FakeMessageBackend()
+    with pytest.raises(AccessDenied):
+        await send_message(
+            backend=backend,
+            store=store,
+            authorizer=authorizer,
+            request=SendMessageRequest(
+                telegram_chat_id=-100,
+                text="",
+                rich_markdown=RICH_MD,
+                operation_id="rich-denied",
+            ),
+        )
+    assert backend.sent == []
 
 
 async def test_send_message_media_only(store: OperationStore) -> None:
