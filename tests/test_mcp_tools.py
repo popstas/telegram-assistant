@@ -12,7 +12,12 @@ from fastapi.testclient import TestClient
 from telegram_assistant.config import load_config_from_text
 from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.http_api import create_app
-from telegram_assistant.messages import DownloadedMedia, MediaInfo, RecentMessage
+from telegram_assistant.messages import (
+    MAX_RICH_MARKDOWN_CHARS,
+    DownloadedMedia,
+    MediaInfo,
+    RecentMessage,
+)
 from telegram_assistant.persistence import OperationStore
 from telegram_assistant.topics import TopicSummary
 from telegram_assistant.worker.queue import FloodWaitError
@@ -88,6 +93,40 @@ class FakeMessageBackend:
                 "topic_id": topic_id,
                 "files": files,
                 "schedule_at": schedule_at,
+            }
+        )
+        return 777
+
+
+RICH_MARKDOWN = "# Title\n\nBody paragraph.\n\n> quote\n"
+
+
+class FakeRichMessageBackend:
+    """Send backend that accepts the rich kwarg and records every call."""
+
+    def __init__(self) -> None:
+        self.sent: list[dict[str, Any]] = []
+
+    async def send_message(
+        self,
+        *,
+        chat_id: int,
+        text: str,
+        topic_id: int | None = None,
+        files: tuple[str, ...] = (),
+        schedule_at: object | None = None,
+        reply_to_message_id: int | None = None,
+        rich_markdown: str | None = None,
+    ) -> int:
+        self.sent.append(
+            {
+                "chat_id": chat_id,
+                "text": text,
+                "topic_id": topic_id,
+                "files": tuple(files),
+                "schedule_at": schedule_at,
+                "reply_to_message_id": reply_to_message_id,
+                "rich_markdown": rich_markdown,
             }
         )
         return 777
@@ -648,6 +687,161 @@ def test_mcp_send_message_drops_server_local_files_arg(
     assert result["isError"] is False
     assert len(backend.sent) == 1
     assert backend.sent[0]["files"] == ()
+
+
+def test_mcp_send_rich_markdown_reaches_backend(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeRichMessageBackend()
+    with _client(minimal_config_yaml, tmp_path, message_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {
+                "telegram_chat_id": -100123,
+                "rich_markdown": RICH_MARKDOWN,
+                "operation_id": "mcp-rich-1",
+            },
+        )
+
+    assert result["isError"] is False, result
+    assert result["structuredContent"]["telegram_message_id"] == 777
+    assert len(backend.sent) == 1
+    assert backend.sent[0]["rich_markdown"] == RICH_MARKDOWN
+    assert backend.sent[0]["text"] == ""
+
+
+def test_mcp_send_rich_markdown_with_topic_and_schedule(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeRichMessageBackend()
+    with _client(minimal_config_yaml, tmp_path, message_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {
+                "telegram_chat_id": -100123,
+                "telegram_topic_id": 42,
+                "rich_markdown": RICH_MARKDOWN,
+                "schedule_at": "2099-01-01T10:00:00+00:00",
+            },
+        )
+
+    assert result["isError"] is False, result
+    assert len(backend.sent) == 1
+    assert backend.sent[0]["topic_id"] == 42
+    assert backend.sent[0]["rich_markdown"] == RICH_MARKDOWN
+    assert backend.sent[0]["schedule_at"] is not None
+
+
+def test_mcp_plain_send_omits_rich_markdown_kwarg(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    # ``FakeMessageBackend`` predates the kwarg entirely: a plain text send that
+    # started passing ``rich_markdown=None`` downstream would raise TypeError.
+    backend = FakeMessageBackend()
+    with _client(minimal_config_yaml, tmp_path, message_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {"telegram_chat_id": -100123, "text": "plain"},
+        )
+
+    assert result["isError"] is False, result
+    assert len(backend.sent) == 1
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"text": "caption"},
+        {"file_urls": ["https://example.com/a.png"]},
+        {
+            "base64_files": [
+                {"filename": "a.txt", "content_b64": "aGk=", "mime": "text/plain"}
+            ]
+        },
+    ],
+    ids=["text", "file_urls", "base64_files"],
+)
+def test_mcp_send_rich_markdown_rejects_combinations(
+    minimal_config_yaml: str, tmp_path: Path, extra: dict[str, Any]
+) -> None:
+    # Exclusivity is encoded once in the shared ``MessageSendBody`` validator;
+    # the MCP tool inherits it and never reaches the backend.
+    backend = FakeRichMessageBackend()
+    with _client(minimal_config_yaml, tmp_path, message_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {"telegram_chat_id": -100123, "rich_markdown": RICH_MARKDOWN, **extra},
+        )
+
+    assert result["isError"] is True, result
+    assert backend.sent == []
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    ["", "   \n", "x" * (MAX_RICH_MARKDOWN_CHARS + 1)],
+    ids=["empty", "blank", "oversize"],
+)
+def test_mcp_send_rich_markdown_bounds(
+    minimal_config_yaml: str, tmp_path: Path, markdown: str
+) -> None:
+    backend = FakeRichMessageBackend()
+    with _client(minimal_config_yaml, tmp_path, message_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {"telegram_chat_id": -100123, "rich_markdown": markdown},
+        )
+
+    assert result["isError"] is True, result
+    assert backend.sent == []
+
+
+def test_mcp_send_rich_markdown_requires_write(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeRichMessageBackend()
+    config_yaml = _with_access(
+        minimal_config_yaml,
+        '    rules:\n      - all: true\n        permission: "read"\n',
+    )
+    with _client(config_yaml, tmp_path, message_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {"telegram_chat_id": -100123, "rich_markdown": RICH_MARKDOWN},
+        )
+
+    assert result["isError"] is True, result
+    assert backend.sent == []
 
 
 def test_mcp_edit_message_edits_via_backend(

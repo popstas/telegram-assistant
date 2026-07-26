@@ -119,10 +119,16 @@ Goal: answer two blocking questions before writing feature code: (a) does the se
 
 ### Task 5: MCP — `rich_markdown` kwarg on `telegram_messages_send`
 
-- [ ] TDD: add failing MCP test (pattern of existing MCP surface tests): tool call with `rich_markdown` reaches the fake backend; exclusivity errors map to the shared body validation
-- [ ] add explicit `rich_markdown` kwarg to `telegram_messages_send` (`http_api/mcp/tools.py:1154`) and pass into `MessageSendBody`
-- [ ] confirm `EXPECTED_TOOL_NAMES` in `tests/test_mcp_mount.py` needs no change (no new tool)
-- [ ] run tests — must pass before next task
+- [x] TDD: add failing MCP test (pattern of existing MCP surface tests): tool call with `rich_markdown` reaches the fake backend; exclusivity errors map to the shared body validation
+- [x] add explicit `rich_markdown` kwarg to `telegram_messages_send` (`http_api/mcp/tools.py:1154`) and pass into `MessageSendBody`
+- [x] confirm `EXPECTED_TOOL_NAMES` in `tests/test_mcp_mount.py` needs no change (no new tool) — unchanged; `test_messages_send_tool_drops_legacy_targeting_args` extended to assert `rich_markdown` is in the tool's input schema
+- [x] run tests — must pass before next task — **1652 passed**, `ruff check src tests` clean
+
+➕ The kwarg had to be threaded in **two** places: the tool signature → `MessageSendBody`, and `_resolve_message_send` (`tools.py:748`), which builds its own `SendMessageRequest` rather than reusing the HTTP route's. Missing the second would have silently dropped the article after passing body validation — pinned by `test_mcp_send_rich_markdown_reaches_backend`.
+
+➕ `tests/test_mcp_tools.py` gains `FakeRichMessageBackend` (rich-aware) alongside the existing `FakeMessageBackend`, which deliberately keeps its pre-rich signature — `test_mcp_plain_send_omits_rich_markdown_kwarg` is the MCP analog of the `LegacySendBackend`/`CliLegacyMessageBackend` guards: a plain text send that started passing `rich_markdown=None` downstream would `TypeError`.
+
+⚠️ Mass mode is unreachable from MCP (the tool exposes no `folder_name`/`chat_name`), so there is no rich+mass MCP test; exclusivity coverage is text / `file_urls` / `base64_files`, plus the domain bounds (empty, blank, oversize) and the 403 WRITE gate.
 
 ### Task 6: Verify acceptance criteria
 

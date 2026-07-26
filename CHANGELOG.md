@@ -5,6 +5,7 @@
 
 ### Features
 
+- --rich-markdown on messages send CLI
 - Rich_markdown field on POST /telegram/messages
 - Rich_markdown send in domain service and Telethon backend
 - Spike live rich-message send via InputRichMessageMarkdown

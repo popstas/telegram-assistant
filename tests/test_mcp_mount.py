@@ -439,7 +439,7 @@ def test_messages_send_tool_drops_legacy_targeting_args(
     for removed in ("chat_name", "folder_name", "folder_id", "files"):
         assert removed not in properties
     for kept in ("text", "telegram_chat_id", "entity", "file_urls", "base64_files",
-                 "reply_to_message_id"):
+                 "reply_to_message_id", "rich_markdown"):
         assert kept in properties
 
 

@@ -757,6 +757,7 @@ async def _resolve_message_send(
             base64_files=base64_files,
             schedule_at=resolved_schedule_at,
             reply_to_message_id=body.reply_to_message_id,
+            rich_markdown=body.rich_markdown,
         ),
         authorizer=authorizer,
         sent_registry=sent_message_registry(request),  # type: ignore[arg-type]
@@ -1198,6 +1199,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         schedule_at: datetime | None = None,
         delay_seconds: int | None = None,
         reply_to_message_id: int | None = None,
+        rich_markdown: str | None = None,
     ) -> dict[str, Any]:
         """Send a message to a chat (targeted by ``entity`` or ``telegram_chat_id``).
 
@@ -1206,6 +1208,12 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         http(s) URLs downloaded server-side before the send. Chat targeting goes
         through the entity resolver; folder/chat-name and server-local ``files``
         are not part of the MCP surface.
+
+        ``rich_markdown`` sends a Telegram rich message (article) instead: the
+        markdown source (headings, tables, quotes, fenced code, media by public
+        https URL; up to 32 768 chars) is parsed by the server. It is mutually
+        exclusive with ``text`` and the attachment fields, and composes with
+        ``telegram_topic_id``/``reply_to_message_id``/``schedule_at``.
         """
         request = _request(provider)
         try:
@@ -1221,6 +1229,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 schedule_at=schedule_at,
                 delay_seconds=delay_seconds,
                 reply_to_message_id=reply_to_message_id,
+                rich_markdown=rich_markdown,
             )
             return await _resolve_message_send(request, body)
         except Exception as exc:
