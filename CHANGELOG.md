@@ -5,6 +5,7 @@
 
 ### Features
 
+- Rich_markdown kwarg on telegram_messages_send MCP tool
 - --rich-markdown on messages send CLI
 - Rich_markdown field on POST /telegram/messages
 - Rich_markdown send in domain service and Telethon backend
