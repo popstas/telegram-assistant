@@ -118,6 +118,7 @@ from telegram_assistant.messages.service import (
     redact_message_text,
     resolve_schedule_at,
     send_message,
+    spaced_paragraphs_default,
 )
 
 __all__ = [
@@ -216,6 +217,7 @@ __all__ = [
     "resolve_schedule_at",
     "send_message",
     "set_message_reaction",
+    "spaced_paragraphs_default",
     "validate_file_urls",
     "validate_local_files",
 ]

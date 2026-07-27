@@ -25,7 +25,7 @@ import os
 import shutil
 from collections.abc import Iterable
 from contextlib import suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any, Protocol
 
@@ -41,6 +41,7 @@ from telegram_assistant.messages.attachments import (
     materialize_base64_attachments,
 )
 from telegram_assistant.messages.downloads import Downloader
+from telegram_assistant.messages.rich_markdown import normalize_rich_markdown
 from telegram_assistant.messages.sent_registry import SentMessageRegistry
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
@@ -58,6 +59,20 @@ from telegram_assistant.worker.queue import FloodWaitError
 #: nesting, table width — is left to the server, whose errors are more
 #: authoritative than any local lint.
 MAX_RICH_MARKDOWN_CHARS = 32_768
+
+
+def spaced_paragraphs_default(config: Any) -> bool:
+    """Read ``telegram.defaults.rich_markdown_spaced_paragraphs`` from ``config``.
+
+    Every surface builds a :class:`SendMessageRequest` from its own plumbing, so
+    the config lookup lives here rather than three times over. Missing config
+    (or a config predating the knob) means the built-in default, ``True`` — the
+    knob only lets an operator turn spacing off globally; a per-call flag still
+    wins over it.
+    """
+    defaults = getattr(getattr(config, "telegram", None), "defaults", None)
+    value = getattr(defaults, "rich_markdown_spaced_paragraphs", None)
+    return True if value is None else bool(value)
 
 
 class ScheduleError(ValueError):
@@ -360,6 +375,14 @@ class SendMessageRequest:
     mutually exclusive with ``text`` and every attachment kind, and is bounded
     by :data:`MAX_RICH_MARKDOWN_CHARS`; targeting, ``topic_id``,
     ``reply_to_message_id`` and ``schedule_at`` all apply as usual.
+
+    ``spaced_paragraphs`` (default ``True``, config default
+    ``telegram.defaults.rich_markdown_spaced_paragraphs``) applies only to a
+    rich send: the markdown is run through
+    :func:`~telegram_assistant.messages.rich_markdown.normalize_rich_markdown`,
+    which inserts a spacer paragraph where Telegram would otherwise render two
+    paragraphs tight against each other. ``False`` sends the source
+    byte-for-byte.
     """
 
     telegram_chat_id: int
@@ -375,6 +398,7 @@ class SendMessageRequest:
     schedule_at: datetime | None = None
     reply_to_message_id: int | None = None
     rich_markdown: str | None = None
+    spaced_paragraphs: bool = True
 
     @property
     def attachment_refs(self) -> tuple[str, ...]:
@@ -420,6 +444,9 @@ class SendMessageRequest:
             "reply_to_message_id": self.reply_to_message_id,
             # The markdown source is persisted like ``text`` (same redaction
             # rule) so the audit trail shows what a replayed op actually sent.
+            # ``send_message`` normalises the markdown *before* building this
+            # payload, so what is recorded is what went to Telegram, spacers
+            # included.
             "rich_markdown": (
                 None
                 if self.rich_markdown is None
@@ -429,6 +456,7 @@ class SendMessageRequest:
                     else self.rich_markdown
                 )
             ),
+            "spaced_paragraphs": self.spaced_paragraphs,
         }
 
 
@@ -440,6 +468,9 @@ class SendMessageResult:
     ``telegram_message_ids`` carries the full ordered list when the send
     produced more than one message (album); it is ``None`` for single sends.
     ``scheduled`` is ``True`` when the message was deferred via ``schedule_at``.
+    ``warnings`` are non-fatal notes about the send — currently the
+    rich-markdown normalization's ones (block/media budget, spacing rolled
+    back). They never mean the send failed.
     """
 
     telegram_chat_id: int
@@ -452,6 +483,7 @@ class SendMessageResult:
     telegram_message_ids: tuple[int, ...] | None = None
     scheduled: bool = False
     schedule_at: str | None = None
+    warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -469,6 +501,7 @@ class SendMessageResult:
             ),
             "scheduled": self.scheduled,
             "schedule_at": self.schedule_at,
+            "warnings": list(self.warnings),
         }
 
     @classmethod
@@ -495,6 +528,8 @@ class SendMessageResult:
             ),
             scheduled=bool(payload.get("scheduled", False)),
             schedule_at=payload.get("schedule_at"),
+            # Rows written before warnings existed simply carry none.
+            warnings=tuple(payload.get("warnings") or ()),
         )
 
 
@@ -544,6 +579,7 @@ async def send_message(
     send calls the backend exactly as before for backward compatibility.
     """
     has_text = bool(request.text and request.text.strip())
+    warnings: tuple[str, ...] = ()
     if request.rich_markdown is not None:
         # A rich message carries its whole body in the markdown source; a
         # caption or attachment alongside it would be silently dropped by the
@@ -554,10 +590,26 @@ async def send_message(
             )
         if not request.rich_markdown.strip():
             raise ValueError("rich_markdown must be non-empty")
-        if len(request.rich_markdown) > MAX_RICH_MARKDOWN_CHARS:
+        # Normalise *before* the length check: spacer insertion grows the
+        # source, and MAX_RICH_MARKDOWN_CHARS must bound what actually reaches
+        # Telegram — not what the caller happened to hand in. From here on
+        # ``request`` carries the normalised markdown, so the operation payload,
+        # the backend kwarg and the length check all agree on one text.
+        normalization = normalize_rich_markdown(
+            request.rich_markdown,
+            spaced_paragraphs=request.spaced_paragraphs,
+        )
+        warnings = normalization.warnings
+        spaced_grew = normalization.markdown is not request.rich_markdown
+        if spaced_grew:
+            request = replace(request, rich_markdown=normalization.markdown)
+        if len(normalization.markdown) > MAX_RICH_MARKDOWN_CHARS:
+            given = f"{len(normalization.markdown)} given"
+            if spaced_grew:
+                given += " after paragraph spacing"
             raise ValueError(
                 f"rich_markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
-                f"({len(request.rich_markdown)} given)"
+                f"({given})"
             )
     elif not has_text and not request.has_attachments:
         raise ValueError(
@@ -697,6 +749,7 @@ async def send_message(
             if request.schedule_at is not None
             else None
         ),
+        warnings=warnings,
     )
     op = store.complete_operation(operation_id, result.to_dict())
     # Record every id this process just sent (single send or album) so the

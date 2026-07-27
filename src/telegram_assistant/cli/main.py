@@ -3384,6 +3384,7 @@ def messages_send(
         redact_message_text,
         resolve_schedule_at,
         send_message,
+        spaced_paragraphs_default,
         validate_file_urls,
         validate_local_files,
     )
@@ -3846,6 +3847,7 @@ def messages_send(
                 schedule_at=resolved_schedule_at,
                 reply_to_message_id=reply_to,
                 rich_markdown=rich_markdown_text,
+                spaced_paragraphs=spaced_paragraphs_default(config),
             )
             result_single, op = await send_message(
                 backend=message_backend,
