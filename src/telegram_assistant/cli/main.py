@@ -3356,6 +3356,21 @@ def messages_send(
         "(default: on, or telegram.defaults.rich_markdown_spaced_paragraphs). "
         "Only meaningful with --rich-markdown.",
     ),
+    rich_file: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--rich-file",
+        help="Map a media reference in the article to a local file, as "
+        "<reference>=<path> (repeatable). The reference is the target written "
+        "in the markdown or its bare file name; use it for files outside the "
+        "article's directory. Only valid with --rich-markdown.",
+    ),
+    vault_dir: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--vault-dir",
+        help="Directory searched by name for Obsidian ![[embed.png]] media "
+        "that is not next to the article. Only valid with --rich-markdown.",
+        exists=False,
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -3379,6 +3394,7 @@ def messages_send(
         MAX_RICH_MARKDOWN_CHARS,
         AttachmentError,
         MassSendRequest,
+        MediaResolutionError,
         MessageSendFailed,
         MessageSendNeedsReview,
         MessageSendPending,
@@ -3392,6 +3408,7 @@ def messages_send(
         parse_schedule_at,
         redact_message_text,
         resolve_schedule_at,
+        scan_media,
         send_message,
         spaced_paragraphs_default,
         validate_file_urls,
@@ -3438,6 +3455,16 @@ def messages_send(
     # Read and bound the file here so bad input costs no backend connection, in
     # dry-run and real runs alike.
     rich_markdown_text: str | None = None
+    rich_files: tuple[object, ...] = ()
+    rich_file_args = list(rich_file or ())
+    if rich_markdown is None and (rich_file_args or vault_dir is not None):
+        # Both only steer how local media in the article is resolved; accepting
+        # them for a plain send would silently do nothing.
+        typer.echo(
+            "--rich-file/--vault-dir are only meaningful with --rich-markdown",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     if spaced_paragraphs is not None and rich_markdown is None:
         # The knob only affects how markdown is rewritten before it is parsed
         # server-side; accepting it for a plain send would silently do nothing.
@@ -3477,6 +3504,32 @@ def messages_send(
         if not rich_markdown_text.strip():
             typer.echo(f"--rich-markdown file is empty: {rich_markdown}", err=True)
             raise typer.Exit(code=2)
+        overrides: dict[str, Path] = {}
+        for entry in rich_file_args:
+            reference, sep, override_path = entry.partition("=")
+            if not sep or not reference.strip() or not override_path.strip():
+                typer.echo(
+                    f"--rich-file must be <reference>=<path> ({entry!r} given)",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            overrides[reference.strip()] = Path(override_path.strip())
+        # Local media is CLI-only (the CLI is the trusted, local surface): the
+        # article's own directory is the base, so a note can be sent as written.
+        # This runs before the length check so the bound applies to the rewritten
+        # body — the tg:// references replace the original paths.
+        try:
+            media_scan = scan_media(
+                rich_markdown_text,
+                base_dir=rich_markdown.parent,
+                vault_dir=vault_dir,
+                overrides=overrides,
+            )
+        except MediaResolutionError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=2) from exc
+        rich_markdown_text = media_scan.markdown
+        rich_files = media_scan.files
         if len(rich_markdown_text) > MAX_RICH_MARKDOWN_CHARS:
             typer.echo(
                 f"--rich-markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
@@ -3794,6 +3847,21 @@ def messages_send(
                     else None
                 ),
                 "rich_markdown_file": (str(rich_markdown) if is_rich else None),
+                # Local media the real send would upload. The files are listed,
+                # never read — a dry run touches no bytes and no network.
+                "rich_files": (
+                    [
+                        {
+                            "id": rf.id,
+                            "path": rf.path,
+                            "kind": rf.kind,
+                            "caption": rf.caption,
+                        }
+                        for rf in rich_files
+                    ]
+                    if is_rich
+                    else None
+                ),
                 # ``spaced_paragraphs`` echoes the *effective* decision: the
                 # flag, else the config default. ``spaced`` is what the pass
                 # actually did (a block-limit rollback turns it False).
@@ -3922,6 +3990,7 @@ def messages_send(
                 reply_to_message_id=reply_to,
                 rich_markdown=rich_markdown_text,
                 spaced_paragraphs=effective_spaced_paragraphs,
+                rich_files=rich_files,
             )
             result_single, op = await send_message(
                 backend=message_backend,

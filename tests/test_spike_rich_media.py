@@ -29,15 +29,35 @@ def _load_spike():
 spike = _load_spike()
 
 
-def test_build_candidates_covers_every_planned_syntax() -> None:
+def test_build_candidates_puts_the_proven_syntax_first() -> None:
     names = [candidate.name for candidate in spike.build_candidates("photo1")]
     assert names == [
+        "tg-scheme",
+        "tg-scheme-alt-caption",
         "bare-id",
         "tg-file-url",
         "attach-scheme",
         "alt-and-caption",
         "html-img",
     ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"),
+    [
+        ("photo", "![](tg://photo?id=photo1)"),
+        ("video", "![](tg://video?id=photo1)"),
+        ("audio", "![](tg://audio?id=photo1)"),
+    ],
+)
+def test_proven_candidate_scheme_follows_the_upload_kind(
+    kind: str, expected: str
+) -> None:
+    """A photo named through tg://video fails RICH_MESSAGE_VIDEO_INVALID."""
+    (candidate,) = [
+        c for c in spike.build_candidates("photo1", kind=kind) if c.name == "tg-scheme"
+    ]
+    assert candidate.syntax == expected
 
 
 def test_build_candidates_substitutes_the_id_everywhere() -> None:
@@ -114,10 +134,12 @@ def test_classify_file(name: str, expected: str) -> None:
     [
         ("photo.png", "photo"),
         ("Pasted image 20260727.png", "Pasted-image-20260727"),
-        ("отчёт.png", "file1"),
+        ("отчёт.png", "file"),
         ("a(b)[c].png", "a-b-c"),
-        ("---.png", "file1"),
+        ("---.png", "file"),
         ("my_file-2.mp4", "my_file-2"),
+        # A dot in the id is RICH_MESSAGE_FILE_ID_INVALID, so the stem is used.
+        ("archive.tar.png", "archive-tar"),
     ],
 )
 def test_default_file_id(name: str, expected: str) -> None:
@@ -125,6 +147,10 @@ def test_default_file_id(name: str, expected: str) -> None:
 
 
 def test_default_file_id_output_is_safe_inside_a_markdown_reference() -> None:
+    from telegram_assistant.messages.rich_markdown import RICH_FILE_ID_RE
+
     file_id = spike.default_file_id("some file (1) [copy].png")
     assert not set(file_id) & set(" ()[]\"'")
-    assert f"![]({file_id})" in spike.build_candidates(file_id)[0].body
+    # The server's own grammar, not just "no brackets".
+    assert RICH_FILE_ID_RE.match(file_id)
+    assert f"![](tg://photo?id={file_id})" in spike.build_candidates(file_id)[0].body

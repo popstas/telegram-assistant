@@ -168,13 +168,13 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 - [x] upload the file with `client.upload_file`, turn it into `InputPhoto`/`InputDocument` (via `messages.uploadMedia` on the target peer where needed) and build `InputRichFilePhoto(id=…, photo=…)` / `InputRichFileDocument(id=…, document=…)`
 - [x] try each candidate markdown reference in turn and report which the server accepts: `![](<id>)`, `![](tg://file?id=<id>)`, `![alt](<id> "caption")`, and the HTML form `<img src="<id>"/>` via `InputRichMessageHTML`
 - [x] read the sent message back and print the resulting `RichMessage` block list, so the accepted syntax is proven, not assumed
-- [x] record the findings in this plan (accepted syntax, id format, whether captions survive, whether video needs a document thumbnail) — **⚠️ blocked, not automatable**: the run needs an authorized session and sends real messages. Findings section below is left for the manual run; if **none** of the candidates works, mark ⚠️ there and skip tasks 6–7, continuing at task 8
+- [x] record the findings in this plan (accepted syntax, id format, whether captions survive, whether video needs a document thumbnail) — ✅ **done for real**: the spike was run against Saved Messages during Task 6 and all four questions are answered below, so tasks 6–7 are unblocked and no ⚠️ skip is needed
 - [x] write a unit test for the pure candidate-builder helper the spike imports (list of variants, id substitution) — the network part stays manual
 - [x] run `pytest` and `ruff check src tests` — must pass before task 6
 
 **Task 5 notes** (decisions made while implementing, they constrain later tasks):
 
-- ⚠️ **The spike has not been run.** It sends real messages and needs an authorized Telethon session, so it is not automatable from this loop — the script and its unit tests are landed, the *findings* below are empty until a human runs it. Tasks 6–7 depend on the answer (which reference syntax the server accepts) and cannot be finished on a guess; if they are reached before the run, either run the spike first or record ⚠️ and continue at Task 8 (spacing/grouping need no media syntax).
+- ~~⚠️ **The spike has not been run.**~~ **Resolved during Task 6** — the spike was run against Saved Messages (`--entity me`), the findings below are real, and tasks 6–7 proceed on a proven syntax rather than a guess.
 - Confirmed locally against the installed Telethon 1.44.0: `InputRichFilePhoto(id: str, photo: TypeInputPhoto)`, `InputRichFileDocument(id: str, document: TypeInputDocument)`, and **both** `InputRichMessageMarkdown` and `InputRichMessageHTML` take `files: list[TypeInputRichFile]`. `types.Message` has a `rich_message` field, which is what the read-back prints. So the id is a **caller-chosen string**, not a Telegram file id — the open question is purely how the markdown names it.
 - `@grammyjs/types/rich.d.ts` is no help here: it documents the *Bot API* dialect, where "Media blocks support only HTTP and HTTPS URLs". The `files:` list is MTProto-only, hence the spike.
 - Public (unit-tested) helpers the later tasks reuse: `build_candidates(file_id, *, alt, caption) -> tuple[Candidate, ...]`, `classify_file(path) -> "photo" | "document"` (photo iff the suffix is `.jpg/.jpeg/.png/.webp`; `.gif` is an animation ⇒ document), `default_file_id(path)` (slug of the stem, non-`[A-Za-z0-9_.-]` → `-`, empty ⇒ `file1`, so a Cyrillic or bracketed filename can never break the `![](…)` it is written into).
@@ -182,22 +182,38 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 - One send per candidate, and a rejection does **not** stop the loop — the point is which of the five the server accepts, so all are tried and the accepted names are printed at the end. Exit 3 means *every* candidate was rejected (or the upload itself failed); exit 0 means at least one stuck.
 - `--only <names>` runs a subset (an unknown name is a precondition failure, exit 2), `--file-id` overrides the derived id, `--dry-run` prints every candidate article without uploading.
 
-**Task 5 findings** (fill in from the manual run — `.venv/bin/python scripts/spike_rich_media.py --file <photo.png>`):
+**Task 5 findings** — ✅ **the spike was run** (2026-07-27, `--entity me`, Telethon 1.44, premium account). Six probe rounds; the answer came from the Bot API 10.2 twin (`InputRichMessageMedia`, documented in `@grammyjs/types@latest/rich.d.ts`: *"List of media that are specified in the markdown or html fields using `tg://photo?id=`, `tg://video?id=`, and `tg://audio?id=` links"*) and was then confirmed live.
 
-- accepted syntax: _(not yet run)_
-- id format: _(not yet run)_
-- captions survive: _(not yet run)_
-- video needs a document thumbnail: _(not yet run)_
+- **accepted syntax**: `![alt](tg://photo?id=<id> "caption")`, `![](tg://video?id=<id>)`, `![](tg://audio?id=<id>)`. The scheme **must match the uploaded media**: a photo named through `tg://video` fails `RICH_MESSAGE_VIDEO_INVALID`, a document through `tg://photo` fails `RICH_MESSAGE_PHOTO_INVALID`. Every non-`tg://` form is rejected with `RICH_MESSAGE_PHOTO_URL_INVALID` — bare id, relative path, absolute path, `file://`, `attach://<id>`, `tg://file?id=`, `tg://rich?id=`, `https://<host>/<id>`, `<img src="<id>">` via `InputRichMessageHTML`. Read-back proves it: `RichMessage` carries a real `PageBlockPhoto(photo_id=…)` plus `photos=[…]`, not a link.
+- **id format**: an ASCII identifier, `[A-Za-z0-9_-]+`. A dot (`photo.png`), a space or a non-ASCII character (`фото`) is rejected with `RICH_MESSAGE_FILE_ID_INVALID` — note this fires *before* the URL check, which is why round 1 (dot-free ids) and round 2 (dotted ids) returned different errors. 64 characters are accepted; dashes and underscores are fine.
+- **captions survive**: yes — `PageBlockPhoto.caption` is a populated `PageCaption` for both `![](tg://photo?id=x)` and `![alt](tg://photo?id=x "cap")`.
+- **video needs a document thumbnail**: no. `InputMediaUploadedDocument` with `DocumentAttributeVideo` (no `thumb`) was accepted; `.mp3` with `DocumentAttributeAudio` was accepted through `tg://audio`.
+- ➕ **`files` does not intercept http(s) URLs.** With a `files` list present, a real remote URL is still fetched normally, so remote and local media compose freely in one article.
+- ➕ The rejected guesses stay in `build_candidates` as a regression probe; `--only tg-scheme` runs just the proven one. `default_file_id` was **wrong** as landed in Task 5 (its slug allowed `.`, which the server rejects) and now delegates to the domain's `make_rich_file_id`.
 
 ### Task 6: Resolve local media from markdown (domain + CLI)
 
-- [ ] add `scan_media(markdown, *, base_dir, vault_dir=None)` to `rich_markdown.py`: classify each media block as remote (http/https, untouched) or local, resolve local targets relative to the markdown file's directory, and resolve Obsidian `![[name.png|caption|size]]` embeds by searching `vault_dir` (nearest match; ambiguity is an error, not a guess)
-- [ ] carry `caption` from the markdown title, falling back to the alt text; drop the Obsidian `|size` suffix
-- [ ] add `rich_files: tuple[RichFile, ...]` to `SendMessageRequest` (`RichFile = {id, path, caption, kind}`), validated in `send_message` (file exists, readable, ≤ 50 media, only allowed with `rich_markdown`) and recorded in `to_payload()` as metadata only (path + kind, never contents)
-- [ ] rewrite the markdown so each local media block references the file id in the syntax the spike proved; unresolvable local media is an error naming the file (no silent drop)
-- [ ] CLI: resolve local media by default, add repeatable `--rich-file <id>=<path>` for files outside the article directory, and `--vault-dir` for Obsidian lookups; dry-run lists the resolved files (path, kind, caption) without uploading
-- [ ] write tests: relative path, absolute path, Obsidian embed, ambiguous embed error, missing file error, remote URL untouched, `--rich-file` override, >50 media rejected, `rich_files` without `rich_markdown` rejected
-- [ ] run `pytest` and `ruff check src tests` — must pass before task 7
+- [x] add `scan_media(markdown, *, base_dir, vault_dir=None)` to `rich_markdown.py`: classify each media block as remote (http/https, untouched) or local, resolve local targets relative to the markdown file's directory, and resolve Obsidian `![[name.png|caption|size]]` embeds by searching `vault_dir` (nearest match; ambiguity is an error, not a guess)
+- [x] carry `caption` from the markdown title, falling back to the alt text; drop the Obsidian `|size` suffix
+- [x] add `rich_files: tuple[RichFile, ...]` to `SendMessageRequest` (`RichFile = {id, path, caption, kind}`), validated in `send_message` (file exists, readable, ≤ 50 media, only allowed with `rich_markdown`) and recorded in `to_payload()` as metadata only (path + kind, never contents)
+- [x] rewrite the markdown so each local media block references the file id in the syntax the spike proved; unresolvable local media is an error naming the file (no silent drop)
+- [x] CLI: resolve local media by default, add repeatable `--rich-file <id>=<path>` for files outside the article directory, and `--vault-dir` for Obsidian lookups; dry-run lists the resolved files (path, kind, caption) without uploading
+- [x] write tests: relative path, absolute path, Obsidian embed, ambiguous embed error, missing file error, remote URL untouched, `--rich-file` override, >50 media rejected, `rich_files` without `rich_markdown` rejected
+- [x] run `pytest` and `ruff check src tests` — must pass before task 7
+
+**Task 6 notes** (decisions made while implementing, they constrain later tasks):
+
+- Public API added to `rich_markdown.py` (all re-exported from `messages/`): `scan_media`, `MediaScan` (`markdown`, `files`, `remote`), `RichFile` (`id`, `path`, `caption`, `kind`), `MediaResolutionError` / `AmbiguousMediaError` (both `ValueError`, so every surface's existing 400 / exit-2 path already covers them), `media_kind`, `rich_file_reference`, `make_rich_file_id`, `RICH_FILE_SCHEMES`, `RICH_FILE_ID_RE`, `MAX_RICH_FILE_ID_CHARS`, `PHOTO_/VIDEO_/AUDIO_SUFFIXES`.
+- **Kind is decided once, from the suffix**, because the scheme in the markdown and the upload shape must agree (`RICH_MESSAGE_VIDEO_INVALID` otherwise). `.gif` is an animation ⇒ a document ⇒ `tg://video`; a suffix in none of the three sets (`.pdf`) raises rather than being guessed — the dialect has no fourth scheme to write it into.
+- **Byte fidelity by identity, again**: an article with no *local* media returns the input string unchanged (`scan.markdown is markdown`), so a remote-only or media-less body keeps its CRLF and trailing newline. Only a rewrite normalises to LF, matching `_insert_spacers`.
+- Rewriting replaces `ref.raw` *inside* the original line rather than replacing the whole line, so media nested in a block quote keeps its `> ` prefix and no special case is needed for quote children (whose `Block.start` are true document indexes but whose `lines` are de-quoted).
+- Resolution order per reference: override (keyed by the target as written, its URL-decoded form, **or** its bare file name — `--rich-file <ref>=<path>` reads naturally either way) → absolute path → path relative to the article's directory → by-name walk of `vault_dir` (default: the article's directory). "Nearest" is path-step distance from the article; a tie raises `AmbiguousMediaError` listing the candidates. `os.walk`, not `rglob`: an Obsidian file name may contain `[` or `*`.
+- ➕ **An override that matched nothing is an error.** A silently-ignored `--rich-file` would send the article without the file the operator explicitly supplied — the same "no silent drop" rule the plan states for unresolvable media.
+- The same resolved path referenced twice yields **one** `RichFile` and one upload; two different files with the same stem get `shot`, `shot-2`. Captions stay per-reference (they live in the markdown); `RichFile.caption` records the first one for the dry-run listing.
+- `_validate_rich_files` runs **before** the operation row is opened and *does* touch the filesystem (unlike `_validate_attachment_refs`, which is deliberately pure): the ids are already written into the markdown, so a missing file would send an article whose media points at nothing, and failing early keeps the idempotency key free for the fixed retry. It also re-checks the id grammar and the kind, so a hand-built request cannot produce `RICH_MESSAGE_FILE_ID_INVALID`.
+- ➕ **The service already passes `rich_files` down** through the only-when-set `extra` block (Task 7 only has to make the Telethon backend accept and upload it). A media-less article still hits the backend with the pre-media signature, which `LegacySendBackend` pins. Until Task 7 lands, a CLI send *with* local media will fail in the Telethon backend — the domain, the CLI and the payload are complete, the upload is not.
+- Local media stays **CLI-only** as decided: HTTP/MCP never call `scan_media`, so a remote caller cannot name a server-side path. `--rich-file`/`--vault-dir` without `--rich-markdown` is exit 2, like `--spaced-paragraphs`.
+- ➕ Dry-run gained `resolved.rich_files` (`id`, `path`, `kind`, `caption`; `None` for a plain send) — the files are *listed*, never read, so a preview still touches no bytes and no network.
 
 ### Task 7: Upload and send media (`telethon_backend`)
 
@@ -211,7 +227,7 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 ### Task 8: Group consecutive media into `<tg-collage>`
 
 - [ ] add grouping to `normalize_rich_markdown`: a run of 2+ consecutive media blocks (no text between them) is wrapped in `<tg-collage>` … `</tg-collage>` with blank lines inside, per the dialect
-- [ ] respect config `telegram.defaults.rich_markdown_grouping`, default: `collage`
+- [ ] respect config `telegram.defaults.rich_markdown_grouping`, default: `collage` — ⚠️ **the live `data/config.yml` already sets this key**, and `TelegramDefaults` forbids extra inputs, so *every* command currently fails with `telegram.defaults.rich_markdown_grouping: Extra inputs are not permitted` until this task lands (found while running the Task 5 spike, which needed a stripped copy of the config to start)
 - [ ] accept a per-group override argument (`media_groups=[{index, mode: "collage"|"slideshow"|"none"}]`) so a caller can turn one run into `<tg-slideshow>` or leave it ungrouped; unknown indexes are an error
 - [ ] expose the detected groups in the normalization result (index, media count, the trailing ~50 characters of the preceding text) so surfaces can describe them
 - [ ] never group media that is already inside an author-written `<tg-collage>`/`<tg-slideshow>`/`<details>` block
@@ -287,7 +303,7 @@ article.md ──scan_media()──▶ [remote urls | local paths]
 - Send the same Obsidian article (`Пхукет 2026 - рассказ.md`) with local embeds intact to a private chat and check: paragraph gaps, headings separated, images/videos inline, consecutive images rendered as a collage.
 - Send with `--no-spaced-paragraphs` and confirm the markdown is unchanged byte-for-byte.
 - Send an article to a chat where the account lacks media rights and confirm the error names that cause.
-- Run `.venv/bin/python scripts/spike_rich_media.py --file <photo.png> --entity me` — this is a **prerequisite** for Tasks 6–7, not just a post-check: it is the only source for which markdown reference syntax the server accepts. Record the answer under "Task 5 findings". Run it once more after implementation to confirm the shipped syntax still matches.
+- ~~Run `.venv/bin/python scripts/spike_rich_media.py --file <photo.png> --entity me` as a prerequisite for Tasks 6–7~~ — **done during Task 6**; the answer is recorded under "Task 5 findings" and the shipped helpers were re-verified against it (`--only tg-scheme,tg-scheme-alt-caption`, both accepted, read back as `PageBlockPhoto`). Worth one more run after Task 7 to confirm the *uploading* path end to end.
 
 **External system updates**:
 

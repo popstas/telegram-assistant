@@ -25,12 +25,20 @@ otherwise render two paragraphs tight against each other. A line holding only a
 non-breaking space is *not* blank to this scanner — the server parses it as a
 ``PageBlockParagraph``, which is exactly why it works as a spacer, and treating
 it as a real block is what makes normalisation idempotent.
+
+:func:`scan_media` is the other writing half: it resolves media that points at a
+*local* file and rewrites the reference into the ``tg://`` form MTProto pairs
+with ``InputRichMessageMarkdown.files`` (see :data:`RICH_FILE_SCHEMES`).
 """
 
 from __future__ import annotations
 
+import os
 import re
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
+from urllib.parse import unquote
 
 #: Telegram's ceiling on blocks in one rich message (nested blocks included).
 MAX_RICH_BLOCKS = 500
@@ -49,6 +57,31 @@ NBSP = "\u00a0"
 
 #: The spacer :func:`normalize_rich_markdown` inserts, alone on its own line.
 SPACER_LINE = NBSP
+
+#: How the markdown body names a file carried in
+#: ``InputRichMessageMarkdown.files``, per media kind. Proven against the live
+#: API (see the Task 5 findings in
+#: ``docs/plans/20260727-rich-markdown-spacing-and-media.md``): a plain id, a
+#: relative path or a ``tg://file?id=``/``attach://`` reference is rejected with
+#: ``RICH_MESSAGE_PHOTO_URL_INVALID``, and the scheme must match the uploaded
+#: media (a photo named through ``tg://video`` fails ``RICH_MESSAGE_VIDEO_INVALID``).
+RICH_FILE_SCHEMES = {
+    "photo": "tg://photo?id=",
+    "video": "tg://video?id=",
+    "audio": "tg://audio?id=",
+}
+
+#: Suffixes Telegram renders as a photo block; everything else is uploaded as a
+#: document. ``.gif`` is an animation — a document — so it goes out as a video.
+PHOTO_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+AUDIO_SUFFIXES = frozenset({".mp3", ".ogg", ".oga", ".opus", ".m4a", ".wav", ".flac"})
+VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v", ".gif"})
+
+#: ``InputRichFile.id`` is a caller-chosen *ASCII identifier*: the server
+#: rejects a dot, a space or a non-ASCII character with
+#: ``RICH_MESSAGE_FILE_ID_INVALID``. 64 characters are accepted.
+RICH_FILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+MAX_RICH_FILE_ID_CHARS = 64
 
 _FENCE_RE = re.compile(r"^ {0,3}(?P<char>`{3,}|~{3,})(?P<info>.*)$")
 _ATX_RE = re.compile(r"^ {0,3}(?P<hashes>#{1,6})(?:\s|$)")
@@ -106,6 +139,47 @@ class RichMarkdownNormalization:
     media: int
     spaced: bool
     warnings: tuple[str, ...] = ()
+
+
+class MediaResolutionError(ValueError):
+    """A local media reference could not be turned into a file to upload."""
+
+
+class AmbiguousMediaError(MediaResolutionError):
+    """An Obsidian embed matched more than one file, equally close by."""
+
+
+@dataclass(frozen=True)
+class RichFile:
+    """One local file to upload alongside a rich message.
+
+    ``id`` is the ASCII identifier the markdown names (see
+    :data:`RICH_FILE_ID_RE`), ``path`` the resolved absolute path, ``caption``
+    what the first reference asked to show under it, and ``kind`` one of
+    ``photo``/``video``/``audio`` — the scheme in the markdown and the upload
+    shape must agree, so it is decided once, here.
+    """
+
+    id: str
+    path: str
+    caption: str
+    kind: str
+
+
+@dataclass(frozen=True)
+class MediaScan:
+    """What :func:`scan_media` made of one article.
+
+    ``markdown`` is the body with every *local* media reference rewritten to
+    its ``tg://`` form (returned by identity when nothing was local, so byte
+    fidelity survives), ``files`` are the uploads it needs in markdown order,
+    and ``remote`` lists the http(s) targets left untouched for the server to
+    fetch itself.
+    """
+
+    markdown: str
+    files: tuple[RichFile, ...] = ()
+    remote: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -336,7 +410,7 @@ def normalize_rich_markdown(
     )
 
 
-def iter_media(blocks: tuple[Block, ...] | list[Block]):
+def iter_media(blocks: tuple[Block, ...] | list[Block]) -> Iterator[Block]:
     """Yield every media block in document order, nested blocks included."""
 
     for block in blocks:
@@ -344,6 +418,150 @@ def iter_media(blocks: tuple[Block, ...] | list[Block]):
             yield block
         if block.children:
             yield from iter_media(block.children)
+
+
+def media_kind(path: Path | str) -> str:
+    """Return ``photo``/``video``/``audio`` for a local file, by suffix.
+
+    Raises :class:`MediaResolutionError` for anything else: a rich message has
+    exactly these three media schemes, so a ``.pdf`` has no reference syntax to
+    be written into and must be reported rather than silently dropped.
+    """
+
+    suffix = Path(path).suffix.lower()
+    if suffix in PHOTO_SUFFIXES:
+        return "photo"
+    if suffix in AUDIO_SUFFIXES:
+        return "audio"
+    if suffix in VIDEO_SUFFIXES:
+        return "video"
+    raise MediaResolutionError(
+        f"unsupported media type for rich message: {path} "
+        f"(a rich message carries photo, video or audio only)"
+    )
+
+
+def rich_file_reference(file_id: str, kind: str) -> str:
+    """Return the markdown target naming ``file_id`` as media of ``kind``."""
+
+    try:
+        scheme = RICH_FILE_SCHEMES[kind]
+    except KeyError:
+        raise MediaResolutionError(
+            f"unknown media kind {kind!r} (expected one of "
+            f"{', '.join(sorted(RICH_FILE_SCHEMES))})"
+        ) from None
+    return f"{scheme}{file_id}"
+
+
+def make_rich_file_id(name: str, taken: Iterable[str] = ()) -> str:
+    """Derive a server-acceptable file id from a file name.
+
+    The id is written straight into ``![](tg://photo?id=…)``, so a Cyrillic or
+    bracketed file name must not leak into it: anything outside
+    :data:`RICH_FILE_ID_RE` becomes ``-``, an empty result becomes ``file``, and
+    a collision with ``taken`` gets a ``-2``, ``-3``… suffix.
+    """
+
+    used = set(taken)
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", name).strip("-")
+    slug = (slug or "file")[:MAX_RICH_FILE_ID_CHARS]
+    if slug not in used:
+        return slug
+    counter = 2
+    while True:
+        suffix = f"-{counter}"
+        candidate = slug[: MAX_RICH_FILE_ID_CHARS - len(suffix)] + suffix
+        if candidate not in used:
+            return candidate
+        counter += 1
+
+
+def scan_media(
+    markdown: str,
+    *,
+    base_dir: Path | str,
+    vault_dir: Path | str | None = None,
+    overrides: Mapping[str, Path | str] | None = None,
+) -> MediaScan:
+    """Resolve local media in ``markdown`` and rewrite it to ``tg://`` references.
+
+    An ``http``/``https`` target is left exactly as written — the server fetches
+    it. Everything else names a local file and is resolved in this order: an
+    ``overrides`` entry (keyed by the target as written, its URL-decoded form or
+    its bare file name), then the path relative to ``base_dir`` (the directory
+    of the markdown file), then a by-name search of ``vault_dir`` for Obsidian
+    ``![[…]]`` embeds, which carry a file name rather than a path.
+
+    The search picks the match *nearest* ``base_dir``; a tie raises
+    :class:`AmbiguousMediaError` rather than guessing, and a target that
+    resolves to nothing raises :class:`MediaResolutionError` naming it. An
+    override that matched nothing is an error too — a silently ignored
+    ``--rich-file`` would send the article without the file it was given.
+
+    The same file referenced twice is uploaded once (one :class:`RichFile`, one
+    id); the caption stays per-reference, since it lives in the markdown.
+    """
+
+    base = Path(base_dir).expanduser()
+    vault = Path(vault_dir).expanduser() if vault_dir is not None else None
+    override_map = {
+        str(key): Path(value).expanduser() for key, value in (overrides or {}).items()
+    }
+    used_overrides: set[str] = set()
+
+    blocks = scan_blocks(markdown)
+    media_blocks = [block for block in iter_media(blocks) if block.media is not None]
+    if not media_blocks and not override_map:
+        return MediaScan(markdown=markdown)
+
+    lines = split_lines(markdown)
+    files: list[RichFile] = []
+    remote: list[str] = []
+    by_path: dict[str, RichFile] = {}
+    taken: set[str] = set()
+    rewritten: dict[int, str] = {}
+
+    for block in media_blocks:
+        ref = block.media
+        assert ref is not None  # filtered above
+        if ref.is_remote:
+            remote.append(ref.target)
+            continue
+        path = _resolve_local_media(
+            ref, base=base, vault=vault, overrides=override_map, used=used_overrides
+        )
+        kind = media_kind(path)
+        key = str(path)
+        rich_file = by_path.get(key)
+        if rich_file is None:
+            file_id = make_rich_file_id(path.stem, taken)
+            taken.add(file_id)
+            rich_file = RichFile(id=file_id, path=key, caption=ref.caption, kind=kind)
+            by_path[key] = rich_file
+            files.append(rich_file)
+        original = lines[block.start]
+        rewritten[block.start] = original.replace(
+            ref.raw, _media_markdown(rich_file.id, kind, alt=ref.alt, caption=ref.caption), 1
+        )
+
+    unused = sorted(set(override_map) - used_overrides)
+    if unused:
+        raise MediaResolutionError(
+            "rich file override(s) match no media in the article: " + ", ".join(unused)
+        )
+
+    if not rewritten:
+        # Identity, so a media-less (or fully remote) article keeps its exact
+        # bytes — line endings and trailing newline included.
+        return MediaScan(markdown=markdown, files=(), remote=tuple(remote))
+
+    for index, line in rewritten.items():
+        lines[index] = line
+    text = "\n".join(lines)
+    if markdown.endswith(("\n", "\r")):
+        text += "\n"
+    return MediaScan(markdown=text, files=tuple(files), remote=tuple(remote))
 
 
 # --- internals ---------------------------------------------------------------
@@ -407,6 +625,111 @@ def _insert_spacers(markdown: str, blocks: tuple[Block, ...]) -> str:
 
 def _is_remote(target: str) -> bool:
     return target.lower().startswith(("http://", "https://"))
+
+
+def _quote_title(caption: str) -> str:
+    """Render ``caption`` as a markdown media title, quoted so it round-trips."""
+
+    if not caption:
+        return ""
+    if '"' not in caption:
+        return f' "{caption}"'
+    if "'" not in caption:
+        return f" '{caption}'"
+    return ' "' + caption.replace('"', "'") + '"'
+
+
+def _media_markdown(file_id: str, kind: str, *, alt: str, caption: str) -> str:
+    """Build the media line naming ``file_id``, keeping alt text and caption."""
+
+    return f"![{alt}]({rich_file_reference(file_id, kind)}{_quote_title(caption)})"
+
+
+def _distance(candidate: Path, base: Path) -> int:
+    """How far ``candidate``'s directory is from ``base``, in path steps."""
+
+    parent = candidate.parent.parts
+    root = base.parts
+    common = 0
+    for left, right in zip(parent, root, strict=False):
+        if left != right:
+            break
+        common += 1
+    return (len(parent) - common) + (len(root) - common)
+
+
+def _search_by_name(root: Path, name: str, suffix_parts: tuple[str, ...]) -> list[Path]:
+    """Find files called ``name`` under ``root``.
+
+    ``os.walk`` rather than ``rglob``: an Obsidian file name may contain ``[``
+    or ``*``, which a glob would interpret instead of matching. ``suffix_parts``
+    lets an embed that carries a partial path (``notes/img.png``) require those
+    trailing directories.
+    """
+
+    if not root.is_dir():
+        return []
+    matches: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        if name not in filenames:
+            continue
+        found = Path(dirpath) / name
+        if suffix_parts and found.parts[-len(suffix_parts) :] != suffix_parts:
+            continue
+        matches.append(found)
+    return matches
+
+
+def _resolve_local_media(
+    ref: MediaRef,
+    *,
+    base: Path,
+    vault: Path | None,
+    overrides: dict[str, Path],
+    used: set[str],
+) -> Path:
+    decoded = unquote(ref.target)
+    name = Path(decoded.replace("\\", "/")).name
+    for key in (ref.target, decoded, name):
+        if key in overrides:
+            used.add(key)
+            path = overrides[key]
+            if not path.is_file():
+                raise MediaResolutionError(
+                    f"rich file override {key!r} points at a missing file: {path}"
+                )
+            return path.resolve()
+
+    candidate = Path(decoded).expanduser()
+    if candidate.is_absolute():
+        if candidate.is_file():
+            return candidate.resolve()
+        raise MediaResolutionError(f"media file not found: {candidate}")
+
+    direct = base / candidate
+    if direct.is_file():
+        return direct.resolve()
+
+    search_root = vault if vault is not None else base
+    suffix_parts = tuple(p for p in candidate.parts[:-1] if p not in ("", "."))
+    matches = _search_by_name(search_root, candidate.name, suffix_parts + (candidate.name,))
+    if not matches:
+        where = f" (searched {search_root})" if search_root != base else ""
+        raise MediaResolutionError(
+            f"media file not found: {ref.target}{where}; pass --rich-file "
+            f"{candidate.name}=<path> or --vault-dir"
+        )
+    resolved = [match.resolve() for match in matches]
+    nearest = min(_distance(match, base) for match in resolved)
+    closest = sorted({match for match in resolved if _distance(match, base) == nearest})
+    if len(closest) > 1:
+        listing = ", ".join(str(match) for match in closest)
+        raise AmbiguousMediaError(
+            f"media reference {ref.target!r} matches {len(closest)} files: {listing}; "
+            f"pass --rich-file {candidate.name}=<path> to choose one"
+        )
+    return closest[0]
 
 
 def _classify_segment(segment: str) -> str:

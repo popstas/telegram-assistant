@@ -5,6 +5,7 @@
 
 ### Features
 
+- Spike script for local media inside a rich message
 - Surface rich markdown paragraph spacing flag on CLI, HTTP, MCP
 - Wire rich markdown paragraph spacing into send_message
 - Rich markdown paragraph spacer normalization
