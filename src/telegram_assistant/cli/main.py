@@ -3348,6 +3348,14 @@ def messages_send(
         "Targeted sends only; mutually exclusive with --text/--file/--file-url.",
         exists=False,
     ),
+    spaced_paragraphs: bool | None = typer.Option(
+        None,
+        "--spaced-paragraphs/--no-spaced-paragraphs",
+        help="Insert a U+00A0 spacer paragraph between paragraphs and before "
+        "headings so the article is not rendered as a wall of text "
+        "(default: on, or telegram.defaults.rich_markdown_spaced_paragraphs). "
+        "Only meaningful with --rich-markdown.",
+    ),
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
@@ -3379,6 +3387,7 @@ def messages_send(
         is_service_command,
         make_url_downloader,
         mass_send_message,
+        normalize_rich_markdown,
         parse_delay,
         parse_schedule_at,
         redact_message_text,
@@ -3429,6 +3438,15 @@ def messages_send(
     # Read and bound the file here so bad input costs no backend connection, in
     # dry-run and real runs alike.
     rich_markdown_text: str | None = None
+    if spaced_paragraphs is not None and rich_markdown is None:
+        # The knob only affects how markdown is rewritten before it is parsed
+        # server-side; accepting it for a plain send would silently do nothing.
+        typer.echo(
+            "--spaced-paragraphs/--no-spaced-paragraphs is only meaningful with "
+            "--rich-markdown",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     if rich_markdown is not None:
         if (text and text.strip()) or has_attachments:
             typer.echo(
@@ -3504,6 +3522,14 @@ def messages_send(
         raise typer.Exit(code=2) from exc
 
     config, manager, store, open_backends = _build_message_backends(config_path)
+
+    # An explicit flag wins over telegram.defaults.rich_markdown_spaced_paragraphs,
+    # which in turn wins over the built-in default (on).
+    effective_spaced_paragraphs = (
+        spaced_paragraphs
+        if spaced_paragraphs is not None
+        else spaced_paragraphs_default(config)
+    )
 
     # Mass mode and chat_name resolution both need the folder default.
     if is_mass or chat_name is not None:
@@ -3719,6 +3745,17 @@ def messages_send(
             rch_name = info.get("chat_name")
             rtopic_id = info["telegram_topic_id"]
             is_rich = rich_markdown_text is not None
+            # Preview exactly what the real send would hand to Telegram: the
+            # domain normalises before its own length check, so the numbers
+            # reported here are post-normalization.
+            rich_normalization = (
+                normalize_rich_markdown(
+                    rich_markdown_text or "",
+                    spaced_paragraphs=effective_spaced_paragraphs,
+                )
+                if is_rich
+                else None
+            )
             resolved_payload = {
                 "mode": "targeted",
                 "telegram_chat_id": rch_id,
@@ -3742,9 +3779,32 @@ def messages_send(
                 # and the source path, never the markdown itself.
                 "rich_markdown": is_rich,
                 "rich_markdown_chars": (
-                    len(rich_markdown_text) if is_rich else None
+                    len(rich_normalization.markdown)
+                    if rich_normalization is not None
+                    else None
+                ),
+                "rich_markdown_blocks": (
+                    rich_normalization.blocks
+                    if rich_normalization is not None
+                    else None
+                ),
+                "rich_markdown_media": (
+                    rich_normalization.media
+                    if rich_normalization is not None
+                    else None
                 ),
                 "rich_markdown_file": (str(rich_markdown) if is_rich else None),
+                # ``spaced_paragraphs`` echoes the *effective* decision: the
+                # flag, else the config default. ``spaced`` is what the pass
+                # actually did (a block-limit rollback turns it False).
+                "spaced_paragraphs": (
+                    effective_spaced_paragraphs if is_rich else None
+                ),
+                "spaced": (
+                    rich_normalization.spaced
+                    if rich_normalization is not None
+                    else None
+                ),
             }
             if chat_name is not None:
                 resolved_payload["folder_name"] = resolved_folder_name
@@ -3754,10 +3814,24 @@ def messages_send(
                 else f"chat {rch_id}"
             )
             what = (
-                f"rich message ({len(rich_markdown_text or '')} chars)"
-                if is_rich
+                f"rich message ({len(rich_normalization.markdown)} chars)"
+                if rich_normalization is not None
                 else "message"
             )
+            rich_warnings = list(
+                rich_normalization.warnings if rich_normalization is not None else ()
+            )
+            if (
+                rich_normalization is not None
+                and len(rich_normalization.markdown) > MAX_RICH_MARKDOWN_CHARS
+            ):
+                # The real send would raise on the post-normalization length;
+                # say so here rather than reporting a plan that cannot run.
+                rich_warnings.append(
+                    f"rich_markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
+                    f"({len(rich_normalization.markdown)} after normalization); "
+                    "the real send would fail"
+                )
             payload = {
                 "status": "dry_run",
                 "dry_run": True,
@@ -3765,7 +3839,7 @@ def messages_send(
                 "would": f"send {what} to {target}",
                 "resolved": resolved_payload,
                 "planned_actions": [f"would send {what} to {target}"],
-                "warnings": [],
+                "warnings": rich_warnings,
             }
         typer.echo(json.dumps(payload, sort_keys=True, default=str))
         return
@@ -3847,7 +3921,7 @@ def messages_send(
                 schedule_at=resolved_schedule_at,
                 reply_to_message_id=reply_to,
                 rich_markdown=rich_markdown_text,
-                spaced_paragraphs=spaced_paragraphs_default(config),
+                spaced_paragraphs=effective_spaced_paragraphs,
             )
             result_single, op = await send_message(
                 backend=message_backend,
@@ -3887,6 +3961,11 @@ def messages_send(
         typer.echo(f"messages send failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
+    # Non-fatal notes (block/media budget, a rolled-back spacer pass) ride the
+    # result payload; echo them to stderr too so a human sees them without
+    # having to read the JSON.
+    for warning in payload.get("warnings") or ():
+        typer.echo(f"warning: {warning}", err=True)
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
 
 
