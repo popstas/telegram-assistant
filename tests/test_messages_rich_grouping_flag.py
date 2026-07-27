@@ -413,10 +413,47 @@ def test_cli_dry_run_lists_media_groups(
             "size": 2,
             "mode": "slideshow",
             "preceding_text": "Пляж был пустой",
+            "caption": "",
         }
     ]
     assert resolved["rich_markdown_media"] == 2
     assert backend.sent == []
+
+
+def test_cli_dry_run_reports_the_group_caption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Grouped media show no caption of their own, so the group's is worth showing."""
+    config_file, md_file, backend = _cli_setup(tmp_path, monkeypatch)
+    md_file.write_text(
+        'Пляж был пустой\n\n![](https://x/a.jpg "Отлив")\n\n'
+        '![](https://x/b.jpg "Прилив")\n\nи мы остались\n',
+        encoding="utf-8",
+    )
+
+    result = _run_cli(_send_args(config_file, md_file, "--dry-run"))
+
+    assert result.exit_code == 0, _cli_output(result)
+    resolved = json.loads(result.stdout.strip().splitlines()[-1])["resolved"]
+    assert resolved["rich_markdown_groups"][0]["caption"] == "Отлив, Прилив"
+    assert backend.sent == []
+
+
+def test_cli_send_carries_the_group_caption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file, md_file, backend = _cli_setup(tmp_path, monkeypatch)
+    md_file.write_text(
+        'Пляж был пустой\n\n![](https://x/a.jpg "Отлив")\n\n'
+        '![](https://x/b.jpg "Прилив")\n\nи мы остались\n',
+        encoding="utf-8",
+    )
+
+    result = _run_cli(_send_args(config_file, md_file))
+
+    assert result.exit_code == 0, _cli_output(result)
+    sent = backend.sent[0]["rich_markdown"]
+    assert "<figcaption>Отлив, Прилив</figcaption>\n\n</tg-collage>" in sent
 
 
 def test_cli_dry_run_plain_send_has_no_group_markers(

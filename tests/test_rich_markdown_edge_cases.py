@@ -249,8 +249,11 @@ def test_spacing_rolls_back_one_block_over_the_limit() -> None:
 
 
 def test_an_unspaced_article_exactly_at_the_block_limit_does_not_warn() -> None:
+    # ``spaced_paragraphs=False`` isolates the budget check: with spacing on,
+    # 500 ungrouped media earn 499 trailing spacers, and the rollback warning
+    # below is the *spacer* pass reporting itself (covered by its own test).
     source = "\n\n".join(f"![](https://x/{n}.jpg)" for n in range(MAX_RICH_BLOCKS))
-    result = normalize_rich_markdown(source, grouping="none")
+    result = normalize_rich_markdown(source, grouping="none", spaced_paragraphs=False)
 
     assert result.blocks == MAX_RICH_BLOCKS
     assert not any("500-block limit" in warning for warning in result.warnings)

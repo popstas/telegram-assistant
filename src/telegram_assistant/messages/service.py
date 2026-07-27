@@ -83,6 +83,18 @@ def spaced_paragraphs_default(config: Any) -> bool:
     return True if value is None else bool(value)
 
 
+def line_breaks_default(config: Any) -> bool:
+    """Read ``telegram.defaults.rich_markdown_line_breaks`` from ``config``.
+
+    The twin of :func:`spaced_paragraphs_default`, with the same tolerance for a
+    config predating the knob: the built-in default is ``True``, and a per-call
+    flag still wins over it.
+    """
+    defaults = getattr(getattr(config, "telegram", None), "defaults", None)
+    value = getattr(defaults, "rich_markdown_line_breaks", None)
+    return True if value is None else bool(value)
+
+
 def media_grouping_default(config: Any) -> str:
     """Read ``telegram.defaults.rich_markdown_grouping`` from ``config``.
 
@@ -463,6 +475,12 @@ class SendMessageRequest:
     paragraphs tight against each other. ``False`` sends the source
     byte-for-byte.
 
+    ``line_breaks`` (default ``True``, config default
+    ``telegram.defaults.rich_markdown_line_breaks``) is the same pass's third
+    half: each line of a top-level paragraph becomes its own paragraph, so the
+    single newlines an author wrote survive instead of being folded into
+    spaces by the server's markdown parser.
+
     ``media_grouping`` (config default ``telegram.defaults.rich_markdown_grouping``)
     is the same pass's other half: a run of two or more consecutive media
     blocks is wrapped in ``<tg-collage>``/``<tg-slideshow>``, or left alone
@@ -493,6 +511,7 @@ class SendMessageRequest:
     reply_to_message_id: int | None = None
     rich_markdown: str | None = None
     spaced_paragraphs: bool = True
+    line_breaks: bool = True
     media_grouping: str = DEFAULT_MEDIA_GROUP_MODE
     media_groups: tuple[MediaGroupChoice, ...] = field(default_factory=tuple)
     rich_files: tuple[RichFile, ...] = field(default_factory=tuple)
@@ -554,6 +573,7 @@ class SendMessageRequest:
                 )
             ),
             "spaced_paragraphs": self.spaced_paragraphs,
+            "line_breaks": self.line_breaks,
             "media_grouping": self.media_grouping,
             "media_groups": [
                 {"index": choice.index, "mode": choice.mode}
@@ -719,6 +739,7 @@ async def send_message(
         normalization = normalize_rich_markdown(
             request.rich_markdown,
             spaced_paragraphs=request.spaced_paragraphs,
+            line_breaks=request.line_breaks,
             grouping=request.media_grouping,
             media_groups=request.media_groups,
         )
@@ -733,6 +754,7 @@ async def send_message(
                 name
                 for name, applied in (
                     ("paragraph spacing", normalization.spacers_added),
+                    ("line splitting", normalization.lines_split),
                     ("media grouping", normalization.grouped),
                 )
                 if applied

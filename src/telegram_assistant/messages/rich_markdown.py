@@ -80,6 +80,13 @@ DEFAULT_MEDIA_GROUP_MODE = "collage"
 #: The container tag each grouping mode wraps a media run in.
 MEDIA_GROUP_TAGS = {"collage": "tg-collage", "slideshow": "tg-slideshow"}
 
+#: The tag that gives a container its own caption. Telegram folds it into the
+#: group's ``caption`` field rather than rendering it as a block, so it does not
+#: count toward the block budget — ``scripts/spike_rich_collage_caption.py``
+#: proved both that and that a bare text line inside the tag leaks out as a
+#: paragraph *after* the group instead.
+FIGCAPTION_TAG = "figcaption"
+
 #: How much of the text before a media run is reported back, so a surface can
 #: say *which* run it is asking about without echoing the article.
 MEDIA_GROUP_CONTEXT_CHARS = 50
@@ -120,6 +127,12 @@ _FOOTNOTE_RE = re.compile(r"^ {0,3}\[\^[^\]]+\]:")
 _TABLE_DELIM_RE = re.compile(r"^ {0,3}\|?(?:\s*:?-{1,}:?\s*\|)+\s*:?-*:?\s*\|?\s*$")
 _HTML_OPEN_RE = re.compile(
     r"^ {0,3}</?(?P<tag>" + "|".join(HTML_BLOCK_TAGS) + r")\b[^>]*>", re.IGNORECASE
+)
+# A whole-line ``<figcaption>…</figcaption>``. It is deliberately *not* in
+# ``HTML_BLOCK_TAGS``: the scanner should keep reading it as one line inside its
+# container, not open a nested block for it.
+_FIGCAPTION_RE = re.compile(
+    rf"^ {{0,3}}<{FIGCAPTION_TAG}\b[^>]*>.*</{FIGCAPTION_TAG}>\s*$", re.IGNORECASE
 )
 
 # The anchored forms classify a *line* (is this block media?); the unanchored
@@ -213,13 +226,17 @@ class MediaGroup:
     decision (config default, or the caller's override), and
     ``preceding_text`` the tail of the text right above the run — enough for a
     surface to ask "the media after «…» — collage or slideshow?" without
-    echoing the article.
+    echoing the article. ``caption`` is the group caption built from the
+    captions of its media (see :func:`_group_caption`); it is reported for every
+    run, including one grouped ``none``, and is empty when no member carries a
+    caption.
     """
 
     index: int
     size: int
     preceding_text: str
     mode: str
+    caption: str = ""
 
 
 class MediaGroupError(ValueError):
@@ -253,10 +270,12 @@ class RichMarkdownNormalization:
     warnings: tuple[str, ...] = ()
     groups: tuple[MediaGroup, ...] = ()
     #: Whether each pass actually rewrote the source. ``spaced`` says the
-    #: spacer pass ran; these say it (and the grouping pass) changed something,
-    #: which is what a caller reporting a size increase must name.
+    #: spacer pass ran; these say it (and the grouping and line-splitting
+    #: passes) changed something, which is what a caller reporting a size
+    #: increase must name.
     grouped: bool = False
     spacers_added: bool = False
+    lines_split: bool = False
 
 
 class MediaResolutionError(ValueError):
@@ -632,10 +651,11 @@ def normalize_rich_markdown(
     markdown: str,
     *,
     spaced_paragraphs: bool = True,
+    line_breaks: bool = True,
     grouping: str = DEFAULT_MEDIA_GROUP_MODE,
     media_groups: MediaGroupOverrides = None,
 ) -> RichMarkdownNormalization:
-    """Group media runs, insert paragraph spacers, report the block/media budget.
+    """Group media runs, split soft breaks, insert paragraph spacers, report the budget.
 
     Telegram renders neighbouring ``PageBlockParagraph``s tight against each
     other, so the blank lines of the source are lost and a long article reads
@@ -654,10 +674,21 @@ def normalize_rich_markdown(
     :attr:`RichMarkdownNormalization.groups`); an index that names no run
     raises :class:`MediaGroupError` rather than being silently dropped.
 
+    ``line_breaks`` (see :func:`_split_paragraph_lines`) splits a top-level
+    paragraph's own lines into one paragraph each, so the single newlines an
+    Obsidian note writes survive instead of being folded into spaces. It runs
+    **after** spacing precisely so the spacer pass never sees the pairs it
+    produces: two lines the author wrote under one another belong together and
+    must stay tight, while two paragraphs they separated with a blank line get
+    the usual spacer.
+
     Cosmetics must not break a send: when spacing would push the article past
     :data:`MAX_RICH_BLOCKS`, the unspaced markdown is returned with a warning
-    instead. An article that is *already* over the block or media limit is
-    also only warned about — the server decides.
+    instead. Splitting is counted the same way — the blocks it adds are part of
+    what the spacing decision weighs, so the two passes cannot together sneak
+    the article over the limit that either alone respects.  An article that is
+    *already* over the block or media limit is only warned about — the server
+    decides.
     """
 
     blocks = scan_blocks(markdown)
@@ -670,22 +701,42 @@ def normalize_rich_markdown(
         blocks = scan_blocks(grouped)
 
     media = count_media(blocks)
-    result = grouped
-    total = count_blocks(blocks)
-    spaced = False
+
+    def _split(text: str, text_blocks: tuple[Block, ...]) -> str:
+        return _split_paragraph_lines(text, text_blocks) if line_breaks else text
+
+    # The unspaced article, already split: what a rolled-back spacing pass
+    # falls back to, and the baseline its block count is compared against.
+    unspaced = _split(grouped, blocks)
+    unspaced_total = count_blocks(blocks if unspaced is grouped else scan_blocks(unspaced))
+
+    result, total = unspaced, unspaced_total
+    spaced = spacers_added = False
 
     if spaced_paragraphs:
         candidate = _insert_spacers(grouped, blocks)
-        candidate_total = total if candidate is grouped else count_blocks(scan_blocks(candidate))
+        if candidate is grouped:
+            # Nothing to space (one block, or an already-spaced article): the
+            # split article *is* the spaced one.
+            candidate_final, candidate_total = unspaced, unspaced_total
+        else:
+            candidate_blocks = scan_blocks(candidate)
+            candidate_final = _split(candidate, candidate_blocks)
+            candidate_total = count_blocks(
+                candidate_blocks
+                if candidate_final is candidate
+                else scan_blocks(candidate_final)
+            )
         if candidate_total > MAX_RICH_BLOCKS:
             warnings.append(
                 f"spaced_paragraphs disabled: {candidate_total} blocks "
                 f"would exceed the {MAX_RICH_BLOCKS}-block limit"
             )
         else:
-            result = candidate
+            result = candidate_final
             total = candidate_total
             spaced = True
+            spacers_added = candidate is not grouped
 
     if total > MAX_RICH_BLOCKS:
         warnings.append(
@@ -704,7 +755,8 @@ def normalize_rich_markdown(
         warnings=tuple(warnings),
         groups=groups,
         grouped=grouped is not markdown,
-        spacers_added=result is not grouped,
+        spacers_added=spacers_added,
+        lines_split=unspaced is not grouped,
     )
 
 
@@ -941,12 +993,32 @@ def _is_blank(line: str) -> bool:
     return not line.strip() and NBSP not in line
 
 
+def _is_media_like(block: Block) -> bool:
+    """``True`` for a medium, or for the container a media run was grouped into.
+
+    A ``<tg-collage>``/``<tg-slideshow>`` *is* the media as far as the article's
+    vertical rhythm goes, so it earns the same trailing spacer a lone photo
+    does. ``<details>`` does not — it is a spoiler container that happens to be
+    spelled with a tag.
+    """
+
+    return block.kind == "media" or (
+        block.kind == "html" and block.html_tag in set(MEDIA_GROUP_TAGS.values())
+    )
+
+
 def _needs_spacer_before(previous: Block, block: Block) -> bool:
     if previous.kind == "heading":
         # A heading already sits tight against what follows it by design.
         return False
     if is_spacer_block(previous) or is_spacer_block(block):
         return False
+    if _is_media_like(previous):
+        # Telegram renders whatever follows a photo/collage hard against it, so
+        # every medium gets a spacer *after* it — before text, before another
+        # medium, before anything. Nothing is inserted *before* media: an
+        # embed's own lead-in line belongs with it.
+        return True
     if block.kind == "heading":
         return True
     return previous.kind == "paragraph" and block.kind == "paragraph"
@@ -981,6 +1053,57 @@ def _insert_spacers(markdown: str, blocks: tuple[Block, ...]) -> str:
         out.append(SPACER_LINE)
         out.append("")
         cursor = start
+    out.extend(lines[cursor:])
+    text = "\n".join(out)
+    return text + "\n" if markdown.endswith(("\n", "\r")) else text
+
+
+def _split_paragraph_lines(markdown: str, blocks: tuple[Block, ...]) -> str:
+    """Return ``markdown`` with each top-level paragraph's *own* lines split apart.
+
+    Telegram parses the markdown server-side and, like CommonMark, folds a
+    single newline inside a paragraph into a space, so an Obsidian note's::
+
+        Фотоальбом - https://…
+        Видео плейлист - https://…
+
+    arrives as one run-on line. The spacer pass cannot help: it inserts blocks
+    *between* blocks, and those two lines are one ``PageBlockParagraph``.
+
+    A blank line is inserted between them instead, so each source line becomes
+    its own paragraph — which the clients render tight against each other,
+    exactly the "two lines, no gap" the author wrote. ``scripts/
+    spike_rich_line_breaks.py`` proved that a real in-paragraph hard break
+    (two trailing spaces, a trailing ``\\``, ``<br>``) is *also* accepted and
+    keeps the pair in one block; the split is emitted anyway because that is
+    what reads better in the clients. The cost of that choice is idempotency:
+    a split pair is indistinguishable from two paragraphs the author wrote, so
+    re-normalising this pass's own output would let the spacer pass push them
+    apart. Nothing in a send does that — ``send_message`` normalises once, from
+    the source the author supplied.
+
+    Only **top-level paragraphs** are split, mirroring the spacer and grouping
+    passes: lines inside a quote, a list item or an HTML container keep their
+    author-written shape. The original string is returned by identity when no
+    paragraph has a second line, so byte fidelity survives.
+    """
+
+    points = [
+        index
+        for block in blocks
+        if block.kind == "paragraph" and len(block.lines) > 1 and not is_spacer_block(block)
+        for index in range(block.start + 1, block.end)
+    ]
+    if not points:
+        return markdown
+
+    lines = split_lines(markdown)
+    out: list[str] = []
+    cursor = 0
+    for index in points:
+        out.extend(lines[cursor:index])
+        out.append("")
+        cursor = index
     out.extend(lines[cursor:])
     text = "\n".join(out)
     return text + "\n" if markdown.endswith(("\n", "\r")) else text
@@ -1032,6 +1155,28 @@ def _preceding_text(blocks: tuple[Block, ...], run_start: int) -> str:
             return text
         return "…" + text[-MEDIA_GROUP_CONTEXT_CHARS:]
     return ""
+
+
+def _group_caption(blocks: tuple[Block, ...], run: list[int]) -> str:
+    """The caption a wrapped run should carry: its members' captions, joined.
+
+    Telegram's clients show **no** caption under an individual medium inside a
+    collage or slideshow — only the group's own ``PageBlockCollage.caption`` —
+    so the captions the author wrote per image go unseen the moment the pass
+    groups them. (They do survive on the wire: a read-back of a grouped article
+    has ``PageBlockPhoto.caption`` populated inside the collage. It is the
+    rendering that ignores them, which is why the group needs its own.) Members
+    without a caption contribute nothing — a run where none has one gets no
+    caption at all and is wrapped byte-identically to what it was before this
+    existed; duplicates are kept, the text being the author's.
+    """
+
+    captions = [
+        block.media.caption.strip()
+        for index in run
+        if (block := blocks[index]).media is not None and block.media.caption.strip()
+    ]
+    return ", ".join(captions)
 
 
 def _coerce_overrides(overrides: MediaGroupOverrides, count: int) -> dict[int, str]:
@@ -1103,6 +1248,7 @@ def _apply_grouping(
             size=len(run),
             preceding_text=_preceding_text(blocks, run[0]),
             mode=resolved.get(index, default_mode),
+            caption=_group_caption(blocks, run),
         )
         for index, run in enumerate(runs)
     )
@@ -1121,7 +1267,9 @@ def _wrap_media_runs(
 
     The dialect wants the media blank-line separated *inside* the tag, so the
     run's own line range is rebuilt: the media lines survive verbatim, the
-    whitespace between them does not.
+    whitespace between them does not. A run whose media carry captions also gets
+    a :data:`FIGCAPTION_TAG` line as the container's last block — the group
+    caption, which is the only caption Telegram shows for grouped media.
     """
 
     lines = split_lines(markdown)
@@ -1138,6 +1286,9 @@ def _wrap_media_runs(
         for block_index in run:
             out.append("")
             out.extend(blocks[block_index].lines)
+        if group.caption:
+            out.append("")
+            out.append(f"<{FIGCAPTION_TAG}>{group.caption}</{FIGCAPTION_TAG}>")
         out.append("")
         out.append(f"</{tag}>")
         cursor = last.end
@@ -1566,12 +1717,20 @@ def _consume_html(
             tuple(lines[index:end]),
             offset + index,
             offset + end,
-            weight=1 + count_blocks(children),
+            # A ``<figcaption>`` is this container's caption field, not a block
+            # of its own: counting it would over-report the block budget by one
+            # per captioned collage and could roll back the spacer pass for
+            # blocks Telegram never charges.
+            weight=1 + sum(0 if _is_figcaption(child) else child.weight for child in children),
             children=children,
             html_tag=tag,
         )
     )
     return end
+
+
+def _is_figcaption(block: Block) -> bool:
+    return len(block.lines) == 1 and bool(_FIGCAPTION_RE.match(block.lines[0]))
 
 
 def _consume_table(lines: list[str], index: int, offset: int, blocks: list[Block]) -> int:

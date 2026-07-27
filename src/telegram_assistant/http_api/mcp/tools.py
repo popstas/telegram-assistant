@@ -191,6 +191,7 @@ from telegram_assistant.messages import (
     edit_message,
     forward_messages,
     get_recent_messages,
+    line_breaks_default,
     make_url_downloader,
     mass_send_message,
     media_grouping_default,
@@ -767,6 +768,11 @@ async def _resolve_message_send(
                     getattr(request.app.state, "config", None)
                 )
             ),
+            line_breaks=(
+                body.line_breaks
+                if body.line_breaks is not None
+                else line_breaks_default(getattr(request.app.state, "config", None))
+            ),
             # Grouping of consecutive media applies to a remote caller's
             # https-media article too; the per-group override is CLI-only.
             media_grouping=media_grouping_default(
@@ -1215,6 +1221,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         reply_to_message_id: int | None = None,
         rich_markdown: str | None = None,
         spaced_paragraphs: bool | None = None,
+        line_breaks: bool | None = None,
     ) -> dict[str, Any]:
         """Send a message to a chat (targeted by ``entity`` or ``telegram_chat_id``).
 
@@ -1238,6 +1245,12 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         spacer pass only — consecutive media blocks are still grouped into
         ``<tg-collage>``/``<tg-slideshow>`` per the server's
         ``rich_markdown_grouping`` setting, which this surface cannot override.
+        ``line_breaks`` (rich sends only — an error without ``rich_markdown``)
+        splits each line of a paragraph into its own paragraph, so the single
+        newlines the author wrote survive instead of being folded into spaces by
+        the server's markdown parser. Leave it unset to follow the server
+        default (normally on).
+
         Non-fatal notes about the article (block/media budget) come back in the
         result's ``warnings``.
         """
@@ -1257,6 +1270,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 reply_to_message_id=reply_to_message_id,
                 rich_markdown=rich_markdown,
                 spaced_paragraphs=spaced_paragraphs,
+                line_breaks=line_breaks,
             )
             return await _resolve_message_send(request, body)
         except Exception as exc:

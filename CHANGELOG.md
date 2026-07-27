@@ -24,22 +24,8 @@
 
 ### Bug Fixes
 
-- Address code review findings
-- Address code review findings
-- Address code review findings
-- Address code review findings
-- Address code review findings
-- Address codex review findings
-- Address code review findings
-- Address code review findings
-- Address code review findings
-- Address code review findings
-- Resolve rich-markdown media anywhere in a line, not just whole lines
-- review: Resolve every rich-markdown media line, not just media blocks
-- Address code review findings
-- Never claim a foreign UpdateMessageID as the rich send's id
-- Keep rich-send env/id failures out of the previous_attempt_failed taxonomy
-- review: Handle UpdateShort* envelopes in rich send id extraction
+- review: Address rich-markdown spacing and local-media review findings
+- review: Harden rich-send id extraction and error taxonomy
 
 ### Documentation
 

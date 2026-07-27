@@ -116,11 +116,32 @@ def test_no_spacers_inside_non_paragraph_blocks(source: str) -> None:
     assert normalize_rich_markdown(source).markdown == source
 
 
-def test_media_blocks_are_not_spaced_apart() -> None:
+def test_every_medium_gets_a_spacer_after_it() -> None:
     # ``grouping="none"`` isolates the spacer pass — the collage default would
     # otherwise rewrite this run (covered in test_rich_markdown_grouping.py).
-    source = "![](https://x/a.jpg)\n\n![](https://x/b.jpg)"
-    assert normalize_rich_markdown(source, grouping="none").markdown == source
+    source = "![](https://x/a.jpg)\n\n![](https://x/b.jpg)\n\ntext"
+    result = normalize_rich_markdown(source, grouping="none")
+    assert result.markdown == (
+        f"![](https://x/a.jpg)\n\n{NBSP}\n\n![](https://x/b.jpg)\n\n{NBSP}\n\ntext"
+    )
+
+
+def test_a_grouped_run_gets_one_spacer_after_the_container() -> None:
+    source = "![](https://x/a.jpg)\n![](https://x/b.jpg)\n\ntext"
+    result = normalize_rich_markdown(source)
+    assert result.markdown.endswith(f"</tg-collage>\n\n{NBSP}\n\ntext")
+    assert spacers(result.markdown) == 1
+
+
+def test_nothing_is_inserted_before_media() -> None:
+    # An embed's lead-in line belongs with it; only the trailing side is spaced.
+    source = "text\n\n![](https://x/a.jpg)"
+    assert normalize_rich_markdown(source).markdown == source
+
+
+def test_a_trailing_medium_gets_no_spacer() -> None:
+    source = "![](https://x/a.jpg)"
+    assert normalize_rich_markdown(source).markdown == source
 
 
 def test_paragraph_next_to_a_list_is_not_spaced() -> None:
@@ -131,6 +152,73 @@ def test_paragraph_next_to_a_list_is_not_spaced() -> None:
 def test_media_inside_a_fence_is_not_treated_as_media() -> None:
     result = normalize_rich_markdown("```\n![](https://x/a.jpg)\n```")
     assert result.media == 0
+
+
+# --- line breaks inside a paragraph -----------------------------------------
+
+
+def test_soft_break_becomes_its_own_paragraph_with_no_spacer() -> None:
+    # The reported bug: Telegram folds a single newline into a space, so the
+    # two lines arrive as one run-on line. They must become two paragraphs —
+    # and the spacer pass must *not* push them apart afterwards.
+    source = "Заголовок.\n\nФотоальбом - A\nВидео плейлист - B"
+    result = normalize_rich_markdown(source)
+    assert result.markdown == f"Заголовок.\n\n{NBSP}\n\nФотоальбом - A\n\nВидео плейлист - B"
+    assert result.lines_split is True
+    assert result.blocks == 4
+
+
+def test_a_three_line_paragraph_splits_into_three() -> None:
+    assert normalize_rich_markdown("a\nb\nc").markdown == "a\n\nb\n\nc"
+
+
+def test_split_paragraphs_still_get_spacers_around_the_run() -> None:
+    result = normalize_rich_markdown("one\ntwo\n\nthree")
+    assert result.markdown == f"one\n\ntwo\n\n{NBSP}\n\nthree"
+
+
+def test_line_breaks_disabled_leaves_the_paragraph_alone() -> None:
+    source = "Фотоальбом - A\nВидео плейлист - B"
+    result = normalize_rich_markdown(source, line_breaks=False)
+    assert result.markdown == source
+    assert result.lines_split is False
+    assert result.blocks == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "```\none\ntwo\n```",
+        "    one\n    two",
+        "- one\n- two",
+        "| a | b |\n| --- | --- |\n| 1 | 2 |",
+        "> one\n> two",
+        "<details>\none\ntwo\n</details>",
+        "Title\n=====",
+    ],
+)
+def test_only_top_level_paragraphs_are_split(source: str) -> None:
+    assert normalize_rich_markdown(source, spaced_paragraphs=False).markdown == source
+
+
+def test_a_single_line_paragraph_is_returned_by_identity() -> None:
+    # Identity, not equality: nothing to split means the CRLF and the trailing
+    # newline reach Telegram byte for byte.
+    source = "one\r\n\r\n# Title\r\n"
+    assert normalize_rich_markdown(source, spaced_paragraphs=False).markdown is source
+
+
+def test_splitting_counts_toward_the_block_budget() -> None:
+    # 200 two-line paragraphs = 400 paragraphs + 199 spacers = 599 > 500, so the
+    # spacer pass rolls back and the split article is what remains.
+    source = "\n\n".join("a\nb" for _ in range(200))
+    result = normalize_rich_markdown(source)
+    assert result.spaced is False
+    assert result.lines_split is True
+    assert result.blocks == 400
+    assert result.warnings == (
+        f"spaced_paragraphs disabled: 599 blocks would exceed the {MAX_RICH_BLOCKS}-block limit",
+    )
 
 
 # --- idempotency -------------------------------------------------------------

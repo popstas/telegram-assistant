@@ -141,6 +141,83 @@ def test_grouping_and_spacing_compose() -> None:
     assert result.grouped is True
 
 
+# --- group caption -----------------------------------------------------------
+
+# Telegram's clients render no caption under an individual medium inside a
+# group — only the group's own caption — so the author's per-image captions go
+# unseen once a run is wrapped. The markdown spells the group's caption
+# ``<figcaption>`` inside the container tag, proven by
+# ``scripts/spike_rich_collage_caption.py``.
+
+CAPTIONED = '![](https://x/a.jpg "Отлив")\n\n![](https://x/b.jpg "Прилив")'
+
+
+def test_group_caption_lists_the_member_captions() -> None:
+    result = normalize_rich_markdown(CAPTIONED)
+    assert result.markdown == (
+        '<tg-collage>\n\n![](https://x/a.jpg "Отлив")\n\n![](https://x/b.jpg "Прилив")\n\n'
+        "<figcaption>Отлив, Прилив</figcaption>\n\n</tg-collage>"
+    )
+    assert result.groups[0].caption == "Отлив, Прилив"
+
+
+def test_media_keep_their_own_captions_inside_the_group() -> None:
+    # No client renders them inside a group, but an operator re-running with
+    # --media-group <i>=none gets them shown again, so the pass keeps them.
+    assert normalize_rich_markdown(CAPTIONED).markdown.count('"Отлив"') == 1
+
+
+def test_group_without_captions_gets_no_figcaption() -> None:
+    result = normalize_rich_markdown(TWO)
+    assert "<figcaption>" not in result.markdown
+    assert result.groups[0].caption == ""
+
+
+def test_group_caption_skips_media_without_one() -> None:
+    source = (
+        '![](https://x/a.jpg "Отлив")\n\n![](https://x/b.jpg)\n\n![](https://x/c.jpg "Закат")'
+    )
+    result = normalize_rich_markdown(source)
+    assert "<figcaption>Отлив, Закат</figcaption>" in result.markdown
+
+
+def test_group_caption_falls_back_to_alt_text() -> None:
+    source = "![Отлив](https://x/a.jpg)\n\n![Прилив](https://x/b.jpg)"
+    assert "<figcaption>Отлив, Прилив</figcaption>" in normalize_rich_markdown(source).markdown
+
+
+def test_group_caption_reads_obsidian_embeds() -> None:
+    source = "![[one.png|Первый]]\n![[two.png|Второй]]"
+    assert "<figcaption>Первый, Второй</figcaption>" in normalize_rich_markdown(source).markdown
+
+
+def test_slideshow_gets_the_same_caption() -> None:
+    result = normalize_rich_markdown(CAPTIONED, media_groups={0: "slideshow"})
+    assert "<figcaption>Отлив, Прилив</figcaption>\n\n</tg-slideshow>" in result.markdown
+
+
+def test_an_ungrouped_run_gets_no_figcaption_but_still_reports_the_caption() -> None:
+    result = normalize_rich_markdown(
+        CAPTIONED, media_groups={0: "none"}, spaced_paragraphs=False
+    )
+    assert result.markdown == CAPTIONED
+    assert result.groups[0].caption == "Отлив, Прилив"
+
+
+def test_group_caption_is_not_a_block() -> None:
+    # Telegram folds it into the collage's own ``caption`` field, so counting it
+    # would over-report the block budget by one per captioned group.
+    result = normalize_rich_markdown(CAPTIONED)
+    assert result.blocks == 3
+    assert count_blocks(scan_blocks(result.markdown)) == result.blocks
+
+
+def test_grouping_with_captions_is_idempotent() -> None:
+    once = normalize_rich_markdown(f"intro\n\n{CAPTIONED}\n\noutro").markdown
+    assert normalize_rich_markdown(once).markdown == once
+    assert once.count("<figcaption>") == 1
+
+
 # --- preceding text ----------------------------------------------------------
 
 
@@ -177,7 +254,9 @@ def test_override_to_slideshow() -> None:
 
 
 def test_override_to_none_leaves_the_run_ungrouped() -> None:
-    result = normalize_rich_markdown(TWO, media_groups={0: "none"})
+    # ``spaced_paragraphs=False`` isolates grouping: an ungrouped media run
+    # now earns a trailing spacer per medium (see the spacer tests).
+    result = normalize_rich_markdown(TWO, media_groups={0: "none"}, spaced_paragraphs=False)
     assert result.markdown == TWO
     assert result.grouped is False
     assert result.groups[0].mode == "none"
@@ -202,7 +281,7 @@ def test_a_choice_sequence_and_a_mapping_decide_the_same_thing() -> None:
 
 
 def test_grouping_none_still_reports_the_run() -> None:
-    result = normalize_rich_markdown(TWO, grouping="none")
+    result = normalize_rich_markdown(TWO, grouping="none", spaced_paragraphs=False)
     assert result.markdown == TWO
     assert [(g.index, g.size, g.mode) for g in result.groups] == [(0, 2, "none")]
 
