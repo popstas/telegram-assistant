@@ -18,6 +18,13 @@ nested blocks, list items, table rows, quotation and details blocks"): a list
 counts as itself plus one per item, a table as itself plus one per row, and a
 quote/HTML block as itself plus everything nested inside it. It is an
 approximation of a server-side rule — used to *warn*, never to reject.
+
+:func:`normalize_rich_markdown` is the writing half: it inserts
+:data:`SPACER_LINE` (a lone U+00A0) as its own block where Telegram would
+otherwise render two paragraphs tight against each other. A line holding only a
+non-breaking space is *not* blank to this scanner — the server parses it as a
+``PageBlockParagraph``, which is exactly why it works as a spacer, and treating
+it as a real block is what makes normalisation idempotent.
 """
 
 from __future__ import annotations
@@ -35,6 +42,13 @@ MAX_RICH_MEDIA = 50
 #: nested blocks so grouping can tell author-written groups from runs it may
 #: wrap itself.
 HTML_BLOCK_TAGS = ("details", "tg-collage", "tg-slideshow")
+
+#: The non-breaking space. A line holding only this renders as an empty
+#: paragraph block, which is how vertical space is added to an article.
+NBSP = "\u00a0"
+
+#: The spacer :func:`normalize_rich_markdown` inserts, alone on its own line.
+SPACER_LINE = NBSP
 
 _FENCE_RE = re.compile(r"^ {0,3}(?P<char>`{3,}|~{3,})(?P<info>.*)$")
 _ATX_RE = re.compile(r"^ {0,3}(?P<hashes>#{1,6})(?:\s|$)")
@@ -74,6 +88,24 @@ BLOCK_KINDS = (
     "html",
     "footnote",
 )
+
+
+@dataclass(frozen=True)
+class RichMarkdownNormalization:
+    """What :func:`normalize_rich_markdown` decided about one article.
+
+    ``markdown`` is what should actually go to Telegram, ``blocks``/``media``
+    are the approximate counts of that text, ``spaced`` says whether the spacer
+    pass ran (it is ``False`` when disabled *or* rolled back), and ``warnings``
+    are operator-facing strings — normalisation never raises: Telegram is the
+    authority on what it accepts.
+    """
+
+    markdown: str
+    blocks: int
+    media: int
+    spaced: bool
+    warnings: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -230,6 +262,80 @@ def count_media(blocks: tuple[Block, ...] | list[Block]) -> int:
     return total
 
 
+def is_spacer_line(line: str) -> bool:
+    """``True`` for a line whose only content is non-breaking whitespace."""
+
+    return not line.strip() and NBSP in line
+
+
+def is_spacer_block(block: Block) -> bool:
+    """``True`` for a paragraph block that is nothing but spacer lines."""
+
+    return (
+        block.kind == "paragraph"
+        and bool(block.lines)
+        and all(is_spacer_line(line) for line in block.lines)
+    )
+
+
+def normalize_rich_markdown(
+    markdown: str, *, spaced_paragraphs: bool = True
+) -> RichMarkdownNormalization:
+    """Insert paragraph spacers and report the article's block/media budget.
+
+    Telegram renders neighbouring ``PageBlockParagraph``s tight against each
+    other, so the blank lines of the source are lost and a long article reads
+    as a wall of text. A paragraph holding only :data:`SPACER_LINE` restores
+    the gap; this inserts one between two consecutive plain paragraphs and
+    before a heading of any level — never after a heading, never inside a
+    code, table, list, quote or HTML block, and never next to a spacer the
+    author already wrote (so normalising twice is a no-op).
+
+    Cosmetics must not break a send: when spacing would push the article past
+    :data:`MAX_RICH_BLOCKS`, the unspaced markdown is returned with a warning
+    instead. An article that is *already* over the block or media limit is
+    also only warned about — the server decides.
+    """
+
+    blocks = scan_blocks(markdown)
+    media = count_media(blocks)
+    warnings: list[str] = []
+
+    result = markdown
+    total = count_blocks(blocks)
+    spaced = False
+
+    if spaced_paragraphs:
+        candidate = _insert_spacers(markdown, blocks)
+        candidate_total = total if candidate is markdown else count_blocks(scan_blocks(candidate))
+        if candidate_total > MAX_RICH_BLOCKS:
+            warnings.append(
+                f"spaced_paragraphs disabled: {candidate_total} blocks "
+                f"would exceed the {MAX_RICH_BLOCKS}-block limit"
+            )
+        else:
+            result = candidate
+            total = candidate_total
+            spaced = True
+
+    if total > MAX_RICH_BLOCKS:
+        warnings.append(
+            f"article has {total} blocks, over Telegram's {MAX_RICH_BLOCKS}-block limit"
+        )
+    if media > MAX_RICH_MEDIA:
+        warnings.append(
+            f"article has {media} media attachments, over Telegram's {MAX_RICH_MEDIA} limit"
+        )
+
+    return RichMarkdownNormalization(
+        markdown=result,
+        blocks=total,
+        media=media,
+        spaced=spaced,
+        warnings=tuple(warnings),
+    )
+
+
 def iter_media(blocks: tuple[Block, ...] | list[Block]):
     """Yield every media block in document order, nested blocks included."""
 
@@ -241,6 +347,62 @@ def iter_media(blocks: tuple[Block, ...] | list[Block]):
 
 
 # --- internals ---------------------------------------------------------------
+
+
+def _is_blank(line: str) -> bool:
+    """A block separator: whitespace only, and *not* a spacer line.
+
+    A lone U+00A0 is a paragraph to Telegram, so it must be a block here too —
+    otherwise re-normalising an already-spaced article would not see its own
+    spacers and would double every one of them.
+    """
+
+    return not line.strip() and NBSP not in line
+
+
+def _needs_spacer_before(previous: Block, block: Block) -> bool:
+    if previous.kind == "heading":
+        # A heading already sits tight against what follows it by design.
+        return False
+    if is_spacer_block(previous) or is_spacer_block(block):
+        return False
+    if block.kind == "heading":
+        return True
+    return previous.kind == "paragraph" and block.kind == "paragraph"
+
+
+def _insert_spacers(markdown: str, blocks: tuple[Block, ...]) -> str:
+    """Return ``markdown`` with spacer paragraphs inserted between top-level blocks.
+
+    The original string is returned unchanged (identity) when nothing needs
+    inserting, so an already-spaced document keeps its exact bytes — including
+    its line endings — and normalisation is idempotent.
+    """
+
+    points = [
+        index
+        for index in range(1, len(blocks))
+        if _needs_spacer_before(blocks[index - 1], blocks[index])
+    ]
+    if not points:
+        return markdown
+
+    lines = split_lines(markdown)
+    out: list[str] = []
+    cursor = 0
+    for index in points:
+        start = blocks[index].start
+        out.extend(lines[cursor:start])
+        if out and not _is_blank(out[-1]):
+            # The blocks touched (``para`` directly above ``# Heading``); the
+            # spacer needs a blank line on each side to be its own block.
+            out.append("")
+        out.append(SPACER_LINE)
+        out.append("")
+        cursor = start
+    out.extend(lines[cursor:])
+    text = "\n".join(out)
+    return text + "\n" if markdown.endswith(("\n", "\r")) else text
 
 
 def _is_remote(target: str) -> bool:
@@ -352,6 +514,7 @@ def _starts_new_block(lines: list[str], index: int) -> bool:
         or _LIST_RE.match(line)
         or _FOOTNOTE_RE.match(line)
         or _is_table_start(lines, index)
+        or is_spacer_line(line)
         or parse_media_line(line) is not None
     )
 
@@ -372,7 +535,7 @@ def _media_block_at(lines: list[str], index: int) -> MediaRef | None:
     if nxt >= len(lines):
         return media
     following = lines[nxt]
-    if not following.strip() or parse_media_line(following) is not None:
+    if _is_blank(following) or parse_media_line(following) is not None:
         return media
     return media if _starts_new_block(lines, nxt) else None
 
@@ -383,7 +546,13 @@ def _scan(lines: list[str], offset: int) -> tuple[Block, ...]:
     total = len(lines)
     while index < total:
         line = lines[index]
-        if not line.strip():
+        if _is_blank(line):
+            index += 1
+            continue
+        if is_spacer_line(line):
+            # Its own paragraph block, however it is surrounded — that is the
+            # whole point of the spacer, and it keeps normalisation idempotent.
+            blocks.append(Block("paragraph", (line,), offset + index, offset + index + 1))
             index += 1
             continue
         if _is_indented_code(line):
@@ -443,7 +612,7 @@ def _consume_indented_code(
     last_content = index
     while end < len(lines):
         line = lines[end]
-        if not line.strip():
+        if _is_blank(line):
             end += 1
             continue
         if not _is_indented_code(line):
@@ -500,7 +669,7 @@ def _consume_table(lines: list[str], index: int, offset: int, blocks: list[Block
     rows = 0
     while end < len(lines):
         line = lines[end]
-        if not line.strip() or "|" not in line:
+        if _is_blank(line) or "|" not in line:
             break
         if not _TABLE_DELIM_RE.match(line):
             rows += 1
@@ -536,9 +705,9 @@ def _consume_list(lines: list[str], index: int, offset: int, blocks: list[Block]
     total = len(lines)
     while end < total:
         line = lines[end]
-        if not line.strip():
+        if _is_blank(line):
             look = end
-            while look < total and not lines[look].strip():
+            while look < total and _is_blank(lines[look]):
                 look += 1
             if look < total and (
                 _ANY_LIST_RE.match(lines[look]) or _leading_ws(lines[look]) >= 2
@@ -576,7 +745,7 @@ def _consume_paragraph(lines: list[str], index: int, offset: int, blocks: list[B
     level: int | None = None
     while end < total:
         line = lines[end]
-        if not line.strip():
+        if _is_blank(line):
             break
         if _SETEXT_RE.match(line):
             # ``Title`` followed by ``===``/``---`` is a setext heading, not a
