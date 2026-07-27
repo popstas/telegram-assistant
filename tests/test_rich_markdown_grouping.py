@@ -186,16 +186,19 @@ def test_override_to_none_leaves_the_run_ungrouped() -> None:
 def test_override_one_run_of_two() -> None:
     source = f"{TWO}\n\ntext\n\n{TWO}"
     result = normalize_rich_markdown(
-        source, spaced_paragraphs=False, media_groups=[{"index": 1, "mode": "slideshow"}]
+        source, spaced_paragraphs=False, media_groups=[MediaGroupChoice(1, "slideshow")]
     )
     assert result.markdown.count("<tg-collage>") == 1
     assert result.markdown.count("<tg-slideshow>") == 1
     assert [g.mode for g in result.groups] == ["collage", "slideshow"]
 
 
-def test_override_accepts_plain_pairs() -> None:
-    result = normalize_rich_markdown(TWO, media_groups=[(0, "slideshow")])
-    assert result.groups[0].mode == "slideshow"
+def test_a_choice_sequence_and_a_mapping_decide_the_same_thing() -> None:
+    """The two accepted override shapes are interchangeable."""
+    from_choices = normalize_rich_markdown(TWO, media_groups=[MediaGroupChoice(0, "slideshow")])
+    from_mapping = normalize_rich_markdown(TWO, media_groups={0: "slideshow"})
+    assert from_choices.markdown == from_mapping.markdown
+    assert from_choices.groups[0].mode == from_mapping.groups[0].mode == "slideshow"
 
 
 def test_grouping_none_still_reports_the_run() -> None:
@@ -232,9 +235,25 @@ def test_unknown_default_grouping_is_an_error() -> None:
         normalize_rich_markdown(TWO, grouping="carousel")
 
 
+def test_conflicting_duplicate_index_is_an_error() -> None:
+    # Last-win would quietly drop the first mode and send the article grouped
+    # the other way with nothing reported — the same silent-ignore the unknown
+    # index check exists to prevent. A duplicate that agrees is harmless.
+    with pytest.raises(MediaGroupError, match="twice with different modes"):
+        normalize_rich_markdown(
+            TWO,
+            media_groups=[MediaGroupChoice(0, "collage"), MediaGroupChoice(0, "none")],
+        )
+    result = normalize_rich_markdown(
+        TWO,
+        media_groups=[MediaGroupChoice(0, "none"), MediaGroupChoice(0, "none")],
+    )
+    assert not result.markdown.startswith("<tg-collage>")
+
+
 def test_non_integer_index_is_an_error() -> None:
-    with pytest.raises(MediaGroupError):
-        normalize_rich_markdown(TWO, media_groups=[{"index": "first", "mode": "none"}])
+    with pytest.raises(MediaGroupError, match="must be an integer"):
+        normalize_rich_markdown(TWO, media_groups={"first": "none"})  # type: ignore[dict-item]
 
 
 # --- counting ----------------------------------------------------------------

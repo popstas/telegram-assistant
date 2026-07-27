@@ -460,6 +460,36 @@ async def test_rich_send_prefers_update_matching_own_random_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rich_send_accepts_an_unkeyed_update_message_id() -> None:
+    """An ``UpdateMessageID`` carrying no ``random_id`` claims no other request,
+    so it is still ours to read: refusing it would report a delivered article as
+    an unconfirmed send and quarantine the operation for nothing."""
+    from telethon.tl.types import Updates
+
+    class _UnkeyedUpdateMessageID:
+        def __init__(self, message_id: int) -> None:
+            self.id = message_id
+            self.random_id = None
+
+    _UnkeyedUpdateMessageID.__name__ = "UpdateMessageID"
+
+    class _EchoingClient(_RawClient):
+        async def __call__(self, request: Any) -> Any:
+            self.raw_calls.append(request)
+            return Updates(
+                updates=[_UnkeyedUpdateMessageID(909)],
+                users=[],
+                chats=[],
+                date=datetime(2026, 1, 1, tzinfo=UTC),
+                seq=0,
+            )
+
+    backend = TelethonMessageBackend(_EchoingClient())
+
+    assert await backend.send_message(chat_id=1, text="", rich_markdown=RICH_MD) == 909
+
+
+@pytest.mark.asyncio
 async def test_rich_send_ignores_foreign_keyed_update_message_id() -> None:
     """A keyed ``UpdateMessageID`` that isn't ours must never be used as a
     fallback: its id would be returned as the article's *and* recorded in the
@@ -914,6 +944,109 @@ async def test_media_rights_rejection_on_send_names_chat() -> None:
 
     with pytest.raises(RichMediaForbidden, match="42"):
         await backend.send_message(chat_id=42, text="", rich_markdown=RICH_MD)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rpc_code", ["CHAT_SEND_DOCS_FORBIDDEN", "CHAT_SEND_AUDIOS_FORBIDDEN"]
+)
+async def test_media_rights_rejection_telethon_leaves_unnamed(rpc_code: str) -> None:
+    """Telethon 1.44 generates no class for these two codes — they arrive as a
+    bare ``ForbiddenError`` — and they cover exactly the kinds local uploads
+    added (video/``.gif`` are documents, ``tg://audio`` is an audio document).
+    Built through Telethon's own factory, not a name-shaped stand-in, so the
+    mapping is pinned against what the wire actually produces."""
+    from telethon.errors import rpc_message_to_error
+
+    from telegram_assistant.messages.service import RichMediaForbidden
+
+    class _RawRpcError:
+        error_code = 403
+        error_message = rpc_code
+
+    error = rpc_message_to_error(_RawRpcError(), request=None)
+    assert type(error).__name__ == "ForbiddenError"
+
+    client = _UploadingClient(send_error=error)
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(RichMediaForbidden, match="42") as excinfo:
+        await backend.send_message(chat_id=42, text="", rich_markdown=RICH_MD)
+
+    assert rpc_code in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_plain_send_rejection_is_not_a_media_rights_problem() -> None:
+    """``CHAT_SEND_PLAIN_FORBIDDEN`` matches the ``CHAT_SEND_*_FORBIDDEN``
+    shape but is about text, not media — Telethon names it, and its ``message``
+    is a bare ``FORBIDDEN``, so the RPC-string fallback must not claim it."""
+    from telethon.errors import rpc_message_to_error
+
+    from telegram_assistant.messages.service import RichMediaForbidden
+
+    class _RawRpcError:
+        error_code = 403
+        error_message = "CHAT_SEND_PLAIN_FORBIDDEN"
+
+    error = rpc_message_to_error(_RawRpcError(), request=None)
+    client = _UploadingClient(send_error=error)
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(Exception) as excinfo:
+        await backend.send_message(chat_id=42, text="", rich_markdown=RICH_MD)
+
+    assert not isinstance(excinfo.value, RichMediaForbidden)
+
+
+class _MediaCaptionTooLongError(Exception):
+    """Stand-in matching the upstream class name."""
+
+
+_MediaCaptionTooLongError.__name__ = "MediaCaptionTooLongError"
+
+
+@pytest.mark.asyncio
+async def test_too_long_caption_is_not_reported_as_a_rights_problem() -> None:
+    """An over-long caption is bad input, not a permission problem: telling the
+    operator the chat forbids media would send them to check admin rights
+    instead of shortening the caption. Still a ``ValueError``, so it keeps the
+    400 / exit-2 path."""
+    from telegram_assistant.messages.service import RichMediaForbidden
+
+    client = _UploadingClient(send_error=_MediaCaptionTooLongError("too long"))
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(ValueError) as excinfo:
+        await backend.send_message(chat_id=42, text="", rich_markdown=RICH_MD)
+
+    assert not isinstance(excinfo.value, RichMediaForbidden)
+    assert "caption" in str(excinfo.value)
+    assert "does not allow the media" not in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_rich_send_gif_carries_the_animated_attribute(tmp_path: Any) -> None:
+    """A ``.gif`` is referenced as ``tg://video`` but its mime is ``image/gif``,
+    so Telethon infers no ``DocumentAttributeVideo`` — the same gap that made an
+    unmarked ``.mp3`` unreachable through ``tg://audio``. Mark it as an
+    animation rather than uploading a bare document."""
+    from telethon.tl.types import DocumentAttributeAnimated
+
+    gif = _rich_file(tmp_path, "loop.gif", "loop", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1,
+        text="",
+        rich_markdown="![](tg://video?id=loop)\n",
+        rich_files=(gif,),
+    )
+
+    media = client.upload_media[0].media
+    assert media.mime_type == "image/gif"
+    assert any(isinstance(attr, DocumentAttributeAnimated) for attr in media.attributes)
 
 
 @pytest.mark.asyncio

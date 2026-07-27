@@ -366,7 +366,9 @@ def test_cli_media_group_without_rich_markdown_errors(
 
 
 @pytest.mark.parametrize(
-    "entry", ["0", "0=carousel", "first=none", "=none"], ids=["no-mode", "bad-mode", "bad-index", "empty"]
+    "entry",
+    ["0", "0=carousel", "first=none", "=none", "²=none", "-1=none"],
+    ids=["no-mode", "bad-mode", "bad-index", "empty", "unicode-digit", "negative"],
 )
 def test_cli_media_group_bad_syntax_errors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entry: str

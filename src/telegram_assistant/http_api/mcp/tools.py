@@ -1234,8 +1234,12 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         ``rich_markdown``) inserts a U+00A0 spacer paragraph between paragraphs
         and before headings, so the article is not rendered as a wall of text.
         Leave it unset to follow the server default (normally on); pass
-        ``false`` to send the markdown byte-for-byte. Non-fatal notes about the
-        article (block/media budget) come back in the result's ``warnings``.
+        ``false`` to keep the author's own spacing. That switches off the
+        spacer pass only — consecutive media blocks are still grouped into
+        ``<tg-collage>``/``<tg-slideshow>`` per the server's
+        ``rich_markdown_grouping`` setting, which this surface cannot override.
+        Non-fatal notes about the article (block/media budget) come back in the
+        result's ``warnings``.
         """
         request = _request(provider)
         try:

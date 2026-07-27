@@ -23,6 +23,7 @@ from telegram_assistant.messages import (
     scan_media,
     send_message,
 )
+from telegram_assistant.messages.rich_markdown import iter_line_media_refs
 from telegram_assistant.persistence import OperationStore
 
 NBSP = "\u00a0"
@@ -262,3 +263,91 @@ def test_fifty_media_in_one_collage_does_not_warn() -> None:
     assert result.media == MAX_RICH_MEDIA
     assert result.blocks == MAX_RICH_MEDIA + 1  # the collage container
     assert result.warnings == ()
+
+
+# ---------------------------------------------------------------------------
+# References the pattern must not miss (a miss ships the local path verbatim)
+# ---------------------------------------------------------------------------
+
+
+def test_balanced_parentheses_in_a_bare_target_are_resolved(tmp_path: Path) -> None:
+    (tmp_path / "shot(1).png").write_bytes(PNG)
+    source = "![](shot(1).png)\n"
+
+    scan = scan_media(source, base_dir=tmp_path)
+
+    assert [file.path for file in scan.files] == [str(tmp_path / "shot(1).png")]
+    assert "shot(1).png" not in scan.markdown
+    assert "tg://photo?id=" in scan.markdown
+
+
+def test_escaped_parentheses_in_a_target_are_resolved(tmp_path: Path) -> None:
+    (tmp_path / "shot(1).png").write_bytes(PNG)
+    source = r"![](shot\(1\).png)" + "\n"
+
+    scan = scan_media(source, base_dir=tmp_path)
+
+    assert [file.path for file in scan.files] == [str(tmp_path / "shot(1).png")]
+    assert "tg://photo?id=" in scan.markdown
+
+
+def test_escaped_quotes_in_a_title_keep_the_media_resolvable(tmp_path: Path) -> None:
+    (tmp_path / "shot.png").write_bytes(PNG)
+    source = '![](shot.png "he said \\"hi\\"")\n'
+
+    scan = scan_media(source, base_dir=tmp_path)
+
+    assert [file.caption for file in scan.files] == ['he said "hi"']
+    assert "shot.png" not in scan.markdown
+    assert scan.markdown == "![](tg://photo?id=shot 'he said \"hi\"')\n"
+
+
+def test_a_caption_with_both_quote_characters_keeps_them_both(tmp_path: Path) -> None:
+    """Neither bare quoting form fits, so the rewrite escapes rather than swaps.
+
+    Replacing ``"`` with ``'`` would send a caption the author never wrote.
+    """
+    (tmp_path / "shot.png").write_bytes(PNG)
+    source = '![](shot.png "he said \\"it\'s ok\\"")\n'
+
+    scan = scan_media(source, base_dir=tmp_path)
+
+    assert [file.caption for file in scan.files] == ['he said "it\'s ok"']
+    assert scan.markdown == '![](tg://photo?id=shot "he said \\"it\'s ok\\"")\n'
+    # The rewritten article reads back as the caption that went in.
+    (ref,) = iter_line_media_refs(scan.markdown.rstrip("\n"))
+    assert ref.caption == 'he said "it\'s ok"'
+
+
+def test_a_caption_ending_in_a_backslash_escapes_it_before_the_quote(
+    tmp_path: Path,
+) -> None:
+    """Unescaped, the trailing backslash would escape the closing quote away."""
+    (tmp_path / "shot.png").write_bytes(PNG)
+    source = '![](shot.png "a \\"b\\" c\\\\")\n'
+
+    scan = scan_media(source, base_dir=tmp_path)
+
+    assert [file.caption for file in scan.files] == ['a "b" c\\']
+    (ref,) = iter_line_media_refs(scan.markdown.rstrip("\n"))
+    assert ref.caption == 'a "b" c\\'
+
+
+def test_a_quoteless_caption_ending_in_a_backslash_round_trips(tmp_path: Path) -> None:
+    (tmp_path / "shot.png").write_bytes(PNG)
+    source = '![](shot.png "path C:\\\\")\n'
+
+    scan = scan_media(source, base_dir=tmp_path)
+
+    assert [file.caption for file in scan.files] == ["path C:\\"]
+    (ref,) = iter_line_media_refs(scan.markdown.rstrip("\n"))
+    assert ref.caption == "path C:\\"
+
+
+def test_a_backslash_before_a_letter_stays_part_of_the_target() -> None:
+    # Only ASCII punctuation is escapable in CommonMark, so a Windows-style
+    # target keeps its separators instead of losing them to the unescape — the
+    # name resolution then splits on is the one the author wrote.
+    (ref,) = iter_line_media_refs(r"![](sub\shot.png)")
+
+    assert ref.target == r"sub\shot.png"

@@ -298,7 +298,10 @@ def _validate_rich_files(
         )
     seen: set[str] = set()
     for rich_file in rich_files:
-        if not rich_file.id or not RICH_FILE_ID_RE.match(rich_file.id):
+        # ``fullmatch``: the pattern's ``$`` also matches before a trailing
+        # newline, so ``match`` would pass an id Telegram rejects with
+        # ``RICH_MESSAGE_FILE_ID_INVALID`` after the operation row is opened.
+        if not rich_file.id or not RICH_FILE_ID_RE.fullmatch(rich_file.id):
             raise ValueError(
                 f"rich_files id must match {RICH_FILE_ID_RE.pattern} "
                 f"({rich_file.id!r} given)"
@@ -696,6 +699,18 @@ async def send_message(
             )
         if not request.rich_markdown.strip():
             raise ValueError("rich_markdown must be non-empty")
+        # Bound the *source* before normalising it. Both passes only ever grow
+        # the text, so a source already over the limit can never come back
+        # under it — and normalisation is a full line-by-line scan of caller
+        # input that runs on the event loop, before the WRITE gate. Without
+        # this, any token holder could hand a multi-megabyte string to
+        # HTTP/MCP (neither bounds the field) and block the loop for seconds
+        # on a send it was never authorized to make.
+        if len(request.rich_markdown) > MAX_RICH_MARKDOWN_CHARS:
+            raise ValueError(
+                f"rich_markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
+                f"({len(request.rich_markdown)} given)"
+            )
         # Normalise *before* the length check: spacer insertion grows the
         # source, and MAX_RICH_MARKDOWN_CHARS must bound what actually reaches
         # Telegram — not what the caller happened to hand in. From here on

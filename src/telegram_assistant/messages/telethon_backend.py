@@ -13,6 +13,7 @@ imports. Two adapters live here:
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
@@ -165,9 +166,17 @@ _MEDIA_RIGHTS_ERRORS = frozenset(
         "ChatSendAudiosForbiddenError",
         "ChatSendGifsForbiddenError",
         "ChatSendVoicesForbiddenError",
-        "MediaCaptionTooLongError",
     }
 )
+
+#: Telethon only generates a named class for the errors in its bundled list, and
+#: ``CHAT_SEND_DOCS_FORBIDDEN`` / ``CHAT_SEND_AUDIOS_FORBIDDEN`` are not in the
+#: 1.44 list — they arrive as a bare ``ForbiddenError`` whose class name matches
+#: nothing above. Those two cover exactly the kinds local uploads added (a video
+#: and a ``.gif`` are documents, and ``tg://audio`` is an audio document), so the
+#: raw RPC string is checked as well: without it the send that this feature made
+#: possible is the one that misses the rights mapping.
+_MEDIA_RIGHTS_RPC_RE = re.compile(r"^CHAT_SEND_[A-Z]+_FORBIDDEN$")
 
 
 def _translate_rich_send_error(exc: BaseException, *, chat_id: int) -> BaseException:
@@ -175,14 +184,25 @@ def _translate_rich_send_error(exc: BaseException, *, chat_id: int) -> BaseExcep
 
     ``RichMediaForbidden`` is a ``ValueError``, so every surface's existing
     400 / exit-2 path carries the message — the operator needs to read "this
-    chat forbids media", not a bare 500.
+    chat forbids media", not a bare 500. An over-long media caption is a
+    ``ValueError`` too, but deliberately *not* a rights error: telling an
+    operator whose caption is a few characters long that the chat forbids media
+    sends them to check admin rights instead of shortening the caption.
     """
     from telegram_assistant.messages.service import RichMediaForbidden
 
-    if type(exc).__name__ in _MEDIA_RIGHTS_ERRORS:
+    name = type(exc).__name__
+    rpc_code = getattr(exc, "message", None)
+    if name in _MEDIA_RIGHTS_ERRORS or (
+        isinstance(rpc_code, str) and _MEDIA_RIGHTS_RPC_RE.match(rpc_code)
+    ):
         return RichMediaForbidden(
             f"chat {chat_id} does not allow the media in this rich message: "
-            f"{type(exc).__name__}: {exc}"
+            f"{name}: {exc}"
+        )
+    if name == "MediaCaptionTooLongError":
+        return ValueError(
+            f"a media caption in this rich message is too long: {name}: {exc}"
         )
     return translate_flood_wait(exc)
 
@@ -192,10 +212,16 @@ def _document_attributes(path: str, kind: str) -> tuple[list[Any], str]:
 
     Delegates to Telethon's own inference (which derives
     ``DocumentAttributeVideo`` from a ``video/*`` mime type even without a
-    metadata library) and only fills the gap it leaves for audio: without
-    ``hachoir`` installed no ``DocumentAttributeAudio`` is emitted at all, and
-    the spike proved an ``.mp3`` is only reachable through ``tg://audio`` when
-    it carries one.
+    metadata library) and fills the two gaps it leaves:
+
+    * audio — without ``hachoir`` installed no ``DocumentAttributeAudio`` is
+      emitted at all, and the spike proved an ``.mp3`` is only reachable
+      through ``tg://audio`` when it carries one;
+    * ``.gif`` — its mime is ``image/gif``, not ``video/*``, so Telethon emits
+      only a filename attribute even though the reference syntax for it is
+      ``tg://video``. ``DocumentAttributeAnimated`` is the marker Telegram
+      defines for an animation document; the audio gap above is the proven
+      precedent that an unmarked document is not reachable through its scheme.
     """
     from telethon import utils
     from telethon.tl import types
@@ -205,6 +231,14 @@ def _document_attributes(path: str, kind: str) -> tuple[list[Any], str]:
         isinstance(attr, types.DocumentAttributeAudio) for attr in attributes
     ):
         attributes.append(types.DocumentAttributeAudio(duration=0))
+    if (
+        kind == "video"
+        and mime_type == "image/gif"
+        and not any(
+            isinstance(attr, types.DocumentAttributeAnimated) for attr in attributes
+        )
+    ):
+        attributes.append(types.DocumentAttributeAnimated())
     return list(attributes), mime_type
 
 

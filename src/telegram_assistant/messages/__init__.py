@@ -68,6 +68,7 @@ from telegram_assistant.messages.rich_markdown import (
     BLOCK_KINDS,
     DEFAULT_MEDIA_GROUP_MODE,
     HTML_BLOCK_TAGS,
+    MAX_BLOCK_NESTING,
     MAX_RICH_BLOCKS,
     MAX_RICH_FILE_ID_CHARS,
     MAX_RICH_MEDIA,
@@ -103,6 +104,7 @@ from telegram_assistant.messages.rich_markdown import (
     scan_blocks,
     scan_media,
     split_lines,
+    strip_yaml_frontmatter,
 )
 from telegram_assistant.messages.search import (
     SearchBackend,
@@ -191,6 +193,7 @@ __all__ = [
     "BLOCK_KINDS",
     "DEFAULT_MEDIA_GROUP_MODE",
     "HTML_BLOCK_TAGS",
+    "MAX_BLOCK_NESTING",
     "MAX_RICH_BLOCKS",
     "MAX_RICH_FILE_ID_CHARS",
     "MAX_RICH_MEDIA",
@@ -226,6 +229,7 @@ __all__ = [
     "scan_blocks",
     "scan_media",
     "split_lines",
+    "strip_yaml_frontmatter",
     "PacedFloodWaitError",
     "Pacer",
     "RateGate",

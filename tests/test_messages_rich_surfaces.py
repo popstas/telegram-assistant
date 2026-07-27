@@ -32,6 +32,7 @@ from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.http_api import create_app
 from telegram_assistant.messages import (
     MAX_RICH_MARKDOWN_CHARS,
+    RichMediaForbidden,
     RichMessageUnsupported,
 )
 from telegram_assistant.persistence import OperationStore
@@ -777,6 +778,73 @@ def test_cli_rich_send_strips_utf8_bom(
     assert backend.sent[0]["rich_markdown"] == SAMPLE_MARKDOWN
 
 
+def test_cli_rich_send_strips_obsidian_frontmatter(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real Obsidian note opens with YAML frontmatter, which this dialect
+    would otherwise render as a divider plus a heading reading its metadata."""
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    md_file = tmp_path / "note.md"
+    md_file.write_text(
+        "---\ntags: [travel, phuket]\ndate: 2026-07-27\n---\n\n" + SAMPLE_MARKDOWN,
+        encoding="utf-8",
+    )
+    backend = RecordingMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--no-spaced-paragraphs",
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 0, _cli_output(result)
+    sent = backend.sent[0]["rich_markdown"]
+    assert "tags:" not in sent
+    assert sent.lstrip("\n") == SAMPLE_MARKDOWN
+
+
+def test_cli_rich_send_rejects_a_note_that_is_only_frontmatter(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stripping runs before the emptiness check, so this is 'empty', not a
+    send of a bare metadata heading."""
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    md_file = tmp_path / "meta.md"
+    md_file.write_text("---\ntags: [a]\n---\n", encoding="utf-8")
+    backend = RecordingMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 2, _cli_output(result)
+    assert "is empty" in _cli_output(result)
+    assert backend.sent == []
+
+
 def test_cli_dry_run_without_any_body_errors(
     minimal_config_yaml: str,
     tmp_path: Path,
@@ -803,3 +871,146 @@ def test_cli_dry_run_without_any_body_errors(
     assert result.exit_code == 2, _cli_output(result)
     assert "--rich-markdown" in _cli_output(result)
     assert backend.sent == []
+
+
+# ---------------------------------------------------------------------------
+# CLI — domain errors are caller input, not crashes (exit 2, never exit 1)
+# ---------------------------------------------------------------------------
+
+
+def test_cli_rich_send_media_forbidden_exits_2(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``RichMediaForbidden`` is a ``ValueError`` precisely so every surface
+    reports it as bad input — HTTP 400, CLI exit 2 — with the message naming the
+    chat. Landing on the generic handler would exit 1 with a ``messages send
+    failed:`` prefix and read as an internal error."""
+
+    class ForbiddenBackend(RecordingMessageBackend):
+        async def send_message(self, **kwargs: Any) -> int:
+            raise RichMediaForbidden(
+                "chat -100 does not allow the media in this rich message: "
+                "ChatSendMediaForbiddenError: nope"
+            )
+
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    md_file = _write_markdown(tmp_path, SAMPLE_MARKDOWN)
+    backend = ForbiddenBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 2, _cli_output(result)
+    output = _cli_output(result)
+    assert "does not allow the media" in output
+    assert "messages send failed" not in output
+
+
+def test_http_rich_send_media_forbidden_is_400() -> None:
+    class ForbiddenBackend(RecordingMessageBackend):
+        async def send_message(self, **kwargs: Any) -> int:
+            raise RichMediaForbidden(
+                "chat -100 does not allow the media in this rich message: "
+                "ChatSendPhotosForbiddenError: nope"
+            )
+
+    backend = ForbiddenBackend()
+    client = _client(backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "rich_markdown": SAMPLE_MARKDOWN,
+            "operation_id": "rich-forbidden-1",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 400, resp.text
+    assert "does not allow the media" in resp.text
+
+
+def test_cli_rich_send_over_limit_after_normalization_exits_2(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A source that fits but grows past the bound once spacers are inserted is
+    rejected by the domain op — the same bad-input class as the CLI's own
+    pre-check, so the same exit code, and the message must name the pass."""
+    config_file = _write_config(tmp_path, minimal_config_yaml)
+    # 250 paragraphs: 249 spacers (499 blocks, just inside the 500-block budget
+    # that would otherwise roll the pass back) add 3 characters each, which is
+    # more than the headroom the source leaves.
+    markdown = "\n\n".join("a" * 128 for _ in range(250)) + "\n"
+    assert len(markdown) <= MAX_RICH_MARKDOWN_CHARS
+    assert len(markdown) + 249 * 3 > MAX_RICH_MARKDOWN_CHARS
+    md_file = _write_markdown(tmp_path, markdown)
+    backend = RecordingMessageBackend()
+    store = OperationStore(tmp_path / "state.db")
+    _patch_cli_backends(monkeypatch, backend, store)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--config",
+            str(config_file),
+        ]
+    )
+    assert result.exit_code == 2, _cli_output(result)
+    output = _cli_output(result)
+    assert str(MAX_RICH_MARKDOWN_CHARS) in output
+    assert "paragraph spacing" in output
+    assert backend.sent == []
+
+
+# ---------------------------------------------------------------------------
+# Local media stays CLI-only
+# ---------------------------------------------------------------------------
+
+
+def test_http_rich_send_never_resolves_a_local_media_path(tmp_path: Path) -> None:
+    """A remote caller must not be able to name a server-side file.
+
+    Only the CLI runs ``scan_media``; the HTTP route hands the body down as
+    written, so a local path stays a local path (Telegram rejects it) and no
+    upload is ever produced. Were the surfaces ever "unified", this would catch
+    it: a READ-scoped caller would otherwise gain server-side file reads.
+    """
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(b"\x89PNG")
+    markdown = f"# T\n\n![]({secret})\n"
+    backend = RecordingMessageBackend()
+    client = _client(backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "rich_markdown": markdown,
+            "operation_id": "rich-local-media-1",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    sent = backend.sent[0]["rich_markdown"]
+    assert str(secret) in sent
+    assert "tg://photo" not in sent
+    # The legacy-signature fake would raise TypeError on a ``rich_files`` kwarg;
+    # reaching this line at all proves none was passed.

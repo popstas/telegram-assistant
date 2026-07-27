@@ -715,6 +715,39 @@ def test_mcp_send_rich_markdown_reaches_backend(
     assert backend.sent[0]["text"] == ""
 
 
+def test_mcp_send_rich_markdown_never_resolves_a_local_media_path(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """Local media is CLI-only: a remote caller must not be able to name a
+    server-side file. The MCP tool never runs ``scan_media``, so the path is
+    handed down as written (Telegram rejects it) and no upload is produced —
+    were the surfaces ever unified, a READ-scoped identity would gain
+    server-side file reads."""
+    secret = tmp_path / "secret.png"
+    secret.write_bytes(b"\x89PNG")
+    markdown = f"# T\n\n![]({secret})\n"
+    backend = FakeRichMessageBackend()
+    with _client(minimal_config_yaml, tmp_path, message_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {
+                "telegram_chat_id": -100123,
+                "rich_markdown": markdown,
+                "operation_id": "mcp-rich-local-media",
+            },
+        )
+
+    assert result["isError"] is False, result
+    sent = backend.sent[0]["rich_markdown"]
+    assert str(secret) in sent
+    assert "tg://photo" not in sent
+
+
 def test_mcp_send_rich_markdown_with_topic_and_schedule(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:

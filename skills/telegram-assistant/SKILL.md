@@ -564,6 +564,8 @@ command rather than after `folder_cache_ttl` seconds.
   its local `![](image.png)` / `![[Pasted image.png]]` embeds are
   resolved relative to that file's own directory, so do not copy it to
   `/tmp` when it has local media; point `--rich-markdown` at the original.
+  A leading `---` … `---` YAML frontmatter block is dropped on read, so a
+  vault note needs no hand-editing; do not strip it yourself.
 - Automation: pass service commands (`/task 123456`) verbatim. Pass at
   most one of `--schedule-at` / `--delay`. Map «отправь через 2 часа» →
   `--delay 2h`, «запланируй на 2026-06-07T09:00» → `--schedule-at`. The
@@ -594,8 +596,11 @@ command rather than after `folder_cache_ttl` seconds.
   paragraphs tight against each other, so the CLI/HTTP/MCP insert a
   U+00A0-only spacer paragraph between two paragraphs and before every
   heading. Add `--no-spaced-paragraphs` (HTTP/MCP: `spaced_paragraphs:
-  false`) only when the human asks for the markdown to go byte-for-byte,
-  e.g. because they hand-tuned the spacing. The flag is an error
+  false`) only when the human asks for the markdown to go unchanged,
+  e.g. because they hand-tuned the spacing. It switches off the spacer
+  pass only — media grouping and local-media rewriting are independent,
+  so mention `--media-group <i>=none` if they want the source truly
+  byte-for-byte. The flag is an error
   (exit 2 / 422) without `--rich-markdown`. The default also comes from
   `telegram.defaults.rich_markdown_spaced_paragraphs`. Spacers count
   toward both the character and the block limit; if spacing would push
@@ -611,9 +616,12 @@ command rather than after `folder_cache_ttl` seconds.
   title (`"caption"`), falling back to the alt text. For a file that
   does not live next to the article use `--rich-file
   <reference>=<path>` (repeatable; the reference is the target as
-  written in the markdown or its bare file name), and for an Obsidian
-  vault whose attachments sit elsewhere use `--vault-dir <dir>`.
-  Unresolvable or ambiguous media is an **error naming the file** — the
+  written in the markdown, its URL-decoded form, or its bare file
+  name), and `--vault-dir <dir>` to search a whole directory tree by
+  file name — motivated by an Obsidian vault whose attachments sit
+  elsewhere, but it applies to plain `![](photo.png)` targets too.
+  A media line with its caption on the next line is resolved like any
+  other. Unresolvable or ambiguous media is an **error naming the file** — the
   send is never made with the media silently dropped. The dry-run lists
   every resolved file under `rich_files` (`id`, `path`, `kind`,
   `caption`) without reading a byte. A chat that forbids media rejects

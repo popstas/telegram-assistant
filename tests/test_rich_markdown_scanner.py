@@ -5,14 +5,17 @@ from __future__ import annotations
 import pytest
 
 from telegram_assistant.messages import (
+    MAX_BLOCK_NESTING,
     MAX_RICH_BLOCKS,
     MAX_RICH_MEDIA,
+    SPACER_LINE,
     count_blocks,
     count_media,
     iter_media,
     parse_media_line,
     scan_blocks,
     split_lines,
+    strip_yaml_frontmatter,
 )
 
 
@@ -70,6 +73,37 @@ def test_crlf_input_scans_like_lf() -> None:
 )
 def test_scanner_types_blocks(source: str, expected: list[str]) -> None:
     assert kinds(source) == expected
+
+
+def test_indented_code_does_not_interrupt_a_paragraph() -> None:
+    # An indented line right under prose is continuation text, not a code
+    # block — reading it as code would make the scanner opaque to a media
+    # reference sitting there and ship it as a literal local path.
+    assert kinds("Some paragraph\n    ![[a.png]]") == ["paragraph", "media"]
+    # A line the paragraph itself absorbs stays continuation text either way.
+    assert scan_blocks("Some paragraph\n    plain text")[0].lines == (
+        "Some paragraph",
+        "    plain text",
+    )
+
+
+def test_indented_code_does_not_interrupt_a_media_line() -> None:
+    # A media block *is* a paragraph — one whose only line is a media
+    # reference — so the indented line under it is continuation text too.
+    # Reading it as code would ship the second reference as a literal local
+    # path, the one silent drop `scan_media` promises never to make.
+    assert kinds("![[a.png]]\n    ![[b.png]]") == ["media", "media"]
+    # The embed-then-caption shape survives the indentation the same way.
+    assert scan_blocks("![[a.png]]\n    caption")[0].lines == (
+        "![[a.png]]",
+        "    caption",
+    )
+
+
+def test_indented_code_after_a_blank_line_or_a_heading_is_still_code() -> None:
+    assert kinds("para\n\n    ![[a.png]]") == ["paragraph", "code"]
+    assert kinds("# Head\n    ![[a.png]]") == ["heading", "code"]
+    assert kinds(f"{SPACER_LINE}\n    ![[a.png]]") == ["paragraph", "code"]
 
 
 def test_blank_lines_belong_to_no_block() -> None:
@@ -375,3 +409,117 @@ def test_blocks_preserve_every_source_line() -> None:
     for block in blocks:
         assert block.lines == tuple(lines[block.start : block.end])
     assert [block.start for block in blocks] == sorted(block.start for block in blocks)
+
+
+# --- nesting bound -----------------------------------------------------------
+
+
+def test_deeply_nested_quote_does_not_recurse_without_bound() -> None:
+    """A 1.2 KB one-liner is far under the char limit but 600 levels deep.
+
+    The scan runs on the event loop ahead of the WRITE gate, so a
+    ``RecursionError`` here is reachable by a caller with no write grant.
+    """
+    blocks = scan_blocks("> " * 600 + "x")
+    assert [block.kind for block in blocks] == ["quote"]
+
+
+def test_deeply_nested_html_does_not_recurse_without_bound() -> None:
+    # Each unclosed container consumes the rest of the document as its body.
+    blocks = scan_blocks("<details>\n" * 1200)
+    assert blocks[0].kind == "html"
+
+
+def test_nesting_bound_emits_a_leaf_but_keeps_every_line() -> None:
+    source = "> " * (MAX_BLOCK_NESTING + 5) + "x"
+    block = scan_blocks(source)[0]
+    assert block.lines == tuple(split_lines(source))
+    deepest = block
+    depth = 0
+    while deepest.children:
+        deepest = deepest.children[0]
+        depth += 1
+    assert depth == MAX_BLOCK_NESTING
+    assert deepest.children == ()
+
+
+def test_nesting_below_the_bound_still_scans_children() -> None:
+    block = scan_blocks("> quoted\n> \n> ![](https://x/a.jpg)\n")[0]
+    assert [child.kind for child in block.children] == ["paragraph", "media"]
+
+
+# --- YAML frontmatter --------------------------------------------------------
+
+
+def test_frontmatter_is_stripped_with_line_endings_intact() -> None:
+    assert strip_yaml_frontmatter("---\ntags: [a]\n---\n\n# T\n") == "\n# T\n"
+    assert strip_yaml_frontmatter("---\r\ntags: [a]\r\n---\r\n\r\n# T\r\n") == "\r\n# T\r\n"
+
+
+def test_frontmatter_stripper_leaves_everything_else_by_identity() -> None:
+    for source in (
+        "# T\n\n---\n\nrule\n",  # a divider that is not at the top
+        "---\ntags: [a]\n",  # unterminated: not frontmatter
+        "---\n\nhr then text\n",  # a leading horizontal rule
+        "",
+    ):
+        assert strip_yaml_frontmatter(source) is source
+
+
+def test_leading_rule_plus_a_later_divider_is_not_frontmatter() -> None:
+    """A closed pair of ``---`` fences is not enough: matching on the fences
+    alone would drop the whole opening section of an article that starts with a
+    rule and uses ``---`` dividers later, and nothing downstream reports it."""
+    for source in (
+        "---\n\n# T\n\npara\n\n---\n\nrest\n",  # rule, section, divider
+        "---\n# Title\n---\nbody\n",  # rule, heading, divider
+        "---\n\nintro\n\n---\n",
+        "---\n---\nbody\n",  # two rules, not an empty frontmatter block
+        "---\nhttps://example.com\n---\nbody\n",  # a colon, but not a YAML key
+        "---\n![[shot.png]]\n---\nbody\n",  # an embed must never be dropped
+    ):
+        assert strip_yaml_frontmatter(source) is source
+
+
+def test_frontmatter_with_nested_lists_and_blank_lines_is_still_stripped() -> None:
+    assert (
+        strip_yaml_frontmatter("---\ntags:\n  - a\n  - b\ntime: 10:30\n---\n\n# T\n")
+        == "\n# T\n"
+    )
+    assert strip_yaml_frontmatter("---\ntags: [a]\n\nfoo: b\n---\nbody\n") == "body\n"
+
+
+def test_frontmatter_comments_do_not_defeat_the_strip() -> None:
+    """A comment is legal YAML and common in an Obsidian note. Rejecting the
+    block over one would leave the fences in, and the note's own metadata would
+    go out as a rule plus a large heading — the shape the strip exists to
+    prevent, with nothing downstream to report it."""
+    assert strip_yaml_frontmatter("---\ntitle: X\n# comment\n---\n\n# T\n") == "\n# T\n"
+    assert (
+        strip_yaml_frontmatter("---\ntags:\n  - a\n  # why\nfoo: b\n---\nbody\n")
+        == "body\n"
+    )
+
+
+def test_a_leading_comment_still_reads_as_a_heading_not_frontmatter() -> None:
+    """The "first line must be a mapping entry" rule is what keeps an article
+    opening with a rule and a heading intact, so a comment is accepted only
+    after it."""
+    for source in (
+        "---\n# my note\ntitle: X\n---\n\n# T\n",
+        "---\n# Title\n---\nbody\n",
+    ):
+        assert strip_yaml_frontmatter(source) is source
+
+
+def test_frontmatter_without_it_scans_as_a_divider_and_setext_heading() -> None:
+    """Why the strip exists: unstripped, a note opens with a rule and a big
+    heading reading its own metadata."""
+    assert kinds("---\ntags: [a]\ndate: x\n---\n\n# T\n") == [
+        "divider",
+        "heading",
+        "heading",
+    ]
+    assert kinds(strip_yaml_frontmatter("---\ntags: [a]\ndate: x\n---\n\n# T\n")) == [
+        "heading"
+    ]
