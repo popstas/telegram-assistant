@@ -640,6 +640,298 @@ async def test_rich_send_rejects_attachments() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Rich message media (upload + InputRichMessageMarkdown.files)
+# ---------------------------------------------------------------------------
+
+
+def _uploaded_media(request: Any) -> Any:
+    """Answer ``messages.uploadMedia`` the way Telegram does: a MessageMedia*."""
+    from telethon.tl.types import (
+        Document,
+        InputMediaUploadedPhoto,
+        MessageMediaDocument,
+        MessageMediaPhoto,
+        Photo,
+    )
+
+    date = datetime(2026, 1, 1, tzinfo=UTC)
+    if isinstance(request.media, InputMediaUploadedPhoto):
+        return MessageMediaPhoto(
+            photo=Photo(
+                id=101,
+                access_hash=202,
+                file_reference=b"ref-photo",
+                date=date,
+                sizes=[],
+                dc_id=2,
+            )
+        )
+    return MessageMediaDocument(
+        document=Document(
+            id=303,
+            access_hash=404,
+            file_reference=b"ref-doc",
+            date=date,
+            mime_type=request.media.mime_type,
+            size=1,
+            dc_id=2,
+            attributes=list(request.media.attributes),
+        )
+    )
+
+
+class _UploadingClient(_RawClient):
+    """``_RawClient`` that also answers ``upload_file`` / ``messages.uploadMedia``."""
+
+    def __init__(
+        self,
+        *,
+        upload_error: Exception | None = None,
+        send_error: Exception | None = None,
+    ) -> None:
+        super().__init__()
+        self.uploads: list[str] = []
+        self.upload_media: list[Any] = []
+        self._upload_error = upload_error
+        self._send_error = send_error
+
+    async def upload_file(self, path: Any) -> Any:
+        if self._upload_error is not None:
+            raise self._upload_error
+        self.uploads.append(str(path))
+        return f"handle:{path}"
+
+    async def __call__(self, request: Any) -> Any:
+        from telethon.tl.functions.messages import UploadMediaRequest
+
+        if isinstance(request, UploadMediaRequest):
+            self.upload_media.append(request)
+            return _uploaded_media(request)
+        if self._send_error is not None:
+            raise self._send_error
+        return await super().__call__(request)
+
+
+def _rich_file(tmp_path: Any, name: str, file_id: str, kind: str) -> Any:
+    from telegram_assistant.messages.rich_markdown import RichFile
+
+    path = tmp_path / name
+    path.write_bytes(b"\x00binary")
+    return RichFile(id=file_id, path=str(path), caption="", kind=kind)
+
+
+MEDIA_MD = (
+    "# Article\n"
+    "\n"
+    "![shot](tg://photo?id=shot)\n"
+    "\n"
+    "![clip](tg://video?id=clip)\n"
+)
+
+
+@pytest.mark.asyncio
+async def test_rich_send_uploads_files_in_markdown_order(tmp_path: Any) -> None:
+    """Each file is uploaded once, in the markdown's order, and comes back as an
+    ``InputRichFile`` keyed by the id the body already names."""
+    from telethon.tl.functions.messages import UploadMediaRequest
+    from telethon.tl.types import (
+        InputMediaUploadedDocument,
+        InputMediaUploadedPhoto,
+        InputRichFileDocument,
+        InputRichFilePhoto,
+    )
+
+    photo = _rich_file(tmp_path, "shot.png", "shot", "photo")
+    video = _rich_file(tmp_path, "clip.mp4", "clip", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    result = await backend.send_message(
+        chat_id=-100123,
+        text="",
+        rich_markdown=MEDIA_MD,
+        rich_files=(photo, video),
+    )
+
+    assert result == 4242
+    assert client.uploads == [photo.path, video.path]
+    assert [type(call) for call in client.upload_media] == [
+        UploadMediaRequest,
+        UploadMediaRequest,
+    ]
+    # uploadMedia binds the upload to the destination peer, resolved once.
+    assert client.peers == [-100123]
+    assert [call.peer for call in client.upload_media] == [
+        "peer:-100123",
+        "peer:-100123",
+    ]
+    assert isinstance(client.upload_media[0].media, InputMediaUploadedPhoto)
+    assert isinstance(client.upload_media[1].media, InputMediaUploadedDocument)
+    assert client.upload_media[1].media.mime_type == "video/mp4"
+
+    rich_message = client.raw_calls[-1].rich_message
+    assert rich_message.markdown == MEDIA_MD
+    files = rich_message.files
+    assert [type(f) for f in files] == [InputRichFilePhoto, InputRichFileDocument]
+    # The ids are the ones the markdown's tg:// references name — a mismatch
+    # would send an article whose media blocks point at nothing.
+    assert [f.id for f in files] == ["shot", "clip"]
+    assert files[0].photo.id == 101
+    assert files[1].document.id == 303
+
+
+@pytest.mark.asyncio
+async def test_rich_send_video_carries_video_attribute(tmp_path: Any) -> None:
+    """``tg://video`` only resolves when the upload really is a video document."""
+    from telethon.tl.types import DocumentAttributeVideo
+
+    video = _rich_file(tmp_path, "clip.mp4", "clip", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1, text="", rich_markdown=MEDIA_MD, rich_files=(video,)
+    )
+
+    attributes = client.upload_media[0].media.attributes
+    assert any(isinstance(attr, DocumentAttributeVideo) for attr in attributes)
+
+
+@pytest.mark.asyncio
+async def test_rich_send_audio_gets_audio_attribute(tmp_path: Any) -> None:
+    """Telethon only infers ``DocumentAttributeAudio`` with a metadata library
+    installed; without it an ``.mp3`` would be a plain document and
+    ``tg://audio`` would not resolve."""
+    from telethon.tl.types import DocumentAttributeAudio
+
+    audio = _rich_file(tmp_path, "voice.mp3", "voice", "audio")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1,
+        text="",
+        rich_markdown="![](tg://audio?id=voice)\n",
+        rich_files=(audio,),
+    )
+
+    media = client.upload_media[0].media
+    assert media.mime_type == "audio/mpeg"
+    assert any(isinstance(attr, DocumentAttributeAudio) for attr in media.attributes)
+
+
+@pytest.mark.asyncio
+async def test_rich_send_without_media_uploads_nothing() -> None:
+    """The media-less article keeps the pre-media shape: no upload RPC, and
+    ``files`` left unset so a backend/server predating media sees no change."""
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(chat_id=1, text="", rich_markdown=RICH_MD)
+
+    assert client.uploads == []
+    assert client.upload_media == []
+    assert client.raw_calls[0].rich_message.files is None
+
+
+@pytest.mark.asyncio
+async def test_rich_files_without_markdown_rejected(tmp_path: Any) -> None:
+    """The ids only mean something to the markdown naming them."""
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(ValueError, match="rich_files requires rich_markdown"):
+        await backend.send_message(
+            chat_id=1,
+            text="hi",
+            rich_files=(_rich_file(tmp_path, "shot.png", "shot", "photo"),),
+        )
+    assert client.uploads == []
+
+
+@pytest.mark.asyncio
+async def test_rich_media_on_old_telethon_reports_version(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``InputRichFilePhoto``/``InputRichFileDocument`` arrived with layer 227.
+    Like the markdown probe, a missing pair is a deployment problem naming the
+    version — never ``MessageSendFailed`` — and nothing is uploaded first."""
+    monkeypatch.setattr(telethon_backend, "_import_rich_file_types", lambda: None)
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(RichMessageUnsupported, match=r"telethon>=1\.44"):
+        await backend.send_message(
+            chat_id=1,
+            text="",
+            rich_markdown=MEDIA_MD,
+            rich_files=(_rich_file(tmp_path, "shot.png", "shot", "photo"),),
+        )
+
+    assert client.uploads == []
+    assert client.raw_calls == []
+    assert not issubclass(RichMessageUnsupported, MessageSendFailed)
+
+
+class _ChatSendMediaForbiddenError(Exception):
+    """Stand-in matching the upstream class name."""
+
+
+_ChatSendMediaForbiddenError.__name__ = "ChatSendMediaForbiddenError"
+
+
+@pytest.mark.asyncio
+async def test_media_rights_rejection_on_upload_names_chat(tmp_path: Any) -> None:
+    """A chat that forbids media rejects the whole article — there is no
+    media-less half to fall back to, so the caller is told which chat refused."""
+    from telegram_assistant.messages.service import RichMediaForbidden
+
+    client = _UploadingClient(upload_error=_ChatSendMediaForbiddenError("no media"))
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(RichMediaForbidden, match="-100777") as excinfo:
+        await backend.send_message(
+            chat_id=-100777,
+            text="",
+            rich_markdown=MEDIA_MD,
+            rich_files=(_rich_file(tmp_path, "shot.png", "shot", "photo"),),
+        )
+
+    assert "ChatSendMediaForbiddenError" in str(excinfo.value)
+    # A ValueError, so every surface's existing 400 / exit-2 path carries it.
+    assert isinstance(excinfo.value, ValueError)
+    assert client.raw_calls == []
+
+
+@pytest.mark.asyncio
+async def test_media_rights_rejection_on_send_names_chat() -> None:
+    """The article's own media (a remote URL, say) can be refused by the send
+    itself, with nothing uploaded — same mapping."""
+    from telegram_assistant.messages.service import RichMediaForbidden
+
+    client = _UploadingClient(send_error=_ChatSendMediaForbiddenError("no media"))
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(RichMediaForbidden, match="42"):
+        await backend.send_message(chat_id=42, text="", rich_markdown=RICH_MD)
+
+
+@pytest.mark.asyncio
+async def test_flood_wait_during_upload_is_translated(tmp_path: Any) -> None:
+    """FLOOD_WAIT stays a queue-visible pause even when it hits the upload."""
+    client = _UploadingClient(upload_error=_TelethonFloodWaitError(20))
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(FloodWaitError):
+        await backend.send_message(
+            chat_id=1,
+            text="",
+            rich_markdown=MEDIA_MD,
+            rich_files=(_rich_file(tmp_path, "shot.png", "shot", "photo"),),
+        )
+
+
+# ---------------------------------------------------------------------------
 # TelethonDeleteBackend
 # ---------------------------------------------------------------------------
 

@@ -217,12 +217,21 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 
 ### Task 7: Upload and send media (`telethon_backend`)
 
-- [ ] extend `TelethonMessageBackend.send_message`/`_send_rich_message` with an only-when-set `rich_files` kwarg
-- [ ] import `InputRichFilePhoto`/`InputRichFileDocument` through the existing version-tolerant probe pattern; a Telethon without them raises `RichMessageUnsupported` naming the version (never `MessageSendFailed`)
-- [ ] upload each file once (`client.upload_file` → `messages.uploadMedia` → `InputPhoto`/`InputDocument`), build the `files=` list in markdown order, and pass it into `InputRichMessageMarkdown`
-- [ ] map a media-rights rejection (`ChatSendMediaForbiddenError` and friends) to a clear domain error naming the chat — no silent fallback to a plain or media-less send
-- [ ] write tests with a fake client: files uploaded in order, ids match the markdown references, the kwarg is omitted for a media-less article (legacy fake stays green), unsupported-Telethon path, media-rights error mapping
-- [ ] run `pytest` and `ruff check src tests` — must pass before task 8
+- [x] extend `TelethonMessageBackend.send_message`/`_send_rich_message` with an only-when-set `rich_files` kwarg
+- [x] import `InputRichFilePhoto`/`InputRichFileDocument` through the existing version-tolerant probe pattern; a Telethon without them raises `RichMessageUnsupported` naming the version (never `MessageSendFailed`)
+- [x] upload each file once (`client.upload_file` → `messages.uploadMedia` → `InputPhoto`/`InputDocument`), build the `files=` list in markdown order, and pass it into `InputRichMessageMarkdown`
+- [x] map a media-rights rejection (`ChatSendMediaForbiddenError` and friends) to a clear domain error naming the chat — no silent fallback to a plain or media-less send
+- [x] write tests with a fake client: files uploaded in order, ids match the markdown references, the kwarg is omitted for a media-less article (legacy fake stays green), unsupported-Telethon path, media-rights error mapping
+- [x] run `pytest` and `ruff check src tests` — must pass before task 8
+
+**Task 7 notes** (decisions made while implementing, they constrain later tasks):
+
+- `_import_rich_file_types()` mirrors `_import_rich_markdown_type()` and is probed **only when `rich_files` is non-empty**, so a media-less article on an old-but-≥1.44 build never pays for it. Its `RichMessageUnsupported` is raised *before* the first upload, so nothing has been sent to Telegram when the version is wrong.
+- ➕ **New domain error `RichMediaForbidden`** (in `messages/service.py`, exported from `messages/`), raised for Telegram's `ChatSend{Media,Photos,Videos,Docs,Audios,Gifs,Voices}ForbiddenError` and `MediaCaptionTooLongError`, naming the chat id and the upstream class. It is a **`ValueError`** subclass on purpose: an unmapped `RuntimeError` surfaces as Starlette's *empty* 500 (the same trap `RichMessageUnsupported` had to work around), while `ValueError` already lands on every surface's 400 / exit-2 path with the message intact. The mapping wraps **both** the upload loop and the send RPC — an article's media may be a remote URL, so a media-rights refusal can arrive with nothing uploaded — via `_translate_rich_send_error()`, which tries media rights first and otherwise falls through to `translate_flood_wait`, so FLOOD_WAIT during an upload is still a queue-visible pause.
+- The peer is resolved **once**, before the uploads: `messages.uploadMedia` binds the upload to the destination peer, so the same `InputPeer` must serve the upload and the send.
+- `files=` is passed to `InputRichMessageMarkdown` through an only-when-set `rich_kwargs` dict, so a media-less article still constructs `files=None` — the shape the pre-media test pins.
+- ➕ Document attributes come from Telethon's own `utils.get_attributes()` (which derives `DocumentAttributeVideo` from a `video/*` mime type even with no metadata library installed), with **one** gap filled: without `hachoir` it emits no `DocumentAttributeAudio` at all, and the Task 5 findings proved an `.mp3` is only reachable through `tg://audio` when it carries one, so `_document_attributes()` appends `DocumentAttributeAudio(duration=0)` for `kind == "audio"` when it is missing. `.gif` (kind `video`, mime `image/gif`) is left to Telegram's own animation conversion.
+- A plain (non-rich) send that somehow carries `rich_files` is rejected with `ValueError` rather than silently dropping the uploads — the ids are only meaningful to the markdown that names them.
 
 ### Task 8: Group consecutive media into `<tg-collage>`
 
