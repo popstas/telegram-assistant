@@ -33,7 +33,7 @@
   - **Проверить:** `access list` / `access check` при этом отрабатывали успешно — разобраться, почему поведение расходится с `messages recent`, и привести к единому.
   - **Обвязка:** тесты на нерезолвимое `chat:`-правило (команда отрабатывает, warning есть, правило не действует); при необходимости — упоминание в README/SKILL.md.
 - [ ] Починить/заменить e2e-таргет `Client chat test` — любая отправка в него отдаёт `ChatRestrictedError` / 400
-  - **Симптом:** `scripts/e2e_test.sh`, `scripts/e2e_cli_test.sh`, `scripts/e2e_http_extras_test.sh` падают на шагах отправки. Проверено в рамках `docs/plans/20260726-rich-message-send.md` (Task 1): ошибка **не** специфична для rich-сообщений — обычный `SendMessageRequest` без `rich_message` в тот же `InputPeerChannel` падает идентично.
+  - **Симптом:** `scripts/e2e_test.sh`, `scripts/e2e_cli_test.sh`, `scripts/e2e_http_extras_test.sh` падают на шагах отправки. Проверено в рамках `docs/plans/completed/20260726-rich-message-send.md` (Task 1): ошибка **не** специфична для rich-сообщений — обычный `SendMessageRequest` без `rich_message` в тот же `InputPeerChannel` падает идентично.
   - **Что сделать:** разобраться в причине ограничения (права аккаунта в чате / статус самого чата) либо завести новый тестовый чат в папке `Clients` и обновить preconditions в `CLAUDE.md` и в самих скриптах.
 - [ ] Проверить rich-message send с non-Premium аккаунта
   - **Контекст:** спайк подтвердил отправку только с Premium-аккаунта (`id=241225329`, `premium=True`), поэтому Premium-гейт на стороне сервера остаётся непроверенным.
