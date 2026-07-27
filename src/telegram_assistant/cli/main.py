@@ -3356,6 +3356,15 @@ def messages_send(
         "(default: on, or telegram.defaults.rich_markdown_spaced_paragraphs). "
         "Only meaningful with --rich-markdown.",
     ),
+    line_breaks: bool | None = typer.Option(
+        None,
+        "--line-breaks/--no-line-breaks",
+        help="Split each line of a paragraph into its own paragraph, so the "
+        "single newlines the article's author wrote survive instead of being "
+        "folded into spaces by Telegram's markdown parser "
+        "(default: on, or telegram.defaults.rich_markdown_line_breaks). "
+        "Only meaningful with --rich-markdown.",
+    ),
     media_group: list[str] = typer.Option(  # noqa: B008
         None,
         "--media-group",
@@ -3415,6 +3424,7 @@ def messages_send(
         ScheduleError,
         SendMessageRequest,
         is_service_command,
+        line_breaks_default,
         make_url_downloader,
         mass_send_message,
         media_grouping_default,
@@ -3495,6 +3505,12 @@ def messages_send(
         typer.echo(
             "--spaced-paragraphs/--no-spaced-paragraphs is only meaningful with "
             "--rich-markdown",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if line_breaks is not None and rich_markdown is None:
+        typer.echo(
+            "--line-breaks/--no-line-breaks is only meaningful with --rich-markdown",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -3650,6 +3666,11 @@ def messages_send(
         spaced_paragraphs
         if spaced_paragraphs is not None
         else spaced_paragraphs_default(config)
+    )
+    # Same rule for the line-splitting pass: an explicit flag wins over
+    # telegram.defaults.rich_markdown_line_breaks.
+    effective_line_breaks = (
+        line_breaks if line_breaks is not None else line_breaks_default(config)
     )
     # Grouping has no all-or-nothing flag: the config sets the default mode and
     # --media-group overrides individual runs.
@@ -3876,6 +3897,7 @@ def messages_send(
                 normalize_rich_markdown(
                     rich_markdown_text or "",
                     spaced_paragraphs=effective_spaced_paragraphs,
+                    line_breaks=effective_line_breaks,
                     grouping=effective_media_grouping,
                     media_groups=media_group_choices,
                 )
@@ -3941,6 +3963,7 @@ def messages_send(
                 "spaced_paragraphs": (
                     effective_spaced_paragraphs if is_rich else None
                 ),
+                "line_breaks": effective_line_breaks if is_rich else None,
                 "spaced": (
                     rich_normalization.spaced
                     if rich_normalization is not None
@@ -3959,6 +3982,10 @@ def messages_send(
                             "size": group.size,
                             "mode": group.mode,
                             "preceding_text": group.preceding_text,
+                            # The captions of the run's media, joined: what the
+                            # group will be captioned with, since Telegram shows
+                            # no caption on a grouped medium itself.
+                            "caption": group.caption,
                         }
                         for group in rich_normalization.groups
                     ]
@@ -4082,6 +4109,7 @@ def messages_send(
                 reply_to_message_id=reply_to,
                 rich_markdown=rich_markdown_text,
                 spaced_paragraphs=effective_spaced_paragraphs,
+                line_breaks=effective_line_breaks,
                 media_grouping=effective_media_grouping,
                 media_groups=media_group_choices,
                 rich_files=rich_files,

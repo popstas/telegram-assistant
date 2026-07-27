@@ -65,6 +65,7 @@ from telegram_assistant.messages import (
     edit_message,
     forward_messages,
     get_recent_messages,
+    line_breaks_default,
     make_url_downloader,
     mass_send_message,
     media_grouping_default,
@@ -176,6 +177,11 @@ class MessageSendBody(BaseModel):
     # ``telegram.defaults.rich_markdown_spaced_paragraphs`` (built-in: on); an
     # explicit value is only accepted alongside ``rich_markdown``.
     spaced_paragraphs: bool | None = None
+    # Split each line of a paragraph into its own paragraph, so the single
+    # newlines the author wrote are not folded into spaces by the server's
+    # markdown parser. Same "``None`` means not set" rule as above, deferring to
+    # ``telegram.defaults.rich_markdown_line_breaks`` (built-in: on).
+    line_breaks: bool | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> MessageSendBody:
@@ -205,6 +211,8 @@ class MessageSendBody(BaseModel):
             # The knob only rewrites markdown before the server parses it;
             # accepting it for a plain send would silently do nothing.
             raise ValueError("spaced_paragraphs requires rich_markdown")
+        if not has_rich and self.line_breaks is not None:
+            raise ValueError("line_breaks requires rich_markdown")
         if self.schedule_at is not None and self.delay_seconds is not None:
             raise ValueError("provide only one of schedule_at or delay_seconds")
         if self.reply_to_message_id is not None and self.reply_to_message_id <= 0:
@@ -942,6 +950,11 @@ def build_router() -> APIRouter:
             schedule_at=resolved_schedule_at,
             reply_to_message_id=body.reply_to_message_id,
             rich_markdown=body.rich_markdown,
+            line_breaks=(
+                body.line_breaks
+                if body.line_breaks is not None
+                else line_breaks_default(getattr(request.app.state, "config", None))
+            ),
             spaced_paragraphs=(
                 body.spaced_paragraphs
                 if body.spaced_paragraphs is not None

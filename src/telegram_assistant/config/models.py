@@ -61,6 +61,15 @@ class TelegramDefaults(BaseModel):
             "unless this is ``false`` or the send opts out per call."
         ),
     )
+    rich_markdown_line_breaks: bool = Field(
+        default=True,
+        description=(
+            "Default for a rich-markdown send's line splitting. Telegram folds "
+            "a single newline inside a paragraph into a space, so each line the "
+            "author wrote becomes its own (tightly rendered) paragraph unless "
+            "this is ``false`` or the send opts out per call."
+        ),
+    )
     rich_markdown_grouping: RichMarkdownGrouping = Field(
         default="collage",
         description=(

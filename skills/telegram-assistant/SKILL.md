@@ -219,7 +219,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `topics` | `rename` | Rename an existing forum topic (change its title). | `telegram-assistant topics rename ...` |
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
-| `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. `--rich-markdown <file.md>` sends a Telegram rich message (article) instead of plain text, with paragraph spacing and `<tg-collage>` grouping on by default (`--no-spaced-paragraphs`, `--media-group`) and local media resolved from the article's directory (`--rich-file`, `--vault-dir`). | `telegram-assistant messages send ...` |
+| `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. `--rich-markdown <file.md>` sends a Telegram rich message (article) instead of plain text, with paragraph spacing, line splitting and `<tg-collage>` grouping on by default (`--no-spaced-paragraphs`, `--no-line-breaks`, `--media-group`) and local media resolved from the article's directory (`--rich-file`, `--vault-dir`). | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
 | `messages` | `forward` | Forward one or more messages (`--message-id`, repeatable) from a source to a target chat (READ-gated source, WRITE-gated target). | `telegram-assistant messages forward ...` |
@@ -540,8 +540,8 @@ command rather than after `folder_cache_ttl` seconds.
   thread the send as a reply (targeted-only; in a forum it wins over the
   topic root, keeping the reply inside the topic), and optional
   `--rich-markdown <file.md>` to send an article instead of plain text
-  (with its own knobs: `--no-spaced-paragraphs`, `--rich-file
-  <reference>=<path>`, `--vault-dir <dir>`, `--media-group
+  (with its own knobs: `--no-spaced-paragraphs`, `--no-line-breaks`,
+  `--rich-file <reference>=<path>`, `--vault-dir <dir>`, `--media-group
   <index>=<collage|slideshow|none>`).
 - Required flags: exactly one targeting shape — targeted
   (`--chat-id`/`--chat-name` + optional `--topic-id`/`--topic-name`)
@@ -575,7 +575,7 @@ command rather than after `folder_cache_ttl` seconds.
   as markers only — `rich_markdown: true`, `rich_markdown_chars`
   (post-normalization), `rich_markdown_blocks`, `rich_markdown_media`,
   `rich_markdown_file`, `spaced_paragraphs` (the effective decision),
-  `spaced` (what the pass actually did), `media_grouping`,
+  `spaced` (what the pass actually did), `line_breaks`, `media_grouping`,
   `rich_markdown_groups` and `rich_files` — never the body; show the
   human those, plus the file path they can re-read.
 - Rich markdown (`--rich-markdown`): use it when the human asks for a
@@ -605,6 +605,18 @@ command rather than after `folder_cache_ttl` seconds.
   `telegram.defaults.rich_markdown_spaced_paragraphs`. Spacers count
   toward both the character and the block limit; if spacing would push
   the article past 500 blocks the CLI sends it unspaced and warns.
+- Line breaks (**on by default**): Telegram parses the markdown itself and
+  folds a *single* newline inside a paragraph into a space, so two lines an
+  author wrote under one another (the usual Obsidian «ссылка, ссылка» pair)
+  would arrive as one run-on line. Each line of a paragraph is split into its
+  own paragraph instead — the clients render those tight, so the result is two
+  lines with no blank line between them, and the U+00A0 spacer above is
+  deliberately not inserted there. Only top-level paragraphs are split; a
+  quote, a list item or an HTML container keeps the author's shape. Add
+  `--no-line-breaks` (HTTP/MCP: `line_breaks: false`) only when the human wants
+  the paragraph left as written; the default also comes from
+  `telegram.defaults.rich_markdown_line_breaks`. Like `--spaced-paragraphs`, it
+  is an error (exit 2 / 422) without `--rich-markdown`.
 - Local media (**CLI-only** — HTTP/MCP articles still take https URLs
   only): local `![](photo.png)`, `![](../img/clip.mp4)` and Obsidian
   `![[Pasted image 1.png|caption|300]]` embeds are resolved by default
@@ -630,13 +642,23 @@ command rather than after `folder_cache_ttl` seconds.
   blocks with no text between them is wrapped in `<tg-collage>`, so the
   usual two or three Obsidian screenshots render as one collage instead
   of stretching the article. The dry-run reports every run under
-  `rich_markdown_groups` (`index`, `size`, `mode`, `preceding_text`).
+  `rich_markdown_groups` (`index`, `size`, `mode`, `preceding_text`,
+  `caption`).
   Override one run with `--media-group <index>=<collage|slideshow|none>`
   (repeatable; the index is the 0-based `index` from that list, an
   unknown one is exit 2). Media the author already wrapped in
   `<tg-collage>`/`<tg-slideshow>`/`<details>` is never re-grouped. The
   default comes from `telegram.defaults.rich_markdown_grouping`; HTTP
   and MCP get that default but have no per-group override.
+- Group caption: Telegram shows **no** caption on a medium inside a
+  collage/slideshow, only one caption for the group, so the captions of a
+  grouped run are listed comma-separated as the group's caption
+  (`Отлив, Прилив`) — that is the `caption` field of each
+  `rich_markdown_groups` entry. Media without a caption adds nothing, and
+  a run where nobody has one gets no caption at all. Quote the caption in
+  the plan: it is what the human will actually see under the collage, and
+  the per-image captions they wrote will not be shown. Switching a run to
+  `none` brings the individual captions back.
 - Grouping dialogue: when the dry-run reports a non-empty
   `rich_markdown_groups`, ask the human with `AskUserQuestion` whether
   any group should change before confirming the send — see the
@@ -661,6 +683,7 @@ command rather than after `folder_cache_ttl` seconds.
   `--spaced-paragraphs/--no-spaced-paragraphs is only meaningful with
   --rich-markdown`, `--rich-file/--vault-dir are only meaningful with
   --rich-markdown`, `--media-group is only meaningful with
+  --rich-markdown`, `--line-breaks/--no-line-breaks is only meaningful with
   --rich-markdown`, `--rich-file must be <reference>=<path> (... given)`,
   `--media-group must be <index>=<collage|slideshow|none> (... given)`.
   Media-specific (also exit code 2): `media file not found: <ref>
@@ -1444,7 +1467,10 @@ Request: «Опубликуй в чате Клиент / проект стать
    the chosen `--media-group <index>=<collage|slideshow|none>` flags
    (the `index` is the one from `rich_markdown_groups`). A single group
    the human leaves as-is needs no second question. Carry the same
-   `--media-group` flags into the real send.
+   `--media-group` flags into the real send. Name each group's `caption`
+   in the question when it is non-empty («подпись: `Отлив, Прилив`»):
+   that one caption replaces the per-image captions, which a collage or
+   slideshow does not show — a reason a human may pick `Ungrouped`.
 6. Wait for confirmation, then re-run without `--dry-run`. Never add
    `--text`/`--file`/`--file-url`/`--mass` to a rich send. If it fails,
    report the error verbatim — do not fall back to a plain text send
