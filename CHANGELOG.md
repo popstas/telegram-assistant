@@ -5,6 +5,7 @@
 
 ### Features
 
+- Group consecutive rich-markdown media into <tg-collage>
 - Upload and send local media in rich messages
 - Resolve local media from rich markdown into tg:// references
 - Spike script for local media inside a rich message
