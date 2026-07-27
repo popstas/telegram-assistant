@@ -5,6 +5,7 @@
 
 ### Features
 
+- Surface rich markdown paragraph spacing flag on CLI, HTTP, MCP
 - Wire rich markdown paragraph spacing into send_message
 - Rich markdown paragraph spacer normalization
 - Rich markdown block scanner
