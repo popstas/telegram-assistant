@@ -14,6 +14,11 @@ from pydantic import (
 )
 
 TopicsLayout = Literal["list", "tabs"]
+
+#: How a run of consecutive media blocks in a rich-markdown article is grouped
+#: (mirrors ``messages.rich_markdown.MEDIA_GROUP_MODES``; declared here so the
+#: config layer does not import the domain).
+RichMarkdownGrouping = Literal["collage", "slideshow", "none"]
 AccessPermission = Literal["read", "write", "delete"]
 
 
@@ -54,6 +59,15 @@ class TelegramDefaults(BaseModel):
             "renders neighbouring paragraphs tight against each other, so a "
             "spacer paragraph is inserted between them (and before headings) "
             "unless this is ``false`` or the send opts out per call."
+        ),
+    )
+    rich_markdown_grouping: RichMarkdownGrouping = Field(
+        default="collage",
+        description=(
+            "Default grouping for a run of two or more consecutive media "
+            "blocks in a rich-markdown send: ``collage`` and ``slideshow`` "
+            "wrap the run in the matching container tag, ``none`` leaves the "
+            "media as separate blocks. A per-group override still wins."
         ),
     )
 

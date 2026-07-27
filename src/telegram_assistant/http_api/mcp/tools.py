@@ -193,6 +193,7 @@ from telegram_assistant.messages import (
     get_recent_messages,
     make_url_downloader,
     mass_send_message,
+    media_grouping_default,
     normalize_search_range,
     pin_message,
     resolve_schedule_at,
@@ -765,6 +766,11 @@ async def _resolve_message_send(
                 else spaced_paragraphs_default(
                     getattr(request.app.state, "config", None)
                 )
+            ),
+            # Grouping of consecutive media applies to a remote caller's
+            # https-media article too; the per-group override is CLI-only.
+            media_grouping=media_grouping_default(
+                getattr(request.app.state, "config", None)
             ),
         ),
         authorizer=authorizer,

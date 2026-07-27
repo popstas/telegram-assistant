@@ -67,6 +67,7 @@ from telegram_assistant.messages import (
     get_recent_messages,
     make_url_downloader,
     mass_send_message,
+    media_grouping_default,
     normalize_search_range,
     pin_message,
     resolve_schedule_at,
@@ -947,6 +948,12 @@ def build_router() -> APIRouter:
                 else spaced_paragraphs_default(
                     getattr(request.app.state, "config", None)
                 )
+            ),
+            # Local media is CLI-only, but grouping applies to https media in a
+            # remote caller's article just the same — it is a config decision
+            # here, with no per-group override on this surface.
+            media_grouping=media_grouping_default(
+                getattr(request.app.state, "config", None)
             ),
         )
 

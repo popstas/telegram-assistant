@@ -235,14 +235,27 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 
 ### Task 8: Group consecutive media into `<tg-collage>`
 
-- [ ] add grouping to `normalize_rich_markdown`: a run of 2+ consecutive media blocks (no text between them) is wrapped in `<tg-collage>` … `</tg-collage>` with blank lines inside, per the dialect
-- [ ] respect config `telegram.defaults.rich_markdown_grouping`, default: `collage` — ⚠️ **the live `data/config.yml` already sets this key**, and `TelegramDefaults` forbids extra inputs, so *every* command currently fails with `telegram.defaults.rich_markdown_grouping: Extra inputs are not permitted` until this task lands (found while running the Task 5 spike, which needed a stripped copy of the config to start)
-- [ ] accept a per-group override argument (`media_groups=[{index, mode: "collage"|"slideshow"|"none"}]`) so a caller can turn one run into `<tg-slideshow>` or leave it ungrouped; unknown indexes are an error
-- [ ] expose the detected groups in the normalization result (index, media count, the trailing ~50 characters of the preceding text) so surfaces can describe them
-- [ ] never group media that is already inside an author-written `<tg-collage>`/`<tg-slideshow>`/`<details>` block
-- [ ] CLI: `--media-group <index>=<collage|slideshow|none>` (repeatable); dry-run lists detected groups with their preceding text and chosen mode
-- [ ] write tests: two runs grouped, single media untouched, override to slideshow/none, author-written collage untouched, group info reported, grouping counted correctly against the block limit
-- [ ] run `pytest` and `ruff check src tests` — must pass before task 9
+- [x] add grouping to `normalize_rich_markdown`: a run of 2+ consecutive media blocks (no text between them) is wrapped in `<tg-collage>` … `</tg-collage>` with blank lines inside, per the dialect
+- [x] respect config `telegram.defaults.rich_markdown_grouping`, default: `collage` — ~~⚠️ **the live `data/config.yml` already sets this key**, and `TelegramDefaults` forbids extra inputs, so *every* command currently fails with `telegram.defaults.rich_markdown_grouping: Extra inputs are not permitted` until this task lands~~ **resolved**: the key is now declared (`RichMarkdownGrouping = Literal["collage", "slideshow", "none"]`) and the live config loads again
+- [x] accept a per-group override argument (`media_groups=[{index, mode: "collage"|"slideshow"|"none"}]`) so a caller can turn one run into `<tg-slideshow>` or leave it ungrouped; unknown indexes are an error
+- [x] expose the detected groups in the normalization result (index, media count, the trailing ~50 characters of the preceding text) so surfaces can describe them
+- [x] never group media that is already inside an author-written `<tg-collage>`/`<tg-slideshow>`/`<details>` block
+- [x] CLI: `--media-group <index>=<collage|slideshow|none>` (repeatable); dry-run lists detected groups with their preceding text and chosen mode
+- [x] write tests: two runs grouped, single media untouched, override to slideshow/none, author-written collage untouched, group info reported, grouping counted correctly against the block limit
+- [x] run `pytest` and `ruff check src tests` — must pass before task 9
+
+**Task 8 notes** (decisions made while implementing, they constrain later tasks):
+
+- Public API added to `rich_markdown.py` (all re-exported from `messages/`): `MediaGroup` (`index`, `size`, `preceding_text`, `mode`), `MediaGroupChoice` (`index`, `mode`), `MediaGroupError`, `MEDIA_GROUP_MODES`, `MEDIA_GROUP_TAGS`, `MEDIA_GROUP_CONTEXT_CHARS`, `DEFAULT_MEDIA_GROUP_MODE`. `RichMarkdownNormalization` gained `groups`, plus ➕ `grouped`/`spacers_added` — with two rewriting passes, "the text changed" no longer means "spacing grew it", and the over-limit `ValueError` in `send_message` must name the pass that actually did it (`after paragraph spacing`, `after media grouping`, or both).
+- Order is **group → space → count**: the spacer pass runs on the grouped text, so the reported block count and the 500-block rollback both see the container blocks the send will actually carry (a collage costs `1 + its media`).
+- A run is 2+ **top-level** media blocks with no other block between them. Media inside a quote or an author-written `<tg-collage>`/`<tg-slideshow>`/`<details>` lives in `Block.children` and is never re-grouped — that is what makes "never regroup an author's own group" fall out of Task 1's scanner rather than needing a special case.
+- Byte fidelity by identity for the third time: nothing wrapped ⇒ the input string is returned unchanged, so `grouping: none` (or a media-less article) keeps its CRLF and trailing newline. A wrap rebuilds only the run's own line range — the media lines survive verbatim, the whitespace between them is replaced by the blank lines the dialect wants inside the tag, and a blank line is added on each side when the run sat tight against its text.
+- `media_groups` accepts every shape a surface naturally has: `{index: mode}`, `MediaGroupChoice`s, `{"index": …, "mode": …}` dicts, or `(index, mode)` pairs. An index naming no run raises `MediaGroupError` (a `ValueError`, so every surface's 400 / exit-2 path already covers it) — the "no silent drop" rule the plan states for media, applied to grouping.
+- `SendMessageRequest` gained `media_grouping` (config default via ➕ `media_grouping_default(config)`, the twin of `spaced_paragraphs_default`) and `media_groups`; both are recorded in `to_payload()` and neither is a backend kwarg, so the legacy-signature fakes are untouched.
+- The CLI pre-checks `--media-group` indexes against the article's real runs *before* opening a backend (a cheap `grouping="none"` pass), so a typo is exit 2 with no connection; the same error is also caught around the send as a fence.
+- Grouping has **no** all-or-nothing CLI flag — the config knob sets the mode and `--media-group` overrides one run. HTTP/MCP get the config default but no per-group override (they cannot see the dry-run's group list; the CLI is the surface with the human in the loop).
+- Dry-run gained `media_grouping` (the effective default) and `rich_markdown_groups` (`index`, `size`, `mode`, `preceding_text`) — `preceding_text` is the whitespace-collapsed tail of the nearest text block above the run, `…`-prefixed when truncated at 50 chars. That is the list Task 9's `AskUserQuestion` dialogue reads.
+- ➕ Existing test churn: two cases in `tests/test_rich_markdown_normalize.py` used bare media runs to test the *spacer* pass and now pass `grouping="none"` to isolate it.
 
 ### Task 9: Skill dialogue and documentation
 
