@@ -5,6 +5,7 @@
 
 ### Features
 
+- rich-markdown: Split soft line breaks
 - Verify rich-markdown docs and record the proven tg:// media wire facts
 - Pin rich-markdown acceptance edge cases
 - Document rich-markdown spacing, local media and collage grouping
