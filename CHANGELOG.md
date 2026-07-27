@@ -5,6 +5,7 @@
 
 ### Features
 
+- Pin rich-markdown acceptance edge cases
 - Document rich-markdown spacing, local media and collage grouping
 - Group consecutive rich-markdown media into <tg-collage>
 - Upload and send local media in rich messages

@@ -605,8 +605,9 @@ command rather than after `folder_cache_ttl` seconds.
   `![[Pasted image 1.png|caption|300]]` embeds are resolved by default
   against the article's own directory, uploaded, and referenced from the
   markdown, so an Obsidian note can be sent unedited. `.jpg/.jpeg/.png/
-  .webp` are photos, `.mp4/.mov/.webm/.gif` video, `.mp3/.m4a/.ogg`
-  audio; any other suffix is an error. Captions come from the media
+  .webp` are photos, `.mp4/.mov/.webm/.mkv/.avi/.m4v/.gif` video,
+  `.mp3/.ogg/.oga/.opus/.m4a/.wav/.flac` audio; any other suffix is an
+  error. Captions come from the media
   title (`"caption"`), falling back to the alt text. For a file that
   does not live next to the article use `--rich-file
   <reference>=<path>` (repeatable; the reference is the target as
@@ -1424,7 +1425,10 @@ Request: «Опубликуй в чате Клиент / проект стать
 5. If the dry-run reports a non-empty `rich_markdown_groups`, ask about
    the grouping **before** asking for the send confirmation. One
    `AskUserQuestion` call: «В статье N групп подряд идущих медиа, все
-   будут отправлены как collage. Изменить группировку?» with options
+   будут отправлены как `<mode>`. Изменить группировку?» — `<mode>` is
+   the `mode` the dry-run reported for those groups (`collage` unless
+   `telegram.defaults.rich_markdown_grouping` says otherwise) — with
+   options
    `Оставить как есть` / `Изменить`. Only if the human picks
    `Изменить`, ask one question per group — «После текста
    `<preceding_text>` как сгруппировать медиа?» with options

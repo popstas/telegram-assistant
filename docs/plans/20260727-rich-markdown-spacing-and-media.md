@@ -294,8 +294,18 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 
 ### Task 11: [Final] Update documentation
 
-- [ ] re-read `README.md` / `CLAUDE.md` / `SKILL.md` diffs for accuracy against the final behaviour
-- [ ] record the proven MTProto media syntax in `CLAUDE.md` (it is not documented in Telethon's stubs and will otherwise be re-derived)
+- [x] re-read `README.md` / `CLAUDE.md` / `SKILL.md` diffs for accuracy against the final behaviour
+- [x] record the proven MTProto media syntax in `CLAUDE.md` (it is not documented in Telethon's stubs and will otherwise be re-derived)
+
+**Task 11 notes** (what the accuracy pass actually found):
+
+- The three doc diffs were re-read against the *shipped* code, not the earlier task notes. Checked and correct: every CLI flag name, all twelve dry-run marker keys (`rich_markdown`, `rich_markdown_chars/_blocks/_media/_file/_groups`, `rich_files`, `spaced_paragraphs`, `spaced`, `media_grouping`), the config keys (`rich_markdown_spaced_paragraphs`, `rich_markdown_grouping` → `RichMarkdownGrouping`), the HTTP `spaced_paragraphs` `bool | None` + its `_shape` 422, and every error string quoted in `SKILL.md` (all still present verbatim in `cli/main.py`, `rich_markdown.py`, `service.py`, `telethon_backend.py`).
+- ⚠️ **One real inaccuracy**: `README.md` and `SKILL.md` both listed the media suffixes as `.mp4/.mov/.webm/.gif` and `.mp3/.m4a/.ogg`, reading as exhaustive, while `VIDEO_SUFFIXES`/`AUDIO_SUFFIXES` also carry `.mkv/.avi/.m4v` and `.oga/.opus/.wav/.flac`. A human following the docs would have believed a `.wav` embed was an error. Both lists now match the code.
+- ➕ The grouping-dialogue question in `SKILL.md` hard-coded «все будут отправлены как collage», which is wrong when `telegram.defaults.rich_markdown_grouping` is `slideshow`; it now names the `mode` the dry-run actually reported.
+- ➕ Two stale paths fixed: `docs/plans/20260726-rich-message-send.md` moved to `docs/plans/completed/` during this branch, but `CLAUDE.md` and `docs/TODO.md` still pointed at the old location.
+- The proven MTProto syntax was already in the `CLAUDE.md` local-media bullet at the *reference* level (`tg://photo|video|audio?id=`, the `[A-Za-z0-9_-]+` id grammar, scheme-must-match-upload, every non-`tg://` form rejected). What was missing is the part no stub or public doc records, now added: `InputRichFilePhoto(id: str, photo)` / `InputRichFileDocument(id: str, document)` take a **caller-chosen** id; captions survive as a populated `PageBlockPhoto.caption` and the read-back is a real `PageBlockPhoto(photo_id=…)` (embedded, not linked); a video needs **no** thumbnail; an `.mp3` reaches `tg://audio` only with a `DocumentAttributeAudio`, which Telethon omits without `hachoir` (why `_document_attributes()` appends one); and `files=` does not intercept http(s) URLs, so uploaded and remote media compose in one article.
+- `CLAUDE.md`'s Common-commands list gained `scripts/spike_rich_media.py` (it existed on the branch but was undocumented, so the spike that proved the dialect was not discoverable from the file that cites its findings).
+- `SKILL.md` re-synced to `~/.claude/skills/telegram-assistant/SKILL.md` (verified identical). `pytest` **1993 passed**, `ruff check src tests` clean.
 
 ## Technical Details
 
