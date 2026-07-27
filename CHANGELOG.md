@@ -5,6 +5,7 @@
 
 ### Features
 
+- Document rich-markdown spacing, local media and collage grouping
 - Group consecutive rich-markdown media into <tg-collage>
 - Upload and send local media in rich messages
 - Resolve local media from rich markdown into tg:// references
