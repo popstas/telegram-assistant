@@ -41,7 +41,13 @@ from telegram_assistant.messages.attachments import (
     materialize_base64_attachments,
 )
 from telegram_assistant.messages.downloads import Downloader
-from telegram_assistant.messages.rich_markdown import normalize_rich_markdown
+from telegram_assistant.messages.rich_markdown import (
+    MAX_RICH_MEDIA,
+    RICH_FILE_ID_RE,
+    RICH_FILE_SCHEMES,
+    RichFile,
+    normalize_rich_markdown,
+)
 from telegram_assistant.messages.sent_registry import SentMessageRegistry
 from telegram_assistant.persistence import idempotency
 from telegram_assistant.persistence.models import (
@@ -244,6 +250,47 @@ def _validate_attachment_refs(refs: tuple[str, ...], *, kind: str) -> None:
             )
 
 
+def _validate_rich_files(
+    rich_files: tuple[RichFile, ...], *, has_rich_markdown: bool
+) -> None:
+    """Reject rich-message uploads the send could not possibly complete.
+
+    Unlike plain attachments, these *are* checked against the filesystem here:
+    the ids are already written into the markdown, so a missing file would send
+    an article whose media reference points at nothing. Failing before the
+    operation row is opened keeps the idempotency key free for the fixed retry.
+    """
+
+    if not rich_files:
+        return
+    if not has_rich_markdown:
+        raise ValueError("rich_files requires rich_markdown")
+    if len(rich_files) > MAX_RICH_MEDIA:
+        raise ValueError(
+            f"rich_files exceeds Telegram's {MAX_RICH_MEDIA} media attachments "
+            f"({len(rich_files)} given)"
+        )
+    seen: set[str] = set()
+    for rich_file in rich_files:
+        if not rich_file.id or not RICH_FILE_ID_RE.match(rich_file.id):
+            raise ValueError(
+                f"rich_files id must match {RICH_FILE_ID_RE.pattern} "
+                f"({rich_file.id!r} given)"
+            )
+        if rich_file.id in seen:
+            raise ValueError(f"duplicate rich_files id: {rich_file.id}")
+        seen.add(rich_file.id)
+        if rich_file.kind not in RICH_FILE_SCHEMES:
+            raise ValueError(
+                f"rich_files kind must be one of "
+                f"{', '.join(sorted(RICH_FILE_SCHEMES))} ({rich_file.kind!r} given)"
+            )
+        if not os.path.isfile(rich_file.path):
+            raise ValueError(f"rich_files entry is not a file: {rich_file.path}")
+        if not os.access(rich_file.path, os.R_OK):
+            raise ValueError(f"rich_files entry is not readable: {rich_file.path}")
+
+
 def _coerce_message_id(raw: Any) -> int:
     msg_id = int(raw)
     if msg_id <= 0:
@@ -287,7 +334,9 @@ class MessageBackend(Protocol):
     ``rich_markdown`` sends a Telegram *rich message* (article) whose markdown
     source the server parses itself; it is mutually exclusive with ``text`` and
     ``files``, and — like the other optional kwargs — the service only passes it
-    when set, so backends predating rich sends keep working.
+    when set, so backends predating rich sends keep working. ``rich_files`` are
+    the local files that markdown names through ``tg://photo?id=…`` and friends;
+    it is likewise only passed when non-empty.
     """
 
     async def send_message(
@@ -300,6 +349,7 @@ class MessageBackend(Protocol):
         schedule_at: datetime | None = None,
         reply_to_message_id: int | None = None,
         rich_markdown: str | None = None,
+        rich_files: tuple[RichFile, ...] = (),
     ) -> int | list[int]:
         ...
 
@@ -383,6 +433,13 @@ class SendMessageRequest:
     which inserts a spacer paragraph where Telegram would otherwise render two
     paragraphs tight against each other. ``False`` sends the source
     byte-for-byte.
+
+    ``rich_files`` are local files the ``rich_markdown`` body names through the
+    ``tg://photo?id=…``/``tg://video?id=…``/``tg://audio?id=…`` references that
+    :func:`~telegram_assistant.messages.rich_markdown.scan_media` writes. They
+    are uploaded by the backend and bound to those ids; the field is only valid
+    alongside ``rich_markdown`` and is bounded by
+    :data:`~telegram_assistant.messages.rich_markdown.MAX_RICH_MEDIA`.
     """
 
     telegram_chat_id: int
@@ -399,6 +456,7 @@ class SendMessageRequest:
     reply_to_message_id: int | None = None
     rich_markdown: str | None = None
     spaced_paragraphs: bool = True
+    rich_files: tuple[RichFile, ...] = field(default_factory=tuple)
 
     @property
     def attachment_refs(self) -> tuple[str, ...]:
@@ -457,6 +515,13 @@ class SendMessageRequest:
                 )
             ),
             "spaced_paragraphs": self.spaced_paragraphs,
+            # Like ``files``: only the *reference* to each upload is persisted
+            # (id, path, kind), never the file contents. The caption is already
+            # in the recorded markdown, so it is not duplicated here.
+            "rich_files": [
+                {"id": rf.id, "path": rf.path, "kind": rf.kind}
+                for rf in self.rich_files
+            ],
         }
 
 
@@ -615,6 +680,7 @@ async def send_message(
         raise ValueError(
             "send_message requires non-empty text or at least one attachment"
         )
+    _validate_rich_files(request.rich_files, has_rich_markdown=request.rich_markdown is not None)
     _validate_attachment_refs(request.files, kind="files")
     _validate_attachment_refs(request.file_urls, kind="file_urls")
     # Validate base64 attachments before opening the operation so malformed or
@@ -691,6 +757,8 @@ async def send_message(
                 extra["reply_to_message_id"] = request.reply_to_message_id
             if request.rich_markdown is not None:
                 extra["rich_markdown"] = request.rich_markdown
+            if request.rich_files:
+                extra["rich_files"] = request.rich_files
             raw_id = await backend.send_message(
                 chat_id=request.telegram_chat_id,
                 text=request.text,

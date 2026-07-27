@@ -7,15 +7,23 @@ API twin can only reference media by public HTTPS URL, but MTProto's
 ``InputRichMessageMarkdown`` carries ``files: list[InputRichFile]``, where each
 entry is ``InputRichFilePhoto(id=<str>, photo=…)`` /
 ``InputRichFileDocument(id=<str>, document=…)``. The ``id`` is a caller-chosen
-string, and **nothing local documents how the markdown refers back to it** —
-neither Telethon's stubs nor ``@grammyjs/types/rich.d.ts`` (which describes the
-Bot API dialect, where media blocks "support only HTTP and HTTPS URLs").
+string, and neither Telethon's stubs nor ``@grammyjs/types/rich.d.ts`` said how
+the markdown refers back to it.
+
+**Answer (proven by running this script, 2026-07-27):** the body names the file
+through ``tg://photo?id=<id>``, ``tg://video?id=<id>`` or ``tg://audio?id=<id>``,
+and the scheme must match the uploaded media. The ``id`` is an ASCII identifier
+(``[A-Za-z0-9_-]``); a dot, a space or a non-ASCII character is rejected with
+``RICH_MESSAGE_FILE_ID_INVALID``, and any non-``tg://`` reference (a bare id, a
+relative path, ``attach://…``, ``tg://file?id=…``) with
+``RICH_MESSAGE_PHOTO_URL_INVALID``.
 
 So this script uploads one local file, builds the ``InputRichFile`` for it, and
 sends one article per candidate reference syntax, reporting which ones the
 server accepts. Each accepted message is read back and its ``RichMessage``
 block list printed, so the answer is *proven* (the media block is really there
-and really points at the upload) rather than inferred from a 200.
+and really points at the upload) rather than inferred from a 200. The rejected
+guesses are kept as a regression probe.
 
 This is a *spike*, not part of the shipped surface: it talks to the real
 account, so it lives next to ``scripts/spike_rich_message.py`` and shares its
@@ -27,7 +35,7 @@ Usage::
     .venv/bin/python scripts/spike_rich_media.py --file ~/Pictures/photo.png
     .venv/bin/python scripts/spike_rich_media.py --file clip.mp4 --entity me
     .venv/bin/python scripts/spike_rich_media.py --file photo.png --dry-run
-    .venv/bin/python scripts/spike_rich_media.py --file photo.png --only bare-id
+    .venv/bin/python scripts/spike_rich_media.py --file photo.png --only tg-scheme
 
 Exit codes: 0 = at least one candidate was accepted (or dry run), 2 =
 precondition missing (no file, no session, no config, Telethon too old), 3 =
@@ -39,7 +47,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import mimetypes
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,13 +91,13 @@ def classify_file(path: Path | str) -> str:
 def default_file_id(path: Path | str) -> str:
     """Derive a safe ``InputRichFile.id`` from a file name.
 
-    The id doubles as the markdown reference, so it must survive being written
-    inside ``![](…)`` — spaces, brackets and quotes are replaced rather than
-    escaped, and a name that reduces to nothing falls back to ``file1``.
+    Delegates to the shipped helper so the spike and the real send path agree on
+    what the server accepts: an id with a dot, a space or a non-ASCII character
+    is rejected with ``RICH_MESSAGE_FILE_ID_INVALID``.
     """
-    stem = Path(path).stem
-    slug = re.sub(r"[^A-Za-z0-9_.-]+", "-", stem).strip("-.")
-    return slug or "file1"
+    from telegram_assistant.messages.rich_markdown import make_rich_file_id
+
+    return make_rich_file_id(Path(path).stem)
 
 
 def build_candidates(
@@ -98,15 +105,26 @@ def build_candidates(
     *,
     alt: str = DEFAULT_ALT,
     caption: str = DEFAULT_CAPTION,
+    kind: str = "photo",
 ) -> tuple[Candidate, ...]:
-    """Every reference syntax worth trying, in the order the plan lists them.
+    """Every reference syntax worth trying, proven one first.
 
-    Pure on purpose: the network half of this spike is manual, but the variant
-    list and the id substitution are what a later task reuses, so they are unit
-    tested. Each article names its own candidate in a paragraph, so a read-back
-    (or a scroll through Saved Messages) says which syntax produced it.
+    The answer is in: ``tg://photo?id=<id>`` (and ``tg://video``/``tg://audio``,
+    matching the uploaded media) is what the server binds to
+    ``InputRichMessage*.files``. The four rejected guesses are kept as a
+    regression probe — each one is a *whole article* naming itself, so a scroll
+    through Saved Messages says which syntax produced which message.
+
+    ``kind`` is ``photo``/``video``/``audio``: the scheme must match the upload,
+    or the send fails ``RICH_MESSAGE_VIDEO_INVALID``/``…_PHOTO_INVALID``.
     """
+    from telegram_assistant.messages.rich_markdown import rich_file_reference
+
+    proven = rich_file_reference(file_id, "photo" if kind == "photo" else kind)
     markdown_refs = (
+        ("tg-scheme", f"![]({proven})"),
+        ("tg-scheme-alt-caption", f'![{alt}]({proven} "{caption}")'),
+        # Rejected in the Task 5 run — kept so a server-side change shows up.
         ("bare-id", f"![]({file_id})"),
         ("tg-file-url", f"![](tg://file?id={file_id})"),
         ("attach-scheme", f"![](attach://{file_id})"),
@@ -291,7 +309,12 @@ async def _run(args: argparse.Namespace) -> int:
         return _fail(f"No such file: {path}")
 
     file_id = args.file_id or default_file_id(path)
-    candidates = build_candidates(file_id, alt=args.alt, caption=args.caption)
+    # A document upload must be named through tg://video (or tg://audio); only a
+    # photo may use tg://photo, so the proven candidate follows the upload shape.
+    proven_kind = "photo" if classify_file(path) == "photo" else "video"
+    candidates = build_candidates(
+        file_id, alt=args.alt, caption=args.caption, kind=proven_kind
+    )
     if args.only:
         wanted = {name.strip() for name in args.only.split(",") if name.strip()}
         unknown = wanted - {candidate.name for candidate in candidates}
