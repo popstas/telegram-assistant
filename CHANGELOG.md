@@ -42,6 +42,10 @@
 
 - Verify rich-message acceptance criteria
 
+### Task
+
+- Clear completed rich-markdown and messages todos
+
 ## v0.8.0 - 2026-07-26
 
 ### Features
