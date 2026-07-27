@@ -47,6 +47,15 @@ class TelegramDefaults(BaseModel):
     default_member_permissions: DefaultMemberPermissions = Field(
         default_factory=DefaultMemberPermissions
     )
+    rich_markdown_spaced_paragraphs: bool = Field(
+        default=True,
+        description=(
+            "Default for a rich-markdown send's paragraph spacing. Telegram "
+            "renders neighbouring paragraphs tight against each other, so a "
+            "spacer paragraph is inserted between them (and before headings) "
+            "unless this is ``false`` or the send opts out per call."
+        ),
+    )
 
 
 class AccessRule(BaseModel):

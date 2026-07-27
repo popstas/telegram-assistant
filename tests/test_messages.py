@@ -19,6 +19,7 @@ from telegram_assistant.folders import (
 from telegram_assistant.http_api import create_app
 from telegram_assistant.messages import (
     MAX_RICH_MARKDOWN_CHARS,
+    NBSP,
     Base64Attachment,
     MassSendRequest,
     MessageSendFailed,
@@ -477,7 +478,9 @@ async def test_send_message_rich_markdown_service_command_is_redacted(
     )
     result, op = await send_message(backend=backend, store=store, request=req)
 
-    assert backend.sent[0]["rich_markdown"] == markdown
+    # Spacing is on by default, so the backend sees the normalised markdown —
+    # a spacer paragraph before the heading — not the source byte-for-byte.
+    assert backend.sent[0]["rich_markdown"] == f"/task 12345\n\n{NBSP}\n\n# Title\n"
     assert op.request_payload["rich_markdown"] == "/task [redacted]"
     assert "12345" not in op.request_payload["rich_markdown"]
     # ``is_service_command`` still describes ``text``, which is empty here.

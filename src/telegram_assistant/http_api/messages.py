@@ -74,6 +74,7 @@ from telegram_assistant.messages import (
     search_messages,
     send_message,
     set_message_reaction,
+    spaced_paragraphs_default,
     unpin_message,
     validate_file_urls,
 )
@@ -931,6 +932,9 @@ def build_router() -> APIRouter:
             schedule_at=resolved_schedule_at,
             reply_to_message_id=body.reply_to_message_id,
             rich_markdown=body.rich_markdown,
+            spaced_paragraphs=spaced_paragraphs_default(
+                getattr(request.app.state, "config", None)
+            ),
         )
 
         try:

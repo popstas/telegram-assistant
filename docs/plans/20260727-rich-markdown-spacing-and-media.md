@@ -126,13 +126,22 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 
 ### Task 3: Wire normalization into `send_message`
 
-- [ ] add `spaced_paragraphs: bool = True` to `SendMessageRequest`; include it in `to_payload()` so the audit trail records what was sent
-- [ ] respect config `telegram.defaults.rich_markdown_spaced_paragraphs: bool`, default: True
-- [ ] in `send_message`, normalise the markdown **before** the length check, so `MAX_RICH_MARKDOWN_CHARS` bounds what actually goes to Telegram; pass the normalised text down through the existing only-when-set `extra` block
-- [ ] add `warnings: tuple[str, ...] = ()` to `SendMessageResult` (defaulting empty, serialised in `to_dict()`/`from_dict()`) and carry the normalization warnings through
-- [ ] keep the redaction rule in `to_payload()` applied to the **normalised** markdown
-- [ ] write tests: default send is spaced; `spaced_paragraphs=False` sends byte-for-byte; a spaced article over the char limit raises `ValueError` naming the post-normalization length; warnings reach the result; the legacy-signature fake still passes
-- [ ] run `pytest` and `ruff check src tests` — must pass before task 4
+- [x] add `spaced_paragraphs: bool = True` to `SendMessageRequest`; include it in `to_payload()` so the audit trail records what was sent
+- [x] respect config `telegram.defaults.rich_markdown_spaced_paragraphs: bool`, default: True
+- [x] in `send_message`, normalise the markdown **before** the length check, so `MAX_RICH_MARKDOWN_CHARS` bounds what actually goes to Telegram; pass the normalised text down through the existing only-when-set `extra` block
+- [x] add `warnings: tuple[str, ...] = ()` to `SendMessageResult` (defaulting empty, serialised in `to_dict()`/`from_dict()`) and carry the normalization warnings through
+- [x] keep the redaction rule in `to_payload()` applied to the **normalised** markdown
+- [x] write tests: default send is spaced; `spaced_paragraphs=False` sends byte-for-byte; a spaced article over the char limit raises `ValueError` naming the post-normalization length; warnings reach the result; the legacy-signature fake still passes
+- [x] run `pytest` and `ruff check src tests` — must pass before task 4
+
+**Task 3 notes** (decisions made while implementing, they constrain later tasks):
+
+- `send_message` normalises once and then rebinds `request = replace(request, rich_markdown=normalization.markdown)`, so the operation payload, the length check and the backend kwarg can never disagree about what was sent. That is also why the redaction rule needed no change — `to_payload()` is called after the rebind, and the payload now reads back as the *normalised* markdown (spacers included).
+- The over-limit `ValueError` names the post-normalization length and appends `after paragraph spacing` **only** when the pass actually changed the text, so a source that was already too long is not blamed on spacing. Existing surface tests that only match `32768` stay green.
+- `spaced_paragraphs` is a *request-level* knob, never a backend kwarg: the only-when-set `extra` block still passes just `rich_markdown`, so the legacy-signature fakes are untouched by this task.
+- ➕ Config is read through `spaced_paragraphs_default(config)` (exported from `messages/`) rather than three duck-typed `getattr` chains — CLI, HTTP and MCP all call it when building the request. It tolerates a missing config / a config predating the knob (→ `True`). Task 4's per-call flag layers **over** this value.
+- `SendMessageResult.warnings` is serialised as a list and read back with `payload.get("warnings") or ()`, so operation rows written before this task replay as "no warnings" instead of raising. A replay reports the original send's warnings, not a fresh normalisation.
+- ➕ Existing test churn was a single assertion (`test_send_message_rich_markdown_service_command_is_redacted`): a paragraph followed by a heading now gets a spacer, so the backend sees the normalised text. Everything else in the suite already used markdown with no insertion point.
 
 ### Task 4: Surface the flag (CLI, HTTP, MCP)
 
