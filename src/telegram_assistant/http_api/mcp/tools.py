@@ -759,8 +759,12 @@ async def _resolve_message_send(
             schedule_at=resolved_schedule_at,
             reply_to_message_id=body.reply_to_message_id,
             rich_markdown=body.rich_markdown,
-            spaced_paragraphs=spaced_paragraphs_default(
-                getattr(request.app.state, "config", None)
+            spaced_paragraphs=(
+                body.spaced_paragraphs
+                if body.spaced_paragraphs is not None
+                else spaced_paragraphs_default(
+                    getattr(request.app.state, "config", None)
+                )
             ),
         ),
         authorizer=authorizer,
@@ -1204,6 +1208,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         delay_seconds: int | None = None,
         reply_to_message_id: int | None = None,
         rich_markdown: str | None = None,
+        spaced_paragraphs: bool | None = None,
     ) -> dict[str, Any]:
         """Send a message to a chat (targeted by ``entity`` or ``telegram_chat_id``).
 
@@ -1218,6 +1223,13 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
         https URL; up to 32 768 chars) is parsed by the server. It is mutually
         exclusive with ``text`` and the attachment fields, and composes with
         ``telegram_topic_id``/``reply_to_message_id``/``schedule_at``.
+
+        ``spaced_paragraphs`` (rich sends only — an error without
+        ``rich_markdown``) inserts a U+00A0 spacer paragraph between paragraphs
+        and before headings, so the article is not rendered as a wall of text.
+        Leave it unset to follow the server default (normally on); pass
+        ``false`` to send the markdown byte-for-byte. Non-fatal notes about the
+        article (block/media budget) come back in the result's ``warnings``.
         """
         request = _request(provider)
         try:
@@ -1234,6 +1246,7 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 delay_seconds=delay_seconds,
                 reply_to_message_id=reply_to_message_id,
                 rich_markdown=rich_markdown,
+                spaced_paragraphs=spaced_paragraphs,
             )
             return await _resolve_message_send(request, body)
         except Exception as exc:

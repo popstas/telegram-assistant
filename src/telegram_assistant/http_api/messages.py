@@ -170,6 +170,11 @@ class MessageSendBody(BaseModel):
     # server. Mutually exclusive with text/attachments and with mass mode; the
     # length bound lives in the domain layer (single source of truth).
     rich_markdown: str | None = None
+    # Insert U+00A0 spacer paragraphs so the article is not rendered as a wall
+    # of text. ``None`` means "not set" and defers to
+    # ``telegram.defaults.rich_markdown_spaced_paragraphs`` (built-in: on); an
+    # explicit value is only accepted alongside ``rich_markdown``.
+    spaced_paragraphs: bool | None = None
 
     @model_validator(mode="after")
     def _shape(self) -> MessageSendBody:
@@ -195,6 +200,10 @@ class MessageSendBody(BaseModel):
                 "must provide non-empty text, rich_markdown, or at least one "
                 "files/file_urls attachment"
             )
+        if not has_rich and self.spaced_paragraphs is not None:
+            # The knob only rewrites markdown before the server parses it;
+            # accepting it for a plain send would silently do nothing.
+            raise ValueError("spaced_paragraphs requires rich_markdown")
         if self.schedule_at is not None and self.delay_seconds is not None:
             raise ValueError("provide only one of schedule_at or delay_seconds")
         if self.reply_to_message_id is not None and self.reply_to_message_id <= 0:
@@ -932,8 +941,12 @@ def build_router() -> APIRouter:
             schedule_at=resolved_schedule_at,
             reply_to_message_id=body.reply_to_message_id,
             rich_markdown=body.rich_markdown,
-            spaced_paragraphs=spaced_paragraphs_default(
-                getattr(request.app.state, "config", None)
+            spaced_paragraphs=(
+                body.spaced_paragraphs
+                if body.spaced_paragraphs is not None
+                else spaced_paragraphs_default(
+                    getattr(request.app.state, "config", None)
+                )
             ),
         )
 

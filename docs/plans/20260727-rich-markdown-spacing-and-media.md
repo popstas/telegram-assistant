@@ -145,13 +145,22 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 
 ### Task 4: Surface the flag (CLI, HTTP, MCP)
 
-- [ ] CLI: add `--spaced-paragraphs`, `--no-spaced-paragraphs` to `messages send` (only meaningful with `--rich-markdown`; error with exit code 2 when used without it)
-- [ ] CLI dry-run: echo `spaced_paragraphs`, `rich_markdown_chars` (post-normalization), `rich_markdown_blocks`, `rich_markdown_media`, and any warnings — never the body
-- [ ] CLI real run: print warnings alongside the result JSON
-- [ ] HTTP: add `spaced_paragraphs: bool = True` to `MessageSendBody`, rejected in `_shape` when `rich_markdown` is absent (422, matching the existing exclusivity errors)
-- [ ] MCP: add the same kwarg to the send tool, documented in its docstring; keep it out of the plain-send call path (the `test_mcp_plain_send_omits_rich_markdown_kwarg` contract)
-- [ ] write tests per surface: default on, flag off, flag without `--rich-markdown` errors, dry-run markers present, MCP/HTTP legacy fakes unaffected
-- [ ] run `pytest` and `ruff check src tests` — must pass before task 5
+- [x] CLI: add `--spaced-paragraphs`, `--no-spaced-paragraphs` to `messages send` (only meaningful with `--rich-markdown`; error with exit code 2 when used without it)
+- [x] CLI dry-run: echo `spaced_paragraphs`, `rich_markdown_chars` (post-normalization), `rich_markdown_blocks`, `rich_markdown_media`, and any warnings — never the body
+- [x] CLI real run: print warnings alongside the result JSON
+- [x] HTTP: add `spaced_paragraphs: bool = True` to `MessageSendBody`, rejected in `_shape` when `rich_markdown` is absent (422, matching the existing exclusivity errors)
+- [x] MCP: add the same kwarg to the send tool, documented in its docstring; keep it out of the plain-send call path (the `test_mcp_plain_send_omits_rich_markdown_kwarg` contract)
+- [x] write tests per surface: default on, flag off, flag without `--rich-markdown` errors, dry-run markers present, MCP/HTTP legacy fakes unaffected
+- [x] run `pytest` and `ruff check src tests` — must pass before task 5
+
+**Task 4 notes** (decisions made while implementing, they constrain later tasks):
+
+- ⚠️ Deviation: the surface field is `spaced_paragraphs: bool | None = None`, **not** `bool = True`. With a `True` default there is no way to tell "caller asked for spacing" from "caller sent a plain text message", so the plan's own rule — reject it when `rich_markdown` is absent — would have failed every plain send. `None` means *not set* and defers to `spaced_paragraphs_default(config)`; an explicit `true`/`false` layers over it. Same three-level precedence on all three surfaces: flag → `telegram.defaults.rich_markdown_spaced_paragraphs` → built-in `True`.
+- The CLI flag is one Typer option pair, `--spaced-paragraphs/--no-spaced-paragraphs`, typed `bool | None`; the without-`--rich-markdown` check runs next to the other rich input checks, so it costs no backend connection (exit 2 in dry-run and real runs alike).
+- ➕ The dry-run preview now *runs* `normalize_rich_markdown` rather than reporting the source size: `rich_markdown_chars` is post-normalization (and so is the `would`/`planned_actions` prose), joined by `rich_markdown_blocks`, `rich_markdown_media`, `spaced_paragraphs` (the effective decision) and `spaced` (what the pass actually did — a block-limit rollback turns it `False` while `spaced_paragraphs` stays `True`). All five are `None` for a plain send. The body is still never echoed.
+- ➕ Dry-run also warns when the *normalised* article exceeds `MAX_RICH_MARKDOWN_CHARS`: the CLI's own pre-read check bounds the source, so without this a preview would report a plan the real send is guaranteed to reject.
+- The real run echoes each `warnings` entry to **stderr** as `warning: <text>` before printing the result JSON (which already carries them from Task 3), so stdout stays a single parseable JSON line.
+- `spaced_paragraphs` remains a request-level knob — no new backend kwarg — so the legacy-signature fakes are untouched; `tests/test_messages_rich_spacing_flag.py` re-pins the MCP plain-send contract against `FakeMessageBackend` anyway, since the tool grew a new parameter.
 
 ### Task 5: Spike — local media inside a rich message
 

@@ -5,6 +5,7 @@
 
 ### Features
 
+- Wire rich markdown paragraph spacing into send_message
 - Rich markdown paragraph spacer normalization
 - Rich markdown block scanner
 - Rich_markdown kwarg on telegram_messages_send MCP tool
