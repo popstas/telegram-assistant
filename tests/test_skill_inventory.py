@@ -13,6 +13,12 @@ Two directions are asserted:
    (infrastructure-only commands that the agent never invokes).
 2. Every SKILL.md catalog row resolves to a real Typer command in the
    CLI — no stale entries.
+
+A third, narrower guard covers the rich-send flags of ``messages
+send``: they steer what actually reaches Telegram (spacing, media
+grouping, local media resolution), so an agent that does not know about
+them sends a different article than the operator asked for. Both
+SKILL.md and README.md must name each one.
 """
 
 from __future__ import annotations
@@ -25,11 +31,20 @@ import typer
 
 from telegram_assistant.cli.main import app
 
-SKILL_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "skills"
-    / "telegram-assistant"
-    / "SKILL.md"
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+SKILL_PATH = REPO_ROOT / "skills" / "telegram-assistant" / "SKILL.md"
+README_PATH = REPO_ROOT / "README.md"
+
+# Flags of ``messages send`` that change the article the server receives.
+# Documented in both the skill (the agent reads it) and the README (a
+# human does), so neither can silently fall behind the CLI.
+RICH_SEND_FLAGS: tuple[str, ...] = (
+    "--rich-markdown",
+    "--no-spaced-paragraphs",
+    "--rich-file",
+    "--vault-dir",
+    "--media-group",
 )
 
 # CLI commands that intentionally do not appear in the SKILL.md catalog.
@@ -83,8 +98,33 @@ def skill_text() -> str:
 
 
 @pytest.fixture(scope="module")
+def readme_text() -> str:
+    assert README_PATH.exists(), f"README.md missing at {README_PATH}"
+    return README_PATH.read_text(encoding="utf-8")
+
+
+@pytest.fixture(scope="module")
 def cli_commands() -> set[str]:
     return _collect_cli_commands(app)
+
+
+def _messages_send_flags() -> set[str]:
+    """Every long option declared on the ``messages send`` command."""
+    for group in app.registered_groups:
+        if group.name != "messages" or group.typer_instance is None:
+            continue
+        for cmd in group.typer_instance.registered_commands:
+            name = cmd.name or (cmd.callback.__name__ if cmd.callback else None)
+            if name != "send":
+                continue
+            flags: set[str] = set()
+            for param in (cmd.callback.__defaults__ or ()) if cmd.callback else ():
+                for decl in getattr(param, "param_decls", ()) or ():
+                    # ``--spaced-paragraphs/--no-spaced-paragraphs`` is one
+                    # declaration; split it into the two flags it defines.
+                    flags.update(part for part in decl.split("/") if part.startswith("--"))
+            return flags
+    raise AssertionError("messages send command not found in the Typer app")
 
 
 @pytest.fixture(scope="module")
@@ -162,3 +202,37 @@ def test_every_skill_catalog_row_exists_in_cli(
         "SKILL.md catalog rows that no longer exist in the CLI (remove "
         f"the rows or restore the commands): {stale}"
     )
+
+
+def test_rich_send_flags_exist_in_cli() -> None:
+    # If the CLI ever renames one of these, the documentation guards
+    # below would keep passing against stale docs — pin the source side.
+    declared = _messages_send_flags()
+    missing = [flag for flag in RICH_SEND_FLAGS if flag not in declared]
+    assert not missing, (
+        "rich-send flags no longer declared on `messages send` (rename the "
+        f"entries in RICH_SEND_FLAGS and update the docs): {missing}"
+    )
+
+
+def test_rich_send_flags_documented_in_skill(skill_text: str) -> None:
+    missing = [flag for flag in RICH_SEND_FLAGS if flag not in skill_text]
+    assert not missing, (
+        "rich-send flags missing from SKILL.md — the agent cannot use a flag "
+        f"it has never read about: {missing}"
+    )
+
+
+def test_rich_send_flags_documented_in_readme(readme_text: str) -> None:
+    missing = [flag for flag in RICH_SEND_FLAGS if flag not in readme_text]
+    assert not missing, f"rich-send flags missing from README.md: {missing}"
+
+
+def test_skill_documents_the_media_grouping_dialogue(skill_text: str) -> None:
+    # The dry-run reports the runs; the skill is what turns that list into
+    # a question for the human instead of a silent default.
+    for marker in ("rich_markdown_groups", "AskUserQuestion", "Slideshow"):
+        assert marker in skill_text, (
+            f"SKILL.md no longer documents the media-grouping dialogue ({marker!r} "
+            "missing) — a rich send with media runs would be grouped without asking"
+        )

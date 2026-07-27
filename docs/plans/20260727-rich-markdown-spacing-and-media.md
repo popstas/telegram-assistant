@@ -259,13 +259,22 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 
 ### Task 9: Skill dialogue and documentation
 
-- [ ] `skills/telegram-assistant/SKILL.md`: document that spacing is on by default and `--spaced-paragraphs`, `--no-spaced-paragraphs` turns it off; document local media (auto-resolve, `--rich-file`, `--vault-dir`) as CLI-only
-- [ ] `skills/telegram-assistant/SKILL.md`: add the grouping dialogue — when the dry-run reports media groups, ask via `AskUserQuestion` whether any group should change; if yes, one question per group: «После текста `<preceding text>` как сгруппировать медиа?» with options `Collage` / `Slideshow` / `Ungrouped`, then re-run the dry-run with the chosen `--media-group` flags. A single group left as-is needs no second question
-- [ ] `skills/telegram-assistant/SKILL.md`: extend the rich-send error list with the new messages (unresolvable media, >50 media, media rights, `--rich-file` parse errors)
-- [ ] update `README.md` (Commands + the rich-send description + MCP tool notes) and `CLAUDE.md` (the rich-send bullet under Architecture: normalization owns spacing/grouping, `rich_files` is CLI-only, block/media limits)
-- [ ] update `docs/TODO.md`: check off both rich-markdown items
-- [ ] write/extend `tests/test_skill_inventory.py` expectations if the CLI catalog changed
-- [ ] run `pytest` and `ruff check src tests` — must pass before task 10
+- [x] `skills/telegram-assistant/SKILL.md`: document that spacing is on by default and `--spaced-paragraphs`, `--no-spaced-paragraphs` turns it off; document local media (auto-resolve, `--rich-file`, `--vault-dir`) as CLI-only
+- [x] `skills/telegram-assistant/SKILL.md`: add the grouping dialogue — when the dry-run reports media groups, ask via `AskUserQuestion` whether any group should change; if yes, one question per group: «После текста `<preceding text>` как сгруппировать медиа?» with options `Collage` / `Slideshow` / `Ungrouped`, then re-run the dry-run with the chosen `--media-group` flags. A single group left as-is needs no second question
+- [x] `skills/telegram-assistant/SKILL.md`: extend the rich-send error list with the new messages (unresolvable media, >50 media, media rights, `--rich-file` parse errors)
+- [x] update `README.md` (Commands + the rich-send description + MCP tool notes) and `CLAUDE.md` (the rich-send bullet under Architecture: normalization owns spacing/grouping, `rich_files` is CLI-only, block/media limits)
+- [x] update `docs/TODO.md`: check off both rich-markdown items
+- [x] write/extend `tests/test_skill_inventory.py` expectations if the CLI catalog changed
+- [x] run `pytest` and `ruff check src tests` — must pass before task 10
+
+**Task 9 notes** (decisions made while implementing, they constrain later tasks):
+
+- The CLI **catalog** did not change (no new commands), so `test_skill_inventory.py` needed no row edits. Instead it gained a narrower guard aimed at what *did* change: `RICH_SEND_FLAGS` (`--rich-markdown`, `--no-spaced-paragraphs`, `--rich-file`, `--vault-dir`, `--media-group`) is asserted three ways — still declared on the Typer command (so a rename cannot leave the doc checks passing against stale text), named in `SKILL.md`, and named in `README.md` — plus a check that the grouping dialogue is still documented (`rich_markdown_groups` + `AskUserQuestion` + `Slideshow`). A flag the agent has never read about is a flag it will not use.
+- ➕ The grouping dialogue is **two-stage**, not one question per group up front: the dry-run's group list is shown, then a single «Изменить группировку?» question, and only a `Изменить` answer expands into one question per group. The plan's own "a single group left as-is needs no second question" rule generalises — an article with six collages should not cost six questions when the default is what the human wants.
+- ➕ SKILL.md now tells the agent **not to copy a note with local media to `/tmp`**: media resolves against the markdown file's own directory, so copying the text there breaks every embed. That contradicted the pre-existing "write the article to `/tmp`" rule, which now applies only to articles the agent authors itself.
+- ➕ CLAUDE.md gained **two** new bullets rather than growing the rich-send one (it was already the longest in the file): one for `rich_markdown.py` (insert-or-wrap only, no parser; identity return as the byte-fidelity mechanism; group → space → count; warnings-not-rejections with the 500-block rollback as the single exception; why surface fields are `bool | None`), one for local media (resolution order, the `tg://` scheme↔upload agreement, the id grammar, `RichMediaForbidden`, CLI-only). The header above them now reads "Five cross-cutting behaviours". This also covers Task 11's "record the proven MTProto media syntax in CLAUDE.md".
+- `docs/TODO.md`: both rich-markdown items are checked off with a pointer to this plan. The one piece of the media item that was **not** built — `noautolink` / `rtl` passthrough on `InputRichMessageMarkdown` — was split out into its own open TODO item rather than being silently closed with the rest.
+- The skill was re-synced to `~/.claude/skills/telegram-assistant/SKILL.md` (verified identical), so the Post-Completion "external system updates" entry for it is already done.
 
 ### Task 10: Verify acceptance criteria
 

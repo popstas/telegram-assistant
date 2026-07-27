@@ -219,7 +219,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `topics` | `rename` | Rename an existing forum topic (change its title). | `telegram-assistant topics rename ...` |
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
-| `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. `--rich-markdown <file.md>` sends a Telegram rich message (article) instead of plain text. | `telegram-assistant messages send ...` |
+| `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. `--rich-markdown <file.md>` sends a Telegram rich message (article) instead of plain text, with paragraph spacing and `<tg-collage>` grouping on by default (`--no-spaced-paragraphs`, `--media-group`) and local media resolved from the article's directory (`--rich-file`, `--vault-dir`). | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
 | `messages` | `forward` | Forward one or more messages (`--message-id`, repeatable) from a source to a target chat (READ-gated source, WRITE-gated target). | `telegram-assistant messages forward ...` |
@@ -539,7 +539,10 @@ command rather than after `folder_cache_ttl` seconds.
   like `10m`, `2h`, `1d`), optional `--reply-to <message_id>` to
   thread the send as a reply (targeted-only; in a forum it wins over the
   topic root, keeping the reply inside the topic), and optional
-  `--rich-markdown <file.md>` to send an article instead of plain text.
+  `--rich-markdown <file.md>` to send an article instead of plain text
+  (with its own knobs: `--no-spaced-paragraphs`, `--rich-file
+  <reference>=<path>`, `--vault-dir <dir>`, `--media-group
+  <index>=<collage|slideshow|none>`).
 - Required flags: exactly one targeting shape — targeted
   (`--chat-id`/`--chat-name` + optional `--topic-id`/`--topic-name`)
   or mass (`--mass` or no chat ref, plus `--topic-name` and
@@ -557,27 +560,80 @@ command rather than after `folder_cache_ttl` seconds.
   escape it for the shell; do not write it to a file the CLI cannot read.
   A rich article, in contrast, *must* be written to a UTF-8 `.md` file
   (e.g. `/tmp/article.md`) and passed as `--rich-markdown /tmp/article.md`.
+  An existing note (an Obsidian file, a report) can be passed **as-is** —
+  its local `![](image.png)` / `![[Pasted image.png]]` embeds are
+  resolved relative to that file's own directory, so do not copy it to
+  `/tmp` when it has local media; point `--rich-markdown` at the original.
 - Automation: pass service commands (`/task 123456`) verbatim. Pass at
   most one of `--schedule-at` / `--delay`. Map «отправь через 2 часа» →
   `--delay 2h`, «запланируй на 2026-06-07T09:00» → `--schedule-at`. The
   dry-run JSON echoes `files`, `file_urls`, `schedule_at`, `scheduled`,
   and `reply_to_message_id` so the plan can show attachments, the resolved
   send time, and any reply target. For a rich send it echoes the article
-  as a marker only — `rich_markdown: true`, `rich_markdown_chars`,
-  `rich_markdown_file` — never the body; show the human those, plus the
-  file path they can re-read.
+  as markers only — `rich_markdown: true`, `rich_markdown_chars`
+  (post-normalization), `rich_markdown_blocks`, `rich_markdown_media`,
+  `rich_markdown_file`, `spaced_paragraphs` (the effective decision),
+  `spaced` (what the pass actually did), `media_grouping`,
+  `rich_markdown_groups` and `rich_files` — never the body; show the
+  human those, plus the file path they can re-read.
 - Rich markdown (`--rich-markdown`): use it when the human asks for a
   post/article/статья with formatting Telegram's plain text cannot carry
   — headings, tables, quotes, long-form (>4096 chars, up to 32 768). The
   server parses the markdown itself; the dialect is `#`…`######`
   headings, tables with alignment, task lists, `>` quotes, fenced code
   with a language, `---` dividers, `~~strike~~`, `==marked==`,
-  `||spoiler||`, footnotes, math, and media by **public https URL**
-  (`![](https://…jpg "caption")` — local image files cannot be embedded).
-  Limit: 1..32 768 characters, checked before any Telegram call. Never
-  combine it with `--text`/`--file`/`--file-url`/`--mass`. If a rich send
-  fails, do **not** silently retry it as a plain `--text` message —
-  report the error and ask.
+  `||spoiler||`, footnotes, math, and media — by **public https URL**
+  (`![](https://…jpg "caption")`) or, on the CLI only, by **local file**
+  (see below). Limits: 1..32 768 characters, ~500 blocks and 50 media
+  attachments; the first is checked before any Telegram call, the other
+  two are reported as warnings. Never combine it with
+  `--text`/`--file`/`--file-url`/`--mass`. If a rich send fails, do
+  **not** silently retry it as a plain `--text` message — report the
+  error and ask.
+- Paragraph spacing (**on by default**): the server renders neighbouring
+  paragraphs tight against each other, so the CLI/HTTP/MCP insert a
+  U+00A0-only spacer paragraph between two paragraphs and before every
+  heading. Add `--no-spaced-paragraphs` (HTTP/MCP: `spaced_paragraphs:
+  false`) only when the human asks for the markdown to go byte-for-byte,
+  e.g. because they hand-tuned the spacing. The flag is an error
+  (exit 2 / 422) without `--rich-markdown`. The default also comes from
+  `telegram.defaults.rich_markdown_spaced_paragraphs`. Spacers count
+  toward both the character and the block limit; if spacing would push
+  the article past 500 blocks the CLI sends it unspaced and warns.
+- Local media (**CLI-only** — HTTP/MCP articles still take https URLs
+  only): local `![](photo.png)`, `![](../img/clip.mp4)` and Obsidian
+  `![[Pasted image 1.png|caption|300]]` embeds are resolved by default
+  against the article's own directory, uploaded, and referenced from the
+  markdown, so an Obsidian note can be sent unedited. `.jpg/.jpeg/.png/
+  .webp` are photos, `.mp4/.mov/.webm/.gif` video, `.mp3/.m4a/.ogg`
+  audio; any other suffix is an error. Captions come from the media
+  title (`"caption"`), falling back to the alt text. For a file that
+  does not live next to the article use `--rich-file
+  <reference>=<path>` (repeatable; the reference is the target as
+  written in the markdown or its bare file name), and for an Obsidian
+  vault whose attachments sit elsewhere use `--vault-dir <dir>`.
+  Unresolvable or ambiguous media is an **error naming the file** — the
+  send is never made with the media silently dropped. The dry-run lists
+  every resolved file under `rich_files` (`id`, `path`, `kind`,
+  `caption`) without reading a byte. A chat that forbids media rejects
+  the whole article (see the error list).
+- Media grouping (**default `collage`**): a run of 2+ consecutive media
+  blocks with no text between them is wrapped in `<tg-collage>`, so the
+  usual two or three Obsidian screenshots render as one collage instead
+  of stretching the article. The dry-run reports every run under
+  `rich_markdown_groups` (`index`, `size`, `mode`, `preceding_text`).
+  Override one run with `--media-group <index>=<collage|slideshow|none>`
+  (repeatable; the index is the 0-based `index` from that list, an
+  unknown one is exit 2). Media the author already wrapped in
+  `<tg-collage>`/`<tg-slideshow>`/`<details>` is never re-grouped. The
+  default comes from `telegram.defaults.rich_markdown_grouping`; HTTP
+  and MCP get that default but have no per-group override.
+- Grouping dialogue: when the dry-run reports a non-empty
+  `rich_markdown_groups`, ask the human with `AskUserQuestion` whether
+  any group should change before confirming the send — see the
+  «`messages send` — rich message (article)» recipe for the exact
+  question shape. A single group the human leaves as-is needs no second
+  question.
 - Confirmation: required after dry-run. Mass mode plans must list every
   resolved chat row and call out `would_skip` rows with their reason
   (`topic_not_found`, `topic_ambiguous`, `list_topics_failed: ...`).
@@ -592,7 +648,30 @@ command rather than after `folder_cache_ttl` seconds.
   `--rich-markdown is only supported for targeted sends, not mass mode`,
   `--rich-markdown file cannot be read: ...`, `--rich-markdown file is
   not valid UTF-8: ...`, `--rich-markdown file is empty: ...`,
-  `--rich-markdown exceeds 32768 characters (N given)`.
+  `--rich-markdown exceeds 32768 characters (N given)`,
+  `--spaced-paragraphs/--no-spaced-paragraphs is only meaningful with
+  --rich-markdown`, `--rich-file/--vault-dir are only meaningful with
+  --rich-markdown`, `--media-group is only meaningful with
+  --rich-markdown`, `--rich-file must be <reference>=<path> (... given)`,
+  `--media-group must be <index>=<collage|slideshow|none> (... given)`.
+  Media-specific (also exit code 2): `media file not found: <ref>
+  (searched <dir>); pass --rich-file <name>=<path> or --vault-dir`,
+  `media reference '<ref>' matches N files: ...; pass --rich-file
+  <name>=<path> to choose one`, `unsupported media type for rich
+  message: <path> (a rich message carries photo, video or audio only)`,
+  `rich file override(s) match no media in the article: ...`, `rich file
+  override '<ref>' points at a missing file: <path>`, `rich_files
+  exceeds Telegram's 50 media attachments (N given)`, `unknown media
+  group index N: the article has M media group(s)`, and — from Telegram
+  itself — `chat <id> does not allow the media in this rich message:
+  ChatSendMediaForbiddenError: ...` (the chat forbids media; the whole
+  article is rejected, so ask the human for another chat or an article
+  without media rather than retrying).
+  Warnings (printed to stderr as `warning: ...`, the send still runs):
+  `spaced_paragraphs disabled: N blocks would exceed the 500-block
+  limit`, `article has N blocks, over Telegram's 500-block limit`,
+  `article has N media attachments, over Telegram's 50 limit`. Relay
+  them to the human — the last two mean Telegram may reject the send.
 
 #### `messages` / `recent`
 
@@ -1319,8 +1398,13 @@ Request: «Опубликуй в чате Клиент / проект стать
    needs a temp file: plain `--text` cannot carry headings or tables.
 2. Write the article to a UTF-8 markdown file (`/tmp/weekly.md`) using
    the Telegram rich dialect — `#`/`##` headings, aligned tables, `>`
-   quotes, fenced code, `---`, and images only as public https URLs
-   (`![](https://…jpg "caption")`). Keep it under 32 768 characters.
+   quotes, fenced code, `---`, and images as public https URLs
+   (`![](https://…jpg "caption")`) or local files. Keep it under 32 768
+   characters. Do not hand-insert blank-line tricks for spacing — the
+   CLI inserts U+00A0 spacer paragraphs itself. If the human points at
+   an existing note with local embeds (an Obsidian file), pass **that
+   file** rather than copying the text: the media is resolved relative
+   to the article's own directory.
 3. Dry-run:
 
    ```bash
@@ -1332,13 +1416,28 @@ Request: «Опубликуй в чате Клиент / проект стать
 
 4. Show the resolved chat id and the article markers from the dry-run
    JSON (`rich_markdown: true`, `rich_markdown_chars`,
-   `rich_markdown_file`) — the body is deliberately not echoed, so quote
-   the file path and, if the human wants to review the text, show the
-   file contents yourself.
-5. Wait for confirmation, then re-run without `--dry-run`. Never add
+   `rich_markdown_blocks`, `rich_markdown_media`, `rich_markdown_file`,
+   `spaced_paragraphs`, plus `rich_files` when the article carries local
+   media) — the body is deliberately not echoed, so quote the file path
+   and, if the human wants to review the text, show the file contents
+   yourself. Relay any `warnings` verbatim.
+5. If the dry-run reports a non-empty `rich_markdown_groups`, ask about
+   the grouping **before** asking for the send confirmation. One
+   `AskUserQuestion` call: «В статье N групп подряд идущих медиа, все
+   будут отправлены как collage. Изменить группировку?» with options
+   `Оставить как есть` / `Изменить`. Only if the human picks
+   `Изменить`, ask one question per group — «После текста
+   `<preceding_text>` как сгруппировать медиа?» with options
+   `Collage` / `Slideshow` / `Ungrouped` — and re-run the dry-run with
+   the chosen `--media-group <index>=<collage|slideshow|none>` flags
+   (the `index` is the one from `rich_markdown_groups`). A single group
+   the human leaves as-is needs no second question. Carry the same
+   `--media-group` flags into the real send.
+6. Wait for confirmation, then re-run without `--dry-run`. Never add
    `--text`/`--file`/`--file-url`/`--mass` to a rich send. If it fails,
    report the error verbatim — do not fall back to a plain text send
-   without asking.
+   without asking, and do not strip the media to work around a
+   `does not allow the media in this rich message` error without asking.
 
 ### `messages recent`
 
