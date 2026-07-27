@@ -24,6 +24,10 @@
 - Note access-rule resolve failure task and fix spike session path
 - Link telegram-download-chat and move ToS warning below features
 
+### Miscellaneous
+
+- Todo, plans
+
 ### Testing
 
 - Verify rich-message acceptance criteria
