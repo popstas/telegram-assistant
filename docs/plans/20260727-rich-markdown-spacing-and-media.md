@@ -107,13 +107,22 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 
 ### Task 2: Spacer insertion (`normalize_rich_markdown`)
 
-- [ ] add `normalize_rich_markdown(markdown, *, spaced_paragraphs=True) -> RichMarkdownNormalization` returning the rewritten markdown, block count, media count and warnings
-- [ ] insert a U+00A0-only line as its own block between two consecutive plain paragraphs, and before a heading of any level (`#`…`######`); never after a heading, never inside code/table/list/quote/html blocks
-- [ ] skip insertion where the author already separated blocks with a spacer (idempotent: normalising twice yields the same text)
-- [ ] when the spaced result would exceed 500 blocks, fall back to the unspaced markdown and emit the warning `spaced_paragraphs disabled: N blocks would exceed the 500-block limit`
-- [ ] emit a warning when the unspaced article itself exceeds 500 blocks or 50 media (do not raise — Telegram is the authority)
-- [ ] write tests: spacing between paragraphs, before headings, no spacing inside code/list/table/quote, idempotency, block-limit fallback (with warning), `spaced_paragraphs=False` returns input unchanged
-- [ ] run `pytest` and `ruff check src tests` — must pass before task 3
+- [x] add `normalize_rich_markdown(markdown, *, spaced_paragraphs=True) -> RichMarkdownNormalization` returning the rewritten markdown, block count, media count and warnings
+- [x] insert a U+00A0-only line as its own block between two consecutive plain paragraphs, and before a heading of any level (`#`…`######`); never after a heading, never inside code/table/list/quote/html blocks
+- [x] skip insertion where the author already separated blocks with a spacer (idempotent: normalising twice yields the same text)
+- [x] when the spaced result would exceed 500 blocks, fall back to the unspaced markdown and emit the warning `spaced_paragraphs disabled: N blocks would exceed the 500-block limit`
+- [x] emit a warning when the unspaced article itself exceeds 500 blocks or 50 media (do not raise — Telegram is the authority)
+- [x] write tests: spacing between paragraphs, before headings, no spacing inside code/list/table/quote, idempotency, block-limit fallback (with warning), `spaced_paragraphs=False` returns input unchanged
+- [x] run `pytest` and `ruff check src tests` — must pass before task 3
+
+**Task 2 notes** (decisions made while implementing, they constrain later tasks):
+
+- Public API added: `normalize_rich_markdown`, `RichMarkdownNormalization` (`markdown`, `blocks`, `media`, `spaced`, `warnings`; Task 8 adds `groups`), `NBSP`, `SPACER_LINE`, `is_spacer_line`, `is_spacer_block` — all re-exported from `messages/__init__.py`.
+- ➕ **A spacer line is not blank to the scanner.** `' '.isspace()` is `True` in Python, so the Task 1 blank checks would have swallowed the module's own spacers and doubled them on every re-normalisation. Blankness is now `_is_blank()` (whitespace **and** no U+00A0); a spacer line is its own `paragraph` block wherever it appears, and `_starts_new_block()` breaks a paragraph before one. This is also what makes the block count honest — Telegram charges a spacer as a `PageBlockParagraph`.
+- Insertion rule: between two consecutive top-level `paragraph` blocks, and before a `heading` (ATX or setext) — but never when the *previous* block is a heading (so heading→heading stays tight), never adjacent to an existing spacer, never before the first block. Nothing else pairs (paragraph↔list/table/quote/media/html/code are left alone).
+- Byte fidelity: when no insertion point is found the **original string is returned by identity**, so CRLF and the trailing newline survive untouched and `spaced_paragraphs=False` is a strict no-op. Once anything is inserted the output is LF-normalised (a trailing newline is re-appended).
+- Warnings are additive, never fatal: the fallback warning uses the exact wording from this plan, and an article already over 500 blocks / 50 media gets `article has N blocks, over Telegram's 500-block limit` / `article has N media attachments, over Telegram's 50 limit`. An already-over-limit article receives *both* (spacing is still skipped — it must not be made worse).
+- `spaced` is `True` whenever the pass ran and stuck, including a document that needed no spacer at all.
 
 ### Task 3: Wire normalization into `send_message`
 
