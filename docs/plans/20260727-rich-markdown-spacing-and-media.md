@@ -278,11 +278,19 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 
 ### Task 10: Verify acceptance criteria
 
-- [ ] verify every requirement from Overview is implemented (spacing default + flag, block-limit fallback with warning, local media auto-resolve + `--rich-file`, collage grouping + overrides, skill dialogue)
-- [ ] verify edge cases: article with no paragraphs at all, article that is only media, media inside fenced code (must not be treated as media), U+00A0 already present, `spaced_paragraphs=False` plus media, exactly 500 blocks / exactly 50 media
-- [ ] run the full test suite (`pytest`)
-- [ ] run `ruff check src tests` — all issues fixed
-- [ ] verify test coverage of `messages/rich_markdown.py` is at project standard (80%+)
+- [x] verify every requirement from Overview is implemented (spacing default + flag, block-limit fallback with warning, local media auto-resolve + `--rich-file`, collage grouping + overrides, skill dialogue)
+- [x] verify edge cases: article with no paragraphs at all, article that is only media, media inside fenced code (must not be treated as media), U+00A0 already present, `spaced_paragraphs=False` plus media, exactly 500 blocks / exactly 50 media
+- [x] run the full test suite (`pytest`)
+- [x] run `ruff check src tests` — all issues fixed
+- [x] verify test coverage of `messages/rich_markdown.py` is at project standard (80%+)
+
+**Task 10 notes** (verification results):
+
+- Requirements checked against the shipped code, not the notes: `--rich-markdown`, `--spaced-paragraphs/--no-spaced-paragraphs`, `--media-group`, `--rich-file`, `--vault-dir` all present in `messages send --help`; `MessageSendBody.spaced_paragraphs` with its `_shape` rejection and the `media_grouping_default` wiring present in `http_api/messages.py`; the same kwarg + docstring in the MCP send tool; the grouping dialogue and the flag list pinned by `tests/test_skill_inventory.py`.
+- ➕ New file `tests/test_rich_markdown_edge_cases.py` (15 tests) pins the plan's edge-case list as an executable acceptance check rather than a one-off eyeball: no-paragraph / heading-only / empty-and-blank articles return the input **by identity**; an all-media article becomes exactly one `<tg-collage>` (3 blocks) while a single media block is untouched; a `![](shot.png)` inside a fence is invisible to *both* the normalizer (`media == 0`, no wrap) and `scan_media` (no upload planned, identity return) even when the file really exists next to the article; an author's U+00A0 in running text neither suppresses the spacer nor counts as a block, and an article of author-written spacers is identity-stable.
+- The boundary is **inclusive**: a spaced result landing on exactly 500 blocks is kept with no warning, 501 rolls back; an unspaced article at exactly 500 blocks and an article with exactly 50 media do not warn. These assert the plan's rule, not the implementation's current arithmetic.
+- ➕ `spaced_paragraphs=False` plus media turned out to be two cases worth separating: grouping is **independent** of spacing (spacing off still collages, and the group's `preceding_text` is still reported), and with both passes off the markdown reaches the backend byte-for-byte — pinned end-to-end through `send_message` with CRLF, no trailing newline and a `rich_files` tuple, so "cosmetics off" cannot quietly cost the uploads.
+- Results: `pytest` **1993 passed**, `ruff check src tests` clean, and `coverage` on `messages/rich_markdown.py` is **98%** (666 statements, 14 missed) — comfortably over the 80% bar.
 
 ### Task 11: [Final] Update documentation
 
