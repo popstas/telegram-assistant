@@ -164,13 +164,30 @@ Dependencies identified: no new third-party dependency (decision below); Teletho
 
 ### Task 5: Spike — local media inside a rich message
 
-- [ ] create `scripts/spike_rich_media.py` modelled on `scripts/spike_rich_message.py` (same preconditions and exit codes: 2 = precondition missing, 3 = server rejected), taking `--entity` (default `me`) and a local image/video path
-- [ ] upload the file with `client.upload_file`, turn it into `InputPhoto`/`InputDocument` (via `messages.uploadMedia` on the target peer where needed) and build `InputRichFilePhoto(id=…, photo=…)` / `InputRichFileDocument(id=…, document=…)`
-- [ ] try each candidate markdown reference in turn and report which the server accepts: `![](<id>)`, `![](tg://file?id=<id>)`, `![alt](<id> "caption")`, and the HTML form `<img src="<id>"/>` via `InputRichMessageHTML`
-- [ ] read the sent message back and print the resulting `RichMessage` block list, so the accepted syntax is proven, not assumed
-- [ ] record the findings in this plan (accepted syntax, id format, whether captions survive, whether video needs a document thumbnail); if **none** of the candidates works, mark ⚠️ here and skip tasks 6–7, continuing at task 8
-- [ ] write a unit test for the pure candidate-builder helper the spike imports (list of variants, id substitution) — the network part stays manual
-- [ ] run `pytest` and `ruff check src tests` — must pass before task 6
+- [x] create `scripts/spike_rich_media.py` modelled on `scripts/spike_rich_message.py` (same preconditions and exit codes: 2 = precondition missing, 3 = server rejected), taking `--entity` (default `me`) and a local image/video path
+- [x] upload the file with `client.upload_file`, turn it into `InputPhoto`/`InputDocument` (via `messages.uploadMedia` on the target peer where needed) and build `InputRichFilePhoto(id=…, photo=…)` / `InputRichFileDocument(id=…, document=…)`
+- [x] try each candidate markdown reference in turn and report which the server accepts: `![](<id>)`, `![](tg://file?id=<id>)`, `![alt](<id> "caption")`, and the HTML form `<img src="<id>"/>` via `InputRichMessageHTML`
+- [x] read the sent message back and print the resulting `RichMessage` block list, so the accepted syntax is proven, not assumed
+- [x] record the findings in this plan (accepted syntax, id format, whether captions survive, whether video needs a document thumbnail) — **⚠️ blocked, not automatable**: the run needs an authorized session and sends real messages. Findings section below is left for the manual run; if **none** of the candidates works, mark ⚠️ there and skip tasks 6–7, continuing at task 8
+- [x] write a unit test for the pure candidate-builder helper the spike imports (list of variants, id substitution) — the network part stays manual
+- [x] run `pytest` and `ruff check src tests` — must pass before task 6
+
+**Task 5 notes** (decisions made while implementing, they constrain later tasks):
+
+- ⚠️ **The spike has not been run.** It sends real messages and needs an authorized Telethon session, so it is not automatable from this loop — the script and its unit tests are landed, the *findings* below are empty until a human runs it. Tasks 6–7 depend on the answer (which reference syntax the server accepts) and cannot be finished on a guess; if they are reached before the run, either run the spike first or record ⚠️ and continue at Task 8 (spacing/grouping need no media syntax).
+- Confirmed locally against the installed Telethon 1.44.0: `InputRichFilePhoto(id: str, photo: TypeInputPhoto)`, `InputRichFileDocument(id: str, document: TypeInputDocument)`, and **both** `InputRichMessageMarkdown` and `InputRichMessageHTML` take `files: list[TypeInputRichFile]`. `types.Message` has a `rich_message` field, which is what the read-back prints. So the id is a **caller-chosen string**, not a Telegram file id — the open question is purely how the markdown names it.
+- `@grammyjs/types/rich.d.ts` is no help here: it documents the *Bot API* dialect, where "Media blocks support only HTTP and HTTPS URLs". The `files:` list is MTProto-only, hence the spike.
+- Public (unit-tested) helpers the later tasks reuse: `build_candidates(file_id, *, alt, caption) -> tuple[Candidate, ...]`, `classify_file(path) -> "photo" | "document"` (photo iff the suffix is `.jpg/.jpeg/.png/.webp`; `.gif` is an animation ⇒ document), `default_file_id(path)` (slug of the stem, non-`[A-Za-z0-9_.-]` → `-`, empty ⇒ `file1`, so a Cyrillic or bracketed filename can never break the `![](…)` it is written into).
+- Candidate order: `bare-id`, `tg-file-url`, `attach-scheme` (➕ added — the Bot API's own multipart convention was the obvious fourth guess), `alt-and-caption`, `html-img`. Each candidate is a **whole article** that names its own candidate in an `# heading`, so Saved Messages says which syntax produced which message without a read-back.
+- One send per candidate, and a rejection does **not** stop the loop — the point is which of the five the server accepts, so all are tried and the accepted names are printed at the end. Exit 3 means *every* candidate was rejected (or the upload itself failed); exit 0 means at least one stuck.
+- `--only <names>` runs a subset (an unknown name is a precondition failure, exit 2), `--file-id` overrides the derived id, `--dry-run` prints every candidate article without uploading.
+
+**Task 5 findings** (fill in from the manual run — `.venv/bin/python scripts/spike_rich_media.py --file <photo.png>`):
+
+- accepted syntax: _(not yet run)_
+- id format: _(not yet run)_
+- captions survive: _(not yet run)_
+- video needs a document thumbnail: _(not yet run)_
 
 ### Task 6: Resolve local media from markdown (domain + CLI)
 
@@ -270,7 +287,7 @@ article.md ──scan_media()──▶ [remote urls | local paths]
 - Send the same Obsidian article (`Пхукет 2026 - рассказ.md`) with local embeds intact to a private chat and check: paragraph gaps, headings separated, images/videos inline, consecutive images rendered as a collage.
 - Send with `--no-spaced-paragraphs` and confirm the markdown is unchanged byte-for-byte.
 - Send an article to a chat where the account lacks media rights and confirm the error names that cause.
-- Run `.venv/bin/python scripts/spike_rich_media.py --entity me` once more after implementation to confirm the shipped syntax still matches the spike's finding.
+- Run `.venv/bin/python scripts/spike_rich_media.py --file <photo.png> --entity me` — this is a **prerequisite** for Tasks 6–7, not just a post-check: it is the only source for which markdown reference syntax the server accepts. Record the answer under "Task 5 findings". Run it once more after implementation to confirm the shipped syntax still matches.
 
 **External system updates**:
 
