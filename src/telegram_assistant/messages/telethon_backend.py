@@ -24,6 +24,7 @@ if TYPE_CHECKING:
         DownloadedMedia,
         MediaInfo,
     )
+    from telegram_assistant.messages.rich_markdown import RichFile
 
 
 def _media_summary(media: Any) -> str:
@@ -136,6 +137,77 @@ def _import_rich_markdown_type() -> Any:
     return getattr(types, "InputRichMessageMarkdown", None)
 
 
+def _import_rich_file_types() -> tuple[Any, Any] | None:
+    """Return ``(InputRichFilePhoto, InputRichFileDocument)``, or ``None``.
+
+    Same version-tolerant probe as :func:`_import_rich_markdown_type` and for
+    the same reason: the pair arrived with layer 227, and an older Telethon must
+    fail only the send that needs them, with a version hint.
+    """
+    from telethon.tl import types
+
+    photo = getattr(types, "InputRichFilePhoto", None)
+    document = getattr(types, "InputRichFileDocument", None)
+    if photo is None or document is None:
+        return None
+    return photo, document
+
+
+#: Telegram's rejections when the chat forbids the media an article carries.
+#: A rich send is all-or-nothing — there is no media-less half to fall back to
+#: — so these are reported as-is, naming the chat, rather than retried plain.
+_MEDIA_RIGHTS_ERRORS = frozenset(
+    {
+        "ChatSendMediaForbiddenError",
+        "ChatSendPhotosForbiddenError",
+        "ChatSendVideosForbiddenError",
+        "ChatSendDocsForbiddenError",
+        "ChatSendAudiosForbiddenError",
+        "ChatSendGifsForbiddenError",
+        "ChatSendVoicesForbiddenError",
+        "MediaCaptionTooLongError",
+    }
+)
+
+
+def _translate_rich_send_error(exc: BaseException, *, chat_id: int) -> BaseException:
+    """Translate a rich-send RPC error, media rights first, then FLOOD_WAIT.
+
+    ``RichMediaForbidden`` is a ``ValueError``, so every surface's existing
+    400 / exit-2 path carries the message — the operator needs to read "this
+    chat forbids media", not a bare 500.
+    """
+    from telegram_assistant.messages.service import RichMediaForbidden
+
+    if type(exc).__name__ in _MEDIA_RIGHTS_ERRORS:
+        return RichMediaForbidden(
+            f"chat {chat_id} does not allow the media in this rich message: "
+            f"{type(exc).__name__}: {exc}"
+        )
+    return translate_flood_wait(exc)
+
+
+def _document_attributes(path: str, kind: str) -> tuple[list[Any], str]:
+    """Build the ``InputMediaUploadedDocument`` attributes for one rich file.
+
+    Delegates to Telethon's own inference (which derives
+    ``DocumentAttributeVideo`` from a ``video/*`` mime type even without a
+    metadata library) and only fills the gap it leaves for audio: without
+    ``hachoir`` installed no ``DocumentAttributeAudio`` is emitted at all, and
+    the spike proved an ``.mp3`` is only reachable through ``tg://audio`` when
+    it carries one.
+    """
+    from telethon import utils
+    from telethon.tl import types
+
+    attributes, mime_type = utils.get_attributes(path)
+    if kind == "audio" and not any(
+        isinstance(attr, types.DocumentAttributeAudio) for attr in attributes
+    ):
+        attributes.append(types.DocumentAttributeAudio(duration=0))
+    return list(attributes), mime_type
+
+
 def _extract_rich_message_id(result: Any, *, random_id: int | None = None) -> int | None:
     """Find the sent message's id in the raw ``messages.sendMessage`` result.
 
@@ -246,8 +318,10 @@ class TelethonMessageBackend:
         schedule_at: datetime | None = None,
         reply_to_message_id: int | None = None,
         rich_markdown: str | None = None,
+        rich_files: tuple[RichFile, ...] = (),
     ) -> int | list[int]:
         files = tuple(files)
+        rich_files = tuple(rich_files)
         # ``reply_to`` carries either an explicit reply target or, in a forum,
         # the topic root. An explicit ``reply_to_message_id`` wins: replying to
         # a message inside a topic keeps the reply threaded in that topic.
@@ -262,10 +336,16 @@ class TelethonMessageBackend:
             return await self._send_rich_message(
                 chat_id=chat_id,
                 rich_markdown=rich_markdown,
+                rich_files=rich_files,
                 topic_id=topic_id,
                 schedule_at=schedule_at,
                 reply_to_message_id=reply_to_message_id,
             )
+        if rich_files:
+            # The ids are only meaningful to the markdown that names them, so a
+            # plain send with uploads attached is a caller bug, not something to
+            # silently drop.
+            raise ValueError("rich_files requires rich_markdown")
         try:
             if files:
                 kwargs: dict[str, Any] = {
@@ -293,6 +373,64 @@ class TelethonMessageBackend:
             raise translate_flood_wait(exc) from exc
         return _message_ids(sent)
 
+    async def _upload_rich_files(
+        self,
+        *,
+        peer: Any,
+        chat_id: int,
+        rich_files: tuple[RichFile, ...],
+        photo_type: Any,
+        document_type: Any,
+    ) -> list[Any]:
+        """Upload each file once and wrap it as an ``InputRichFile``.
+
+        The order is the markdown's, and the ``id`` is the one already written
+        into the body's ``tg://photo?id=…`` reference — the domain decided both,
+        including the ``kind``, because the scheme and the upload shape must
+        agree (a photo named through ``tg://video`` fails
+        ``RICH_MESSAGE_VIDEO_INVALID``).
+        """
+        from telethon import utils
+        from telethon.tl import functions, types
+
+        uploaded: list[Any] = []
+        for rich_file in rich_files:
+            try:
+                handle = await self._client.upload_file(rich_file.path)
+                if rich_file.kind == "photo":
+                    media: Any = types.InputMediaUploadedPhoto(file=handle)
+                else:
+                    attributes, mime_type = _document_attributes(
+                        rich_file.path, rich_file.kind
+                    )
+                    media = types.InputMediaUploadedDocument(
+                        file=handle, mime_type=mime_type, attributes=attributes
+                    )
+                # uploadMedia binds the upload to the destination peer, which is
+                # also where a media-rights rejection surfaces first.
+                result = await self._client(
+                    functions.messages.UploadMediaRequest(peer=peer, media=media)
+                )
+            except Exception as exc:
+                raise _translate_rich_send_error(exc, chat_id=chat_id) from exc
+            if rich_file.kind == "photo":
+                uploaded.append(
+                    photo_type(
+                        id=rich_file.id,
+                        photo=utils.get_input_photo(getattr(result, "photo", result)),
+                    )
+                )
+            else:
+                uploaded.append(
+                    document_type(
+                        id=rich_file.id,
+                        document=utils.get_input_document(
+                            getattr(result, "document", result)
+                        ),
+                    )
+                )
+        return uploaded
+
     async def _send_rich_message(
         self,
         *,
@@ -301,6 +439,7 @@ class TelethonMessageBackend:
         topic_id: int | None,
         schedule_at: datetime | None,
         reply_to_message_id: int | None,
+        rich_files: tuple[RichFile, ...] = (),
     ) -> int:
         from telegram_assistant.messages.service import (
             MessageSendUnconfirmed,
@@ -316,6 +455,16 @@ class TelethonMessageBackend:
             raise RichMessageUnsupported(
                 "rich message send requires telethon>=1.44 (layer 227); "
                 "the installed Telethon has no InputRichMessageMarkdown"
+            )
+
+        file_types = _import_rich_file_types() if rich_files else None
+        if rich_files and file_types is None:
+            # Same taxonomy as the markdown probe: a deployment problem, never
+            # MessageSendFailed. Nothing has been uploaded at this point.
+            raise RichMessageUnsupported(
+                "rich message media requires telethon>=1.44 (layer 227); "
+                "the installed Telethon has no "
+                "InputRichFilePhoto/InputRichFileDocument"
             )
 
         from telethon.tl.functions.messages import SendMessageRequest
@@ -335,6 +484,23 @@ class TelethonMessageBackend:
 
         try:
             peer = await self._client.get_input_entity(chat_id)
+        except Exception as exc:
+            raise translate_flood_wait(exc) from exc
+
+        rich_kwargs: dict[str, Any] = {}
+        if rich_files:
+            photo_type, document_type = file_types  # type: ignore[misc]
+            # Only set when there is something to upload: a media-less article
+            # must still send ``files=None``, the pre-media shape.
+            rich_kwargs["files"] = await self._upload_rich_files(
+                peer=peer,
+                chat_id=chat_id,
+                rich_files=rich_files,
+                photo_type=photo_type,
+                document_type=document_type,
+            )
+
+        try:
             # Built up front so ``random_id`` (auto-filled by the constructor) can
             # be matched against the ``UpdateMessageID`` in the response.
             send = SendMessageRequest(
@@ -342,12 +508,12 @@ class TelethonMessageBackend:
                 # A rich message carries its body in ``rich_message``;
                 # ``message`` must be empty.
                 message="",
-                rich_message=rich_type(markdown=rich_markdown),
+                rich_message=rich_type(markdown=rich_markdown, **rich_kwargs),
                 **kwargs,
             )
             result = await self._client(send)
         except Exception as exc:
-            raise translate_flood_wait(exc) from exc
+            raise _translate_rich_send_error(exc, chat_id=chat_id) from exc
 
         message_id = _extract_rich_message_id(
             result, random_id=getattr(send, "random_id", None)

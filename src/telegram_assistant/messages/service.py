@@ -193,6 +193,18 @@ class RichMessageUnsupported(RuntimeError):
     """
 
 
+class RichMediaForbidden(ValueError):
+    """The chat forbids the media the rich message carries.
+
+    A rich send is all-or-nothing — the article's media blocks are part of its
+    body, so there is no media-less half to retry — and the caller decides what
+    to do next, exactly like a server-rejected article. Deliberately a
+    ``ValueError`` so every surface's existing 400 / exit-2 path carries the
+    message naming the chat, instead of the bare 500 an unmapped ``RuntimeError``
+    would produce.
+    """
+
+
 class MessageSendUnconfirmed(RuntimeError):
     """A send left no readable message id, so delivery is uncertain.
 
@@ -1361,6 +1373,7 @@ __all__ = [
     "MessageSendUnconfirmed",
     "RecentMessage",
     "RichMessageUnsupported",
+    "RichMediaForbidden",
     "ScheduleError",
     "SendMessageRequest",
     "SendMessageResult",

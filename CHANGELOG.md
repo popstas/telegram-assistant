@@ -5,6 +5,7 @@
 
 ### Features
 
+- Resolve local media from rich markdown into tg:// references
 - Spike script for local media inside a rich message
 - Surface rich markdown paragraph spacing flag on CLI, HTTP, MCP
 - Wire rich markdown paragraph spacing into send_message
