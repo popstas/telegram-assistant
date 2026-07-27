@@ -19,12 +19,14 @@ counts as itself plus one per item, a table as itself plus one per row, and a
 quote/HTML block as itself plus everything nested inside it. It is an
 approximation of a server-side rule — used to *warn*, never to reject.
 
-:func:`normalize_rich_markdown` is the writing half: it inserts
+:func:`normalize_rich_markdown` is the writing half. It inserts
 :data:`SPACER_LINE` (a lone U+00A0) as its own block where Telegram would
-otherwise render two paragraphs tight against each other. A line holding only a
-non-breaking space is *not* blank to this scanner — the server parses it as a
-``PageBlockParagraph``, which is exactly why it works as a spacer, and treating
-it as a real block is what makes normalisation idempotent.
+otherwise render two paragraphs tight against each other — a line holding only
+a non-breaking space is *not* blank to this scanner, since the server parses it
+as a ``PageBlockParagraph``, which is exactly why it works as a spacer and what
+makes normalisation idempotent — and it wraps a run of consecutive media blocks
+in ``<tg-collage>``/``<tg-slideshow>`` (:data:`MEDIA_GROUP_MODES`), leaving
+media the author already grouped by hand untouched.
 
 :func:`scan_media` is the other writing half: it resolves media that points at a
 *local* file and rewrites the reference into the ``tg://`` form MTProto pairs
@@ -38,6 +40,7 @@ import re
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import unquote
 
 #: Telegram's ceiling on blocks in one rich message (nested blocks included).
@@ -57,6 +60,22 @@ NBSP = "\u00a0"
 
 #: The spacer :func:`normalize_rich_markdown` inserts, alone on its own line.
 SPACER_LINE = NBSP
+
+#: How a run of consecutive media blocks may be grouped. ``collage`` and
+#: ``slideshow`` are the dialect's own container tags; ``none`` leaves the run
+#: as separate media blocks.
+MEDIA_GROUP_MODES = ("collage", "slideshow", "none")
+
+#: Grouping applied to every detected run unless a per-group override says
+#: otherwise (config: ``telegram.defaults.rich_markdown_grouping``).
+DEFAULT_MEDIA_GROUP_MODE = "collage"
+
+#: The container tag each grouping mode wraps a media run in.
+MEDIA_GROUP_TAGS = {"collage": "tg-collage", "slideshow": "tg-slideshow"}
+
+#: How much of the text before a media run is reported back, so a surface can
+#: say *which* run it is asking about without echoing the article.
+MEDIA_GROUP_CONTEXT_CHARS = 50
 
 #: How the markdown body names a file carried in
 #: ``InputRichMessageMarkdown.files``, per media kind. Proven against the live
@@ -124,14 +143,60 @@ BLOCK_KINDS = (
 
 
 @dataclass(frozen=True)
+class MediaGroupChoice:
+    """A caller's decision about one detected media run.
+
+    ``index`` is the run's position in :attr:`RichMarkdownNormalization.groups`
+    (0-based, document order) and ``mode`` one of :data:`MEDIA_GROUP_MODES`.
+    """
+
+    index: int
+    mode: str
+
+
+@dataclass(frozen=True)
+class MediaGroup:
+    """One run of consecutive media blocks the grouping pass found.
+
+    ``size`` is how many media blocks the run holds, ``mode`` the *effective*
+    decision (config default, or the caller's override), and
+    ``preceding_text`` the tail of the text right above the run — enough for a
+    surface to ask "the media after «…» — collage or slideshow?" without
+    echoing the article.
+    """
+
+    index: int
+    size: int
+    preceding_text: str
+    mode: str
+
+
+class MediaGroupError(ValueError):
+    """A media-group override named an unknown run or an unknown mode."""
+
+
+#: What :func:`normalize_rich_markdown` accepts as per-group overrides: a
+#: ``{index: mode}`` mapping, or any iterable of :class:`MediaGroupChoice`,
+#: ``{"index": …, "mode": …}`` mappings or ``(index, mode)`` pairs — every
+#: surface hands its own shape down without converting first.
+MediaGroupOverrides = (
+    Mapping[int, str]
+    | Iterable[MediaGroupChoice | Mapping[str, Any] | tuple[int, str]]
+    | None
+)
+
+
+@dataclass(frozen=True)
 class RichMarkdownNormalization:
     """What :func:`normalize_rich_markdown` decided about one article.
 
     ``markdown`` is what should actually go to Telegram, ``blocks``/``media``
     are the approximate counts of that text, ``spaced`` says whether the spacer
-    pass ran (it is ``False`` when disabled *or* rolled back), and ``warnings``
-    are operator-facing strings — normalisation never raises: Telegram is the
-    authority on what it accepts.
+    pass ran (it is ``False`` when disabled *or* rolled back), ``groups``
+    describes every detected media run with the mode it was given, and
+    ``warnings`` are operator-facing strings — normalisation only raises for
+    caller input it cannot honour (an unknown group index); what Telegram
+    accepts is left to Telegram.
     """
 
     markdown: str
@@ -139,6 +204,12 @@ class RichMarkdownNormalization:
     media: int
     spaced: bool
     warnings: tuple[str, ...] = ()
+    groups: tuple[MediaGroup, ...] = ()
+    #: Whether each pass actually rewrote the source. ``spaced`` says the
+    #: spacer pass ran; these say it (and the grouping pass) changed something,
+    #: which is what a caller reporting a size increase must name.
+    grouped: bool = False
+    spacers_added: bool = False
 
 
 class MediaResolutionError(ValueError):
@@ -353,9 +424,13 @@ def is_spacer_block(block: Block) -> bool:
 
 
 def normalize_rich_markdown(
-    markdown: str, *, spaced_paragraphs: bool = True
+    markdown: str,
+    *,
+    spaced_paragraphs: bool = True,
+    grouping: str = DEFAULT_MEDIA_GROUP_MODE,
+    media_groups: MediaGroupOverrides = None,
 ) -> RichMarkdownNormalization:
-    """Insert paragraph spacers and report the article's block/media budget.
+    """Group media runs, insert paragraph spacers, report the block/media budget.
 
     Telegram renders neighbouring ``PageBlockParagraph``s tight against each
     other, so the blank lines of the source are lost and a long article reads
@@ -365,6 +440,15 @@ def normalize_rich_markdown(
     code, table, list, quote or HTML block, and never next to a spacer the
     author already wrote (so normalising twice is a no-op).
 
+    A run of two or more consecutive media blocks is wrapped in the container
+    ``grouping`` names (:data:`MEDIA_GROUP_MODES`), so Telegram renders it as
+    one collage/slideshow instead of a column of separate media. Media the
+    author already put inside a ``<tg-collage>``/``<tg-slideshow>``/
+    ``<details>`` block is left alone — that is an explicit decision, not a run
+    to be re-grouped. ``media_groups`` overrides individual runs by index (see
+    :attr:`RichMarkdownNormalization.groups`); an index that names no run
+    raises :class:`MediaGroupError` rather than being silently dropped.
+
     Cosmetics must not break a send: when spacing would push the article past
     :data:`MAX_RICH_BLOCKS`, the unspaced markdown is returned with a warning
     instead. An article that is *already* over the block or media limit is
@@ -372,16 +456,22 @@ def normalize_rich_markdown(
     """
 
     blocks = scan_blocks(markdown)
-    media = count_media(blocks)
     warnings: list[str] = []
 
-    result = markdown
+    grouped, groups = _apply_grouping(
+        markdown, blocks, grouping=grouping, overrides=media_groups
+    )
+    if grouped is not markdown:
+        blocks = scan_blocks(grouped)
+
+    media = count_media(blocks)
+    result = grouped
     total = count_blocks(blocks)
     spaced = False
 
     if spaced_paragraphs:
-        candidate = _insert_spacers(markdown, blocks)
-        candidate_total = total if candidate is markdown else count_blocks(scan_blocks(candidate))
+        candidate = _insert_spacers(grouped, blocks)
+        candidate_total = total if candidate is grouped else count_blocks(scan_blocks(candidate))
         if candidate_total > MAX_RICH_BLOCKS:
             warnings.append(
                 f"spaced_paragraphs disabled: {candidate_total} blocks "
@@ -407,6 +497,9 @@ def normalize_rich_markdown(
         media=media,
         spaced=spaced,
         warnings=tuple(warnings),
+        groups=groups,
+        grouped=grouped is not markdown,
+        spacers_added=result is not grouped,
     )
 
 
@@ -618,6 +711,166 @@ def _insert_spacers(markdown: str, blocks: tuple[Block, ...]) -> str:
         out.append(SPACER_LINE)
         out.append("")
         cursor = start
+    out.extend(lines[cursor:])
+    text = "\n".join(out)
+    return text + "\n" if markdown.endswith(("\n", "\r")) else text
+
+
+def _validate_mode(mode: str) -> str:
+    if mode not in MEDIA_GROUP_MODES:
+        raise MediaGroupError(
+            f"unknown media grouping {mode!r} (expected one of "
+            f"{', '.join(MEDIA_GROUP_MODES)})"
+        )
+    return mode
+
+
+def _detect_media_runs(blocks: tuple[Block, ...]) -> list[list[int]]:
+    """Find runs of 2+ consecutive **top-level** media blocks.
+
+    Only the top level: media the author already placed inside a
+    ``<tg-collage>``/``<tg-slideshow>``/``<details>`` (or a quote) lives in
+    :attr:`Block.children` and is never re-grouped — the author already said
+    how it should render.
+    """
+
+    runs: list[list[int]] = []
+    current: list[int] = []
+    for index, block in enumerate(blocks):
+        if block.kind == "media":
+            current.append(index)
+            continue
+        if len(current) > 1:
+            runs.append(current)
+        current = []
+    if len(current) > 1:
+        runs.append(current)
+    return runs
+
+
+def _preceding_text(blocks: tuple[Block, ...], run_start: int) -> str:
+    """The tail of the last text block above a media run, whitespace-collapsed."""
+
+    for index in range(run_start - 1, -1, -1):
+        block = blocks[index]
+        if block.kind == "media" or is_spacer_block(block):
+            continue
+        text = " ".join(block.text.split())
+        if not text:
+            continue
+        if len(text) <= MEDIA_GROUP_CONTEXT_CHARS:
+            return text
+        return "…" + text[-MEDIA_GROUP_CONTEXT_CHARS:]
+    return ""
+
+
+def _coerce_overrides(overrides: MediaGroupOverrides, count: int) -> dict[int, str]:
+    """Normalise every accepted override shape into ``{index: mode}``.
+
+    An index naming no run is an error: a silently ignored override would send
+    an article grouped differently from what the operator asked for — the same
+    "no silent drop" rule local media resolution follows.
+    """
+
+    if overrides is None:
+        return {}
+    pairs: list[tuple[Any, Any]] = []
+    if isinstance(overrides, Mapping):
+        pairs.extend(overrides.items())
+    else:
+        for entry in overrides:
+            if isinstance(entry, MediaGroupChoice):
+                pairs.append((entry.index, entry.mode))
+            elif isinstance(entry, Mapping):
+                pairs.append((entry.get("index"), entry.get("mode")))
+            else:
+                index, mode = entry
+                pairs.append((index, mode))
+
+    resolved: dict[int, str] = {}
+    for raw_index, raw_mode in pairs:
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            raise MediaGroupError(
+                f"media group index must be an integer ({raw_index!r} given)"
+            ) from None
+        if not 0 <= index < count:
+            found = (
+                f"the article has {count} media group(s)"
+                if count
+                else "the article has no media groups"
+            )
+            raise MediaGroupError(
+                f"unknown media group index {index}: {found}"
+            )
+        resolved[index] = _validate_mode(str(raw_mode))
+    return resolved
+
+
+def _apply_grouping(
+    markdown: str,
+    blocks: tuple[Block, ...],
+    *,
+    grouping: str,
+    overrides: MediaGroupOverrides,
+) -> tuple[str, tuple[MediaGroup, ...]]:
+    """Wrap media runs per ``grouping``/``overrides`` and describe every run.
+
+    The markdown is returned by identity when no run is wrapped, so a
+    media-less article (or one grouped ``none`` throughout) keeps its exact
+    bytes.
+    """
+
+    default_mode = _validate_mode(grouping)
+    runs = _detect_media_runs(blocks)
+    resolved = _coerce_overrides(overrides, len(runs))
+    groups = tuple(
+        MediaGroup(
+            index=index,
+            size=len(run),
+            preceding_text=_preceding_text(blocks, run[0]),
+            mode=resolved.get(index, default_mode),
+        )
+        for index, run in enumerate(runs)
+    )
+    wrap = [(group, runs[group.index]) for group in groups if group.mode in MEDIA_GROUP_TAGS]
+    if not wrap:
+        return markdown, groups
+    return _wrap_media_runs(markdown, blocks, wrap), groups
+
+
+def _wrap_media_runs(
+    markdown: str,
+    blocks: tuple[Block, ...],
+    wrap: list[tuple[MediaGroup, list[int]]],
+) -> str:
+    """Rewrite ``markdown`` with each selected run inside its container tag.
+
+    The dialect wants the media blank-line separated *inside* the tag, so the
+    run's own line range is rebuilt: the media lines survive verbatim, the
+    whitespace between them does not.
+    """
+
+    lines = split_lines(markdown)
+    out: list[str] = []
+    cursor = 0
+    for group, run in wrap:
+        first = blocks[run[0]]
+        last = blocks[run[-1]]
+        out.extend(lines[cursor:first.start])
+        if out and not _is_blank(out[-1]):
+            out.append("")
+        tag = MEDIA_GROUP_TAGS[group.mode]
+        out.append(f"<{tag}>")
+        for block_index in run:
+            out.append("")
+            out.extend(blocks[block_index].lines)
+        out.append("")
+        out.append(f"</{tag}>")
+        cursor = last.end
+        if cursor < len(lines) and not _is_blank(lines[cursor]):
+            out.append("")
     out.extend(lines[cursor:])
     text = "\n".join(out)
     return text + "\n" if markdown.endswith(("\n", "\r")) else text

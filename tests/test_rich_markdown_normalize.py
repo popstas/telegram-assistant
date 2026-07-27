@@ -117,8 +117,10 @@ def test_no_spacers_inside_non_paragraph_blocks(source: str) -> None:
 
 
 def test_media_blocks_are_not_spaced_apart() -> None:
+    # ``grouping="none"`` isolates the spacer pass — the collage default would
+    # otherwise rewrite this run (covered in test_rich_markdown_grouping.py).
     source = "![](https://x/a.jpg)\n\n![](https://x/b.jpg)"
-    assert normalize_rich_markdown(source).markdown == source
+    assert normalize_rich_markdown(source, grouping="none").markdown == source
 
 
 def test_paragraph_next_to_a_list_is_not_spaced() -> None:
@@ -216,7 +218,7 @@ def test_spacing_is_kept_right_at_the_block_limit() -> None:
 
 def test_unspaced_article_over_the_block_limit_only_warns() -> None:
     source = "\n\n".join(f"![](https://x/{n}.jpg)" for n in range(MAX_RICH_BLOCKS + 1))
-    result = normalize_rich_markdown(source)
+    result = normalize_rich_markdown(source, grouping="none")
     assert result.markdown == source
     assert result.blocks == MAX_RICH_BLOCKS + 1
     assert any("over Telegram's 500-block limit" in warning for warning in result.warnings)

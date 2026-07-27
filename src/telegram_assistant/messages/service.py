@@ -42,9 +42,11 @@ from telegram_assistant.messages.attachments import (
 )
 from telegram_assistant.messages.downloads import Downloader
 from telegram_assistant.messages.rich_markdown import (
+    DEFAULT_MEDIA_GROUP_MODE,
     MAX_RICH_MEDIA,
     RICH_FILE_ID_RE,
     RICH_FILE_SCHEMES,
+    MediaGroupChoice,
     RichFile,
     normalize_rich_markdown,
 )
@@ -79,6 +81,18 @@ def spaced_paragraphs_default(config: Any) -> bool:
     defaults = getattr(getattr(config, "telegram", None), "defaults", None)
     value = getattr(defaults, "rich_markdown_spaced_paragraphs", None)
     return True if value is None else bool(value)
+
+
+def media_grouping_default(config: Any) -> str:
+    """Read ``telegram.defaults.rich_markdown_grouping`` from ``config``.
+
+    The twin of :func:`spaced_paragraphs_default`: missing config (or a config
+    predating the knob) means :data:`DEFAULT_MEDIA_GROUP_MODE`. A per-group
+    override still wins over whatever this returns.
+    """
+    defaults = getattr(getattr(config, "telegram", None), "defaults", None)
+    value = getattr(defaults, "rich_markdown_grouping", None)
+    return DEFAULT_MEDIA_GROUP_MODE if value is None else str(value)
 
 
 class ScheduleError(ValueError):
@@ -446,6 +460,14 @@ class SendMessageRequest:
     paragraphs tight against each other. ``False`` sends the source
     byte-for-byte.
 
+    ``media_grouping`` (config default ``telegram.defaults.rich_markdown_grouping``)
+    is the same pass's other half: a run of two or more consecutive media
+    blocks is wrapped in ``<tg-collage>``/``<tg-slideshow>``, or left alone
+    with ``none``. ``media_groups`` overrides individual runs by index (see
+    :attr:`~telegram_assistant.messages.rich_markdown.RichMarkdownNormalization.groups`);
+    an index naming no run raises
+    :class:`~telegram_assistant.messages.rich_markdown.MediaGroupError`.
+
     ``rich_files`` are local files the ``rich_markdown`` body names through the
     ``tg://photo?id=…``/``tg://video?id=…``/``tg://audio?id=…`` references that
     :func:`~telegram_assistant.messages.rich_markdown.scan_media` writes. They
@@ -468,6 +490,8 @@ class SendMessageRequest:
     reply_to_message_id: int | None = None
     rich_markdown: str | None = None
     spaced_paragraphs: bool = True
+    media_grouping: str = DEFAULT_MEDIA_GROUP_MODE
+    media_groups: tuple[MediaGroupChoice, ...] = field(default_factory=tuple)
     rich_files: tuple[RichFile, ...] = field(default_factory=tuple)
 
     @property
@@ -527,6 +551,11 @@ class SendMessageRequest:
                 )
             ),
             "spaced_paragraphs": self.spaced_paragraphs,
+            "media_grouping": self.media_grouping,
+            "media_groups": [
+                {"index": choice.index, "mode": choice.mode}
+                for choice in self.media_groups
+            ],
             # Like ``files``: only the *reference* to each upload is persisted
             # (id, path, kind), never the file contents. The caption is already
             # in the recorded markdown, so it is not duplicated here.
@@ -675,15 +704,26 @@ async def send_message(
         normalization = normalize_rich_markdown(
             request.rich_markdown,
             spaced_paragraphs=request.spaced_paragraphs,
+            grouping=request.media_grouping,
+            media_groups=request.media_groups,
         )
         warnings = normalization.warnings
-        spaced_grew = normalization.markdown is not request.rich_markdown
-        if spaced_grew:
+        if normalization.markdown is not request.rich_markdown:
             request = replace(request, rich_markdown=normalization.markdown)
         if len(normalization.markdown) > MAX_RICH_MARKDOWN_CHARS:
             given = f"{len(normalization.markdown)} given"
-            if spaced_grew:
-                given += " after paragraph spacing"
+            # Name the pass(es) that grew it, so a source that was already too
+            # long is not blamed on normalisation.
+            grew_by = [
+                name
+                for name, applied in (
+                    ("paragraph spacing", normalization.spacers_added),
+                    ("media grouping", normalization.grouped),
+                )
+                if applied
+            ]
+            if grew_by:
+                given += " after " + " and ".join(grew_by)
             raise ValueError(
                 f"rich_markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
                 f"({given})"

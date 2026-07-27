@@ -3356,6 +3356,15 @@ def messages_send(
         "(default: on, or telegram.defaults.rich_markdown_spaced_paragraphs). "
         "Only meaningful with --rich-markdown.",
     ),
+    media_group: list[str] = typer.Option(  # noqa: B008
+        None,
+        "--media-group",
+        help="Override how one run of consecutive media is grouped, as "
+        "<index>=<collage|slideshow|none> (repeatable). The index is the "
+        "0-based position reported as rich_markdown_groups by --dry-run; the "
+        "default comes from telegram.defaults.rich_markdown_grouping. "
+        "Only valid with --rich-markdown.",
+    ),
     rich_file: list[str] = typer.Option(  # noqa: B008
         None,
         "--rich-file",
@@ -3392,8 +3401,11 @@ def messages_send(
     )
     from telegram_assistant.messages import (
         MAX_RICH_MARKDOWN_CHARS,
+        MEDIA_GROUP_MODES,
         AttachmentError,
         MassSendRequest,
+        MediaGroupChoice,
+        MediaGroupError,
         MediaResolutionError,
         MessageSendFailed,
         MessageSendNeedsReview,
@@ -3403,6 +3415,7 @@ def messages_send(
         is_service_command,
         make_url_downloader,
         mass_send_message,
+        media_grouping_default,
         normalize_rich_markdown,
         parse_delay,
         parse_schedule_at,
@@ -3457,11 +3470,19 @@ def messages_send(
     rich_markdown_text: str | None = None
     rich_files: tuple[object, ...] = ()
     rich_file_args = list(rich_file or ())
+    media_group_args = list(media_group or ())
+    media_group_choices: tuple[MediaGroupChoice, ...] = ()
     if rich_markdown is None and (rich_file_args or vault_dir is not None):
         # Both only steer how local media in the article is resolved; accepting
         # them for a plain send would silently do nothing.
         typer.echo(
             "--rich-file/--vault-dir are only meaningful with --rich-markdown",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if rich_markdown is None and media_group_args:
+        typer.echo(
+            "--media-group is only meaningful with --rich-markdown",
             err=True,
         )
         raise typer.Exit(code=2)
@@ -3514,6 +3535,20 @@ def messages_send(
                 )
                 raise typer.Exit(code=2)
             overrides[reference.strip()] = Path(override_path.strip())
+        choices: list[MediaGroupChoice] = []
+        for entry in media_group_args:
+            raw_index, sep, raw_mode = entry.partition("=")
+            mode = raw_mode.strip().lower()
+            if not sep or not raw_index.strip().isdigit() or mode not in MEDIA_GROUP_MODES:
+                typer.echo(
+                    "--media-group must be <index>=<"
+                    + "|".join(MEDIA_GROUP_MODES)
+                    + f"> ({entry!r} given)",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            choices.append(MediaGroupChoice(index=int(raw_index.strip()), mode=mode))
+        media_group_choices = tuple(choices)
         # Local media is CLI-only (the CLI is the trusted, local surface): the
         # article's own directory is the base, so a note can be sent as written.
         # This runs before the length check so the bound applies to the rewritten
@@ -3530,6 +3565,20 @@ def messages_send(
             raise typer.Exit(code=2) from exc
         rich_markdown_text = media_scan.markdown
         rich_files = media_scan.files
+        if media_group_choices:
+            # Check the indexes against the article's actual media runs here,
+            # so a typo costs no backend connection. The modes do not matter
+            # for that check, hence the cheapest possible pass.
+            try:
+                normalize_rich_markdown(
+                    rich_markdown_text,
+                    spaced_paragraphs=False,
+                    grouping="none",
+                    media_groups=media_group_choices,
+                )
+            except MediaGroupError as exc:
+                typer.echo(str(exc), err=True)
+                raise typer.Exit(code=2) from exc
         if len(rich_markdown_text) > MAX_RICH_MARKDOWN_CHARS:
             typer.echo(
                 f"--rich-markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
@@ -3583,6 +3632,9 @@ def messages_send(
         if spaced_paragraphs is not None
         else spaced_paragraphs_default(config)
     )
+    # Grouping has no all-or-nothing flag: the config sets the default mode and
+    # --media-group overrides individual runs.
+    effective_media_grouping = media_grouping_default(config)
 
     # Mass mode and chat_name resolution both need the folder default.
     if is_mass or chat_name is not None:
@@ -3805,6 +3857,8 @@ def messages_send(
                 normalize_rich_markdown(
                     rich_markdown_text or "",
                     spaced_paragraphs=effective_spaced_paragraphs,
+                    grouping=effective_media_grouping,
+                    media_groups=media_group_choices,
                 )
                 if is_rich
                 else None
@@ -3870,6 +3924,25 @@ def messages_send(
                 ),
                 "spaced": (
                     rich_normalization.spaced
+                    if rich_normalization is not None
+                    else None
+                ),
+                # Every run of 2+ consecutive media, with the mode it would be
+                # sent as — this is what a caller asks the human about before
+                # re-running with --media-group.
+                "media_grouping": (
+                    effective_media_grouping if is_rich else None
+                ),
+                "rich_markdown_groups": (
+                    [
+                        {
+                            "index": group.index,
+                            "size": group.size,
+                            "mode": group.mode,
+                            "preceding_text": group.preceding_text,
+                        }
+                        for group in rich_normalization.groups
+                    ]
                     if rich_normalization is not None
                     else None
                 ),
@@ -3990,6 +4063,8 @@ def messages_send(
                 reply_to_message_id=reply_to,
                 rich_markdown=rich_markdown_text,
                 spaced_paragraphs=effective_spaced_paragraphs,
+                media_grouping=effective_media_grouping,
+                media_groups=media_group_choices,
                 rich_files=rich_files,
             )
             result_single, op = await send_message(
@@ -4023,6 +4098,11 @@ def messages_send(
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except MediaGroupError as exc:
+        # Bad caller input, not a send failure — exit 2 like the other rich
+        # input checks (the indexes are pre-checked above, so this is a fence).
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except Exception as exc:
