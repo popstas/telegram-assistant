@@ -3370,14 +3370,16 @@ def messages_send(
         "--rich-file",
         help="Map a media reference in the article to a local file, as "
         "<reference>=<path> (repeatable). The reference is the target written "
-        "in the markdown or its bare file name; use it for files outside the "
-        "article's directory. Only valid with --rich-markdown.",
+        "in the markdown, its URL-decoded form, or its bare file name; use it "
+        "for files outside the article's directory. Only valid with "
+        "--rich-markdown.",
     ),
     vault_dir: Path | None = typer.Option(  # noqa: B008
         None,
         "--vault-dir",
-        help="Directory searched by name for Obsidian ![[embed.png]] media "
-        "that is not next to the article. Only valid with --rich-markdown.",
+        help="Directory tree searched by file name for article media that is "
+        "not next to the article — Obsidian ![[embed.png]] embeds and plain "
+        "![](photo.png) targets alike. Only valid with --rich-markdown.",
         exists=False,
     ),
     dry_run: bool = typer.Option(
@@ -3424,6 +3426,7 @@ def messages_send(
         scan_media,
         send_message,
         spaced_paragraphs_default,
+        strip_yaml_frontmatter,
         validate_file_urls,
         validate_local_files,
     )
@@ -3522,6 +3525,13 @@ def messages_send(
         except OSError as exc:
             typer.echo(f"--rich-markdown file cannot be read: {exc}", err=True)
             raise typer.Exit(code=2) from exc
+        # An Obsidian note opens with YAML frontmatter, which this dialect has
+        # no notion of: the scanner reads it as a divider plus a setext heading
+        # and the article would start with a rule and a big "tags: [...]"
+        # heading. Strip it here, at the same file-read boundary as the BOM —
+        # and before the empty check, so a note that is *only* frontmatter is
+        # reported as empty rather than sent as a bare heading.
+        rich_markdown_text = strip_yaml_frontmatter(rich_markdown_text)
         if not rich_markdown_text.strip():
             typer.echo(f"--rich-markdown file is empty: {rich_markdown}", err=True)
             raise typer.Exit(code=2)
@@ -3539,7 +3549,16 @@ def messages_send(
         for entry in media_group_args:
             raw_index, sep, raw_mode = entry.partition("=")
             mode = raw_mode.strip().lower()
-            if not sep or not raw_index.strip().isdigit() or mode not in MEDIA_GROUP_MODES:
+            # ``int`` inside the validation, not after it: ``"²".isdigit()`` is
+            # true but ``int("²")`` raises, which would surface as the internal
+            # exit 1 instead of this argument error.
+            index: int | None = None
+            if sep and mode in MEDIA_GROUP_MODES:
+                try:
+                    index = int(raw_index.strip())
+                except ValueError:
+                    index = None
+            if index is None or index < 0:
                 typer.echo(
                     "--media-group must be <index>=<"
                     + "|".join(MEDIA_GROUP_MODES)
@@ -3547,7 +3566,7 @@ def messages_send(
                     err=True,
                 )
                 raise typer.Exit(code=2)
-            choices.append(MediaGroupChoice(index=int(raw_index.strip()), mode=mode))
+            choices.append(MediaGroupChoice(index=index, mode=mode))
         media_group_choices = tuple(choices)
         # Local media is CLI-only (the CLI is the trusted, local surface): the
         # article's own directory is the base, so a note can be sent as written.
@@ -4100,9 +4119,12 @@ def messages_send(
     except FolderError as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
-    except MediaGroupError as exc:
-        # Bad caller input, not a send failure — exit 2 like the other rich
-        # input checks (the indexes are pre-checked above, so this is a fence).
+    except ValueError as exc:
+        # Bad caller input, not an unexpected failure — exit 2 like every other
+        # `messages` command and like the rich pre-checks above. Covers
+        # ``MediaGroupError``, the media-resolution errors and the over-limit
+        # ``ValueError`` normalization raises, plus ``RichMediaForbidden``,
+        # whose contract (and README/SKILL) promise HTTP 400 / exit 2.
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     except Exception as exc:

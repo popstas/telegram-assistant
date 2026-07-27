@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from typing import Any
 
@@ -666,6 +667,40 @@ async def test_send_message_rich_markdown_is_write_gated(
                 operation_id="rich-denied",
             ),
         )
+    assert backend.sent == []
+
+
+async def test_send_message_rejects_oversize_rich_markdown_before_normalizing(
+    store: OperationStore,
+) -> None:
+    """The source bound is applied before normalisation, which is a full scan of
+    caller input running on the event loop ahead of the WRITE gate. Both passes
+    only grow the text, so an over-limit source can never come back under it —
+    and a denied caller must not be able to buy seconds of CPU with a
+    multi-megabyte string neither HTTP nor MCP bounds."""
+    from telegram_assistant.access import Authorizer
+    from telegram_assistant.config.models import AccessConfig, AccessRule
+
+    authorizer = Authorizer(
+        AccessConfig(rules=[AccessRule(all=True, permission="read")])
+    )
+    backend = FakeMessageBackend()
+    # 12 MB of paragraphs: seconds of scanning if normalisation ran first.
+    oversize = "para\n\n" * 2_000_000
+    started = time.perf_counter()
+    with pytest.raises(ValueError, match="32768"):
+        await send_message(
+            backend=backend,
+            store=store,
+            authorizer=authorizer,
+            request=SendMessageRequest(
+                telegram_chat_id=-100,
+                text="",
+                rich_markdown=oversize,
+                operation_id="rich-oversize-early",
+            ),
+        )
+    assert time.perf_counter() - started < 1.0
     assert backend.sent == []
 
 

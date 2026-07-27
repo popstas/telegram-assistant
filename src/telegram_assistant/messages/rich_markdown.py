@@ -49,6 +49,13 @@ MAX_RICH_BLOCKS = 500
 #: Telegram's ceiling on media attachments in one rich message.
 MAX_RICH_MEDIA = 50
 
+#: How deep the block scanner nests quotes/HTML containers before it stops
+#: recursing and emits the container as a leaf (see :func:`scan_blocks`). Well
+#: past any real article — a body 64 quotes deep has spent its 500-block budget
+#: — but far enough under Python's ~1000-frame limit that the scan cannot raise
+#: ``RecursionError`` on caller input.
+MAX_BLOCK_NESTING = 64
+
 #: HTML container tags the dialect defines; their contents are scanned as
 #: nested blocks so grouping can tell author-written groups from runs it may
 #: wrap itself.
@@ -115,17 +122,61 @@ _HTML_OPEN_RE = re.compile(
     r"^ {0,3}</?(?P<tag>" + "|".join(HTML_BLOCK_TAGS) + r")\b[^>]*>", re.IGNORECASE
 )
 
-_MEDIA_MD_RE = re.compile(
-    r"""^!\[(?P<alt>[^\]]*)\]\(\s*
-        (?:<(?P<angle>[^>]*)>|(?P<plain>[^()\s]+))
-        (?:\s+(?:"(?P<dquote>[^"]*)"|'(?P<squote>[^']*)'|\((?P<pquote>[^)]*)\)))?
-        \s*\)$""",
-    re.VERBOSE,
-)
-_MEDIA_OBSIDIAN_RE = re.compile(r"^!\[\[(?P<body>[^\]]+)\]\]$")
+# The anchored forms classify a *line* (is this block media?); the unanchored
+# ones find every reference *within* a line, wherever it sits — a list item, a
+# table cell, a footnote, or mid-sentence. Both share one pattern so the two
+# never drift apart on what counts as a reference.
+# A bare destination admits *balanced* parentheses and backslash escapes, and a
+# title admits an escaped copy of its own quote character — both are CommonMark,
+# and both name real files (``Screenshot(1).png``, a caption quoting speech). A
+# pattern that stopped at the first ``(`` or ``"`` would not recognise the
+# reference *at all*, so ``scan_media`` would leave the local path in the
+# article and send it to Telegram verbatim — the one silent drop it promises
+# never to make. Each alternation branch below starts on a distinct character,
+# so the nesting cannot backtrack catastrophically.
+_MEDIA_MD_PATTERN = r"""!\[(?P<alt>[^\]]*)\]\(\s*
+        (?:<(?P<angle>[^>]*)>
+          |(?P<plain>(?:[^()\s\\]|\\.|\((?:[^()\s\\]|\\.)*\))+))
+        (?:\s+(?:"(?P<dquote>(?:[^"\\]|\\.)*)"
+              |'(?P<squote>(?:[^'\\]|\\.)*)'
+              |\((?P<pquote>(?:[^()\\]|\\.)*)\)))?
+        \s*\)"""
+_MEDIA_OBSIDIAN_PATTERN = r"!\[\[(?P<body>[^\]]+)\]\]"
+
+_MEDIA_MD_RE = re.compile(r"^" + _MEDIA_MD_PATTERN + r"$", re.VERBOSE)
+_MEDIA_OBSIDIAN_RE = re.compile(r"^" + _MEDIA_OBSIDIAN_PATTERN + r"$")
+_MEDIA_MD_INLINE_RE = re.compile(_MEDIA_MD_PATTERN, re.VERBOSE)
+_MEDIA_OBSIDIAN_INLINE_RE = re.compile(_MEDIA_OBSIDIAN_PATTERN)
+
+#: An inline code span: a backtick run, the shortest body, the same run again.
+#: Code spans are opaque to media resolution for the same reason fenced code is
+#: (see :func:`scan_blocks`) — an article documenting the dialect writes
+#: ``` `![](shot.png)` ``` and means the text, not a file to upload.
+_CODE_SPAN_RE = re.compile(r"(?P<ticks>`+)(?P<body>.+?)(?P=ticks)")
+
+#: A CommonMark backslash escape: a backslash before ASCII punctuation. A
+#: backslash before anything else is a literal backslash, which is what keeps a
+#: Windows-style ``C:\Users\me\a.png`` target intact.
+_MD_ESCAPE_RE = re.compile(r"\\([!-/:-@\[-`{-~])")
 
 _SIZE_RE = re.compile(r"^\d+(?:x\d+)?$")
 _ALIGNMENTS = frozenset({"left", "center", "right"})
+
+#: A YAML mapping entry: a key, a colon, then end of line or whitespace-led
+#: value. The leading character excludes whitespace (an indented continuation)
+#: and ``#`` (a comment — and, crucially, a markdown ATX heading). Requiring
+#: whitespace after the colon is what rejects a bare URL (``https://…``) while
+#: still accepting ``time: 10:30``.
+_FRONTMATTER_KEY_RE = re.compile(r"^[^\s#][^:]*:(?:\s.*)?$")
+
+#: A YAML sequence item or an indented continuation line.
+_FRONTMATTER_CONT_RE = re.compile(r"^(?:-(?:\s|$)|\s+\S)")
+
+#: A YAML comment. Identical in syntax to a markdown ATX heading, which is why
+#: it is accepted only *after* the first body line: the "first line must be a
+#: mapping entry" rule is what keeps an article opening with a ``---`` rule and
+#: a heading from being read as frontmatter, and that rule stays untouched.
+_FRONTMATTER_COMMENT_RE = re.compile(r"^\s*#")
 
 #: Every block kind the scanner emits.
 BLOCK_KINDS = (
@@ -175,15 +226,11 @@ class MediaGroupError(ValueError):
     """A media-group override named an unknown run or an unknown mode."""
 
 
-#: What :func:`normalize_rich_markdown` accepts as per-group overrides: a
-#: ``{index: mode}`` mapping, or any iterable of :class:`MediaGroupChoice`,
-#: ``{"index": …, "mode": …}`` mappings or ``(index, mode)`` pairs — every
-#: surface hands its own shape down without converting first.
-MediaGroupOverrides = (
-    Mapping[int, str]
-    | Iterable[MediaGroupChoice | Mapping[str, Any] | tuple[int, str]]
-    | None
-)
+#: What :func:`normalize_rich_markdown` accepts as per-group overrides: the
+#: :class:`MediaGroupChoice` sequence the surfaces build (``SendMessageRequest``
+#: carries exactly that), or a plain ``{index: mode}`` mapping for a direct
+#: call.
+MediaGroupOverrides = Mapping[int, str] | Iterable[MediaGroupChoice] | None
 
 
 @dataclass(frozen=True)
@@ -243,14 +290,12 @@ class MediaScan:
 
     ``markdown`` is the body with every *local* media reference rewritten to
     its ``tg://`` form (returned by identity when nothing was local, so byte
-    fidelity survives), ``files`` are the uploads it needs in markdown order,
-    and ``remote`` lists the http(s) targets left untouched for the server to
-    fetch itself.
+    fidelity survives) and ``files`` are the uploads it needs, in markdown
+    order. http(s) targets are left exactly as written for the server to fetch.
     """
 
     markdown: str
     files: tuple[RichFile, ...] = ()
-    remote: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -264,6 +309,13 @@ class MediaRef:
     (``![alt](url "caption")``) when present, else the alt text. ``is_remote``
     is ``True`` only for an ``http``/``https`` target — everything else needs
     local resolution and an upload.
+
+    ``span`` is the half-open ``(start, end)`` of ``raw`` inside the line it was
+    found in, set only by :func:`iter_line_media_refs`. The rewrite splices at
+    that span rather than searching for ``raw``: an identical reference masked
+    out earlier on the same line (inside an inline code span) is *skipped* by
+    the sweep, so a first-occurrence search would rewrite the masked copy and
+    ship the real one as a literal local path.
     """
 
     target: str
@@ -274,6 +326,7 @@ class MediaRef:
     size: str | None = None
     alignment: str | None = None
     raw: str = ""
+    span: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -300,6 +353,76 @@ class Block:
     @property
     def text(self) -> str:
         return "\n".join(self.lines)
+
+
+def strip_yaml_frontmatter(markdown: str) -> str:
+    """Drop a leading ``---`` … ``---`` YAML frontmatter block.
+
+    This is **not** part of :func:`normalize_rich_markdown` — that one only ever
+    inserts or wraps lines — and it is deliberately called at the CLI's
+    file-read boundary only, next to the ``utf-8-sig`` BOM strip and for the
+    same reason: it is where "this is a note file" is known. An Obsidian note
+    opens with frontmatter, which no surface of this dialect renders as
+    metadata: the scanner reads the opening ``---`` as a divider and the
+    ``key: value`` lines as a **setext heading** underlined by the closing
+    ``---``, so the article would begin with a rule and a large heading reading
+    ``tags: [...] date: ...`` — with a spacer inserted inside it. HTTP/MCP take
+    a markdown *string* an agent composed rather than a note, so their input is
+    passed through untouched instead of being silently rewritten.
+
+    Only an exact opening ``---`` on the first line starts a block, only a
+    matching closing ``---`` ends one, and — the part that keeps this from
+    eating real content — the lines **between** them must read as YAML
+    (:func:`_is_frontmatter_body`). A document that simply starts with a
+    horizontal rule keeps it, whether or not a later ``---`` divider exists:
+    matching on the fences alone would treat ``---``, an opening section, then
+    the next ``---`` divider as frontmatter and silently drop that whole
+    section, which nothing downstream would ever report (the CLI never echoes
+    the body). The remainder is returned by slicing the original text, so CRLF
+    endings and the trailing newline survive byte-for-byte — the same identity
+    contract the normalisation passes keep. Returns the input unchanged when
+    there is no frontmatter.
+    """
+
+    lines = markdown.splitlines(keepends=True)
+    if not lines or lines[0].rstrip() != "---":
+        return markdown
+    for index in range(1, len(lines)):
+        if lines[index].rstrip() != "---":
+            continue
+        if not _is_frontmatter_body(lines[1:index]):
+            return markdown
+        return "".join(lines[index + 1 :])
+    return markdown
+
+
+def _is_frontmatter_body(lines: list[str]) -> bool:
+    """``True`` when every line between two ``---`` fences reads as YAML.
+
+    The first line must be a mapping entry — that alone rejects the shape this
+    guard exists for, a leading ``---`` rule followed by a blank line and prose
+    — and every later non-blank line must be a mapping entry, a sequence item,
+    an indented continuation, or a comment. An empty block (``---`` directly
+    under ``---``) is two rules, not frontmatter.
+
+    A comment is legal YAML and common in an Obsidian note, but its syntax is a
+    markdown ATX heading's, so it is accepted only after the first line: on the
+    first line it is a heading and the block is not frontmatter. Rejecting it
+    outright is worse than either — the note keeps its fences, and the scanner
+    then reads the opening ``---`` as a divider and the closing one as a setext
+    underline, sending the note's own metadata as a rule and a large heading.
+    """
+
+    body = [line.rstrip("\r\n") for line in lines]
+    if not body or not _FRONTMATTER_KEY_RE.match(body[0]):
+        return False
+    return all(
+        not line.strip()
+        or _FRONTMATTER_KEY_RE.match(line)
+        or _FRONTMATTER_CONT_RE.match(line)
+        or _FRONTMATTER_COMMENT_RE.match(line)
+        for line in body[1:]
+    )
 
 
 def split_lines(markdown: str) -> list[str]:
@@ -335,27 +458,42 @@ def parse_media_line(line: str) -> MediaRef | None:
 
     obsidian = _MEDIA_OBSIDIAN_RE.match(stripped)
     if obsidian:
-        parts = obsidian.group("body").split("|")
-        target = parts[0].strip()
-        if not target:
-            return None
-        caption, size, alignment = _split_obsidian_segments(parts[1:], target)
-        return MediaRef(
-            target=target,
-            alt=caption,
-            caption=caption,
-            is_remote=_is_remote(target),
-            obsidian=True,
-            size=size,
-            alignment=alignment,
-            raw=stripped,
-        )
+        # ``raw`` is the *stripped* line, not the match: the rewrite replaces it
+        # inside the original line, so a quoted media line keeps its ``> ``.
+        return _obsidian_ref(obsidian, raw=stripped)
 
     match = _MEDIA_MD_RE.match(stripped)
-    if not match:
+    if match is None:
         return None
+    return _markdown_ref(match, raw=stripped)
+
+
+def _obsidian_ref(
+    match: re.Match[str], *, raw: str, span: tuple[int, int] | None = None
+) -> MediaRef | None:
+    parts = match.group("body").split("|")
+    target = parts[0].strip()
+    if not target:
+        return None
+    caption, size, alignment = _split_obsidian_segments(parts[1:], target)
+    return MediaRef(
+        target=target,
+        alt=caption,
+        caption=caption,
+        is_remote=_is_remote(target),
+        obsidian=True,
+        size=size,
+        alignment=alignment,
+        raw=raw,
+        span=span,
+    )
+
+
+def _markdown_ref(
+    match: re.Match[str], *, raw: str, span: tuple[int, int] | None = None
+) -> MediaRef | None:
     target = (match.group("angle") if match.group("angle") is not None else match.group("plain")) or ""
-    target = target.strip()
+    target = _unescape_markdown(target.strip())
     if not target:
         return None
     title = match.group("dquote")
@@ -363,6 +501,8 @@ def parse_media_line(line: str) -> MediaRef | None:
         title = match.group("squote")
     if title is None:
         title = match.group("pquote")
+    if title is not None:
+        title = _unescape_markdown(title)
     alt, size, alignment = _split_markdown_alt(match.group("alt") or "", target)
     return MediaRef(
         target=target,
@@ -372,8 +512,64 @@ def parse_media_line(line: str) -> MediaRef | None:
         obsidian=False,
         size=size,
         alignment=alignment,
-        raw=stripped,
+        raw=raw,
+        span=span,
     )
+
+
+def iter_line_media_refs(line: str) -> Iterator[MediaRef]:
+    """Yield every media reference *inside* ``line``, left to right.
+
+    :func:`parse_media_line` answers "is this line one media reference?" — the
+    question the block scanner asks. This one answers "what media does this
+    line mention?", which is what resolution needs: an Obsidian embed in a
+    bullet list, a thumbnail in a table cell, or a reference mid-sentence is
+    just as much a local file to upload as one standing on its own line.
+
+    ``MediaRef.raw`` is the exact matched substring here (not the stripped
+    line) and ``MediaRef.span`` is where it sits, so the rewrite can splice it
+    in place and leave the rest of the line — list marker, table pipes,
+    surrounding prose — untouched. The span is what makes the masking below
+    effective: searching for ``raw`` instead would rewrite a *skipped* copy of
+    the same reference and leave the real one as a literal local path.
+
+    A reference *inside* an inline code span is text, not media: the block
+    scanner already treats fenced and indented code as opaque, and prose that
+    documents the media syntax would otherwise either upload a file nobody
+    asked for or fail the whole send on a path that was never meant to exist.
+    The test is **containment**, not overlap: a code span sitting inside a
+    reference's own caption (``![](a.png "run `x` first")``, ``![[a.png|`x`]]``)
+    only *overlaps* it, and skipping on overlap would leave that reference
+    unresolved and ship the local path verbatim — the one silent drop
+    :func:`scan_media` promises never to make. A reference the mask keeps is
+    still rewritten in place, so the surrounding backticks survive untouched.
+    """
+
+    if "![" not in line:
+        return
+    code_spans = [match.span() for match in _CODE_SPAN_RE.finditer(line)]
+    matches: list[tuple[re.Match[str], MediaRef]] = []
+    for pattern, build in (
+        (_MEDIA_OBSIDIAN_INLINE_RE, _obsidian_ref),
+        (_MEDIA_MD_INLINE_RE, _markdown_ref),
+    ):
+        for match in pattern.finditer(line):
+            start, end = match.span()
+            if any(span_start <= start and end <= span_end for span_start, span_end in code_spans):
+                continue
+            ref = build(match, raw=match.group(0), span=match.span())
+            if ref is not None:
+                matches.append((match, ref))
+    # The two dialects cannot overlap in practice (an Obsidian body admits no
+    # ``]``), but they are matched independently, so drop any overlap rather
+    # than rewrite one reference twice.
+    taken: list[tuple[int, int]] = []
+    for match, ref in sorted(matches, key=lambda item: item[0].start()):
+        start, end = match.span()
+        if any(start < prev_end and prev_start < end for prev_start, prev_end in taken):
+            continue
+        taken.append((start, end))
+        yield ref
 
 
 def scan_blocks(markdown: str) -> tuple[Block, ...]:
@@ -384,6 +580,15 @@ def scan_blocks(markdown: str) -> tuple[Block, ...]:
     a ``|`` or a ``![](…)`` inside a fence never becomes a heading, a table or
     media. ``<details>``/``<tg-collage>``/``<tg-slideshow>`` bodies *are*
     scanned, and land in :attr:`Block.children`.
+
+    Nesting is bounded by :data:`MAX_BLOCK_NESTING`: past that depth a quote or
+    an HTML container is emitted as a **leaf** block (its body kept in
+    :attr:`Block.lines`, no :attr:`Block.children`) instead of recursing. The
+    scanner recurses once per level, so without the bound a single line of
+    ``"> " * 600`` — 1.2 KB, far under ``MAX_RICH_MARKDOWN_CHARS`` — raises
+    ``RecursionError``. That scan runs on the event loop *ahead* of the WRITE
+    gate, so a token holder with no write grant could otherwise crash a send it
+    was never authorized to make into an unmapped, empty 500.
     """
 
     return _scan(split_lines(markdown), 0)
@@ -594,32 +799,41 @@ def scan_media(
 
     The same file referenced twice is uploaded once (one :class:`RichFile`, one
     id); the caption stays per-reference, since it lives in the markdown.
+
+    Every media line is resolved, whether it stands as its own block or opens a
+    paragraph because prose follows it on the next line (the common Obsidian
+    "embed then caption line" shape) — see :func:`_iter_media_refs`. Media
+    inside fenced or indented code is not a reference and is left alone.
     """
 
-    base = Path(base_dir).expanduser()
-    vault = Path(vault_dir).expanduser() if vault_dir is not None else None
+    # ``resolve()``: the nearest-match search below compares candidate paths
+    # against ``base`` step by step, and the candidates are absolute. A relative
+    # ``base_dir`` (``Path("note.md").parent`` is ``Path(".")``, whose ``parts``
+    # is empty) would turn that distance into the candidate's absolute depth and
+    # pick a file from the wrong directory.
+    base = Path(base_dir).expanduser().resolve()
+    vault = Path(vault_dir).expanduser().resolve() if vault_dir is not None else None
     override_map = {
         str(key): Path(value).expanduser() for key, value in (overrides or {}).items()
     }
     used_overrides: set[str] = set()
 
+    lines = split_lines(markdown)
     blocks = scan_blocks(markdown)
-    media_blocks = [block for block in iter_media(blocks) if block.media is not None]
-    if not media_blocks and not override_map:
+    refs = list(_iter_media_refs(blocks, lines))
+    if not refs and not override_map:
         return MediaScan(markdown=markdown)
 
-    lines = split_lines(markdown)
     files: list[RichFile] = []
-    remote: list[str] = []
     by_path: dict[str, RichFile] = {}
     taken: set[str] = set()
-    rewritten: dict[int, str] = {}
+    # line index -> (start, end, replacement), spliced right-to-left below so
+    # earlier spans keep their offsets. ``iter_line_media_refs`` already drops
+    # overlapping matches, so no two entries on a line can collide.
+    rewrites: dict[int, list[tuple[int, int, str]]] = {}
 
-    for block in media_blocks:
-        ref = block.media
-        assert ref is not None  # filtered above
+    for line_index, ref in refs:
         if ref.is_remote:
-            remote.append(ref.target)
             continue
         path = _resolve_local_media(
             ref, base=base, vault=vault, overrides=override_map, used=used_overrides
@@ -633,9 +847,9 @@ def scan_media(
             rich_file = RichFile(id=file_id, path=key, caption=ref.caption, kind=kind)
             by_path[key] = rich_file
             files.append(rich_file)
-        original = lines[block.start]
-        rewritten[block.start] = original.replace(
-            ref.raw, _media_markdown(rich_file.id, kind, alt=ref.alt, caption=ref.caption), 1
+        start, end = ref.span if ref.span is not None else (0, len(lines[line_index]))
+        rewrites.setdefault(line_index, []).append(
+            (start, end, _media_markdown(rich_file.id, kind, alt=ref.alt, caption=ref.caption))
         )
 
     unused = sorted(set(override_map) - used_overrides)
@@ -644,20 +858,76 @@ def scan_media(
             "rich file override(s) match no media in the article: " + ", ".join(unused)
         )
 
-    if not rewritten:
+    if not rewrites:
         # Identity, so a media-less (or fully remote) article keeps its exact
         # bytes — line endings and trailing newline included.
-        return MediaScan(markdown=markdown, files=(), remote=tuple(remote))
+        return MediaScan(markdown=markdown)
 
-    for index, line in rewritten.items():
+    for index, spans in rewrites.items():
+        line = lines[index]
+        for start, end, replacement in sorted(spans, reverse=True):
+            line = line[:start] + replacement + line[end:]
         lines[index] = line
     text = "\n".join(lines)
     if markdown.endswith(("\n", "\r")):
         text += "\n"
-    return MediaScan(markdown=text, files=tuple(files), remote=tuple(remote))
+    return MediaScan(markdown=text, files=tuple(files))
 
 
 # --- internals ---------------------------------------------------------------
+
+
+def _iter_media_refs(
+    blocks: tuple[Block, ...] | list[Block],
+    lines: list[str],
+) -> Iterator[tuple[int, MediaRef]]:
+    """Yield ``(document line index, reference)`` for every media reference.
+
+    Media standing as its own block is the common case, but a reference is a
+    local file to upload wherever it sits: a media line directly followed by
+    prose is deliberately *not* a media block (see :func:`_media_block_at`) —
+    it opens a paragraph — and an Obsidian embed just as happily lives in a
+    bullet list, a table cell, a footnote, or mid-sentence. So every line of
+    every block is swept with :func:`iter_line_media_refs`, not just the lines
+    that *are* a reference: leaving one as written would send a local path (or
+    a literal ``![[…]]``) to Telegram, the one silent drop
+    :func:`scan_media` promises never to make.
+
+    Code blocks are opaque, so a ``![](shot.png)`` inside a fence stays text.
+    A block with children (a quote, ``<tg-collage>``) is covered by those
+    children — whose ``start`` is document-absolute and whose lines are the
+    de-prefixed body — so a line a child already owns is not swept a second
+    time. The lines a child does *not* own still are: an HTML container's
+    children are only its body (``_consume_html`` scans between the tags), so
+    ``<details><summary>![](a.png)</summary>`` would otherwise send its literal
+    local path — the one silent drop :func:`scan_media` promises never to make.
+
+    The sweep reads ``lines`` — the *document* lines — rather than
+    ``Block.lines``, which for a quote child are the de-prefixed body: only the
+    document line makes ``MediaRef.span`` an offset the rewrite can splice at
+    directly, with the ``> `` marker left where it was. A media block is swept
+    like any other line for the same reason; ``Block.media`` comes from
+    :func:`parse_media_line`, which reports the *stripped* line and so carries
+    no usable span.
+    """
+
+    for block in blocks:
+        if block.children:
+            covered = {
+                index for child in block.children for index in range(child.start, child.end)
+            }
+            for document_index in range(block.start, block.end):
+                if document_index in covered:
+                    continue
+                for ref in iter_line_media_refs(lines[document_index]):
+                    yield document_index, ref
+            yield from _iter_media_refs(block.children, lines)
+            continue
+        if block.kind == "code":
+            continue
+        for document_index in range(block.start, block.end):
+            for ref in iter_line_media_refs(lines[document_index]):
+                yield document_index, ref
 
 
 def _is_blank(line: str) -> bool:
@@ -769,23 +1039,18 @@ def _coerce_overrides(overrides: MediaGroupOverrides, count: int) -> dict[int, s
 
     An index naming no run is an error: a silently ignored override would send
     an article grouped differently from what the operator asked for — the same
-    "no silent drop" rule local media resolution follows.
+    "no silent drop" rule local media resolution follows. Naming one index
+    twice is the same class of mistake and is rejected for the same reason:
+    last-win would quietly drop the first mode, so the operator would be told
+    nothing while the article went out grouped the other way.
     """
 
     if overrides is None:
         return {}
-    pairs: list[tuple[Any, Any]] = []
     if isinstance(overrides, Mapping):
-        pairs.extend(overrides.items())
+        pairs: list[tuple[Any, Any]] = list(overrides.items())
     else:
-        for entry in overrides:
-            if isinstance(entry, MediaGroupChoice):
-                pairs.append((entry.index, entry.mode))
-            elif isinstance(entry, Mapping):
-                pairs.append((entry.get("index"), entry.get("mode")))
-            else:
-                index, mode = entry
-                pairs.append((index, mode))
+        pairs = [(entry.index, entry.mode) for entry in overrides]
 
     resolved: dict[int, str] = {}
     for raw_index, raw_mode in pairs:
@@ -804,7 +1069,14 @@ def _coerce_overrides(overrides: MediaGroupOverrides, count: int) -> dict[int, s
             raise MediaGroupError(
                 f"unknown media group index {index}: {found}"
             )
-        resolved[index] = _validate_mode(str(raw_mode))
+        mode = _validate_mode(str(raw_mode))
+        previous = resolved.get(index)
+        if previous is not None and previous != mode:
+            raise MediaGroupError(
+                f"media group index {index} given twice with different modes "
+                f"({previous!r} and {mode!r})"
+            )
+        resolved[index] = mode
     return resolved
 
 
@@ -880,16 +1152,37 @@ def _is_remote(target: str) -> bool:
     return target.lower().startswith(("http://", "https://"))
 
 
+def _unescape_markdown(value: str) -> str:
+    """Undo CommonMark backslash escapes in a media target or title.
+
+    The pattern accepts ``\\(``/``\\"`` so an escaped reference is recognised at
+    all; the file to open and the caption to render are the *unescaped* text.
+    """
+
+    if "\\" not in value:
+        return value
+    return _MD_ESCAPE_RE.sub(r"\1", value)
+
+
 def _quote_title(caption: str) -> str:
-    """Render ``caption`` as a markdown media title, quoted so it round-trips."""
+    """Render ``caption`` as a markdown media title, quoted so it round-trips.
+
+    Single quotes when that alone keeps the caption bare, double quotes
+    otherwise, and whatever the delimiter cannot hold is written with a
+    CommonMark backslash escape — the same dialect :data:`_MEDIA_MD_PATTERN`
+    accepts and :func:`_unescape_markdown` undoes on input, so the article reads
+    back as the caption the author wrote. Rewriting the quotes instead (``"`` →
+    ``'``) would send a caption nobody wrote, which is the one thing the media
+    rewrite must never do. Backslashes are escaped first and unconditionally: a
+    caption ending in one would otherwise escape its own closing delimiter and
+    swallow the rest of the reference.
+    """
 
     if not caption:
         return ""
-    if '"' not in caption:
-        return f' "{caption}"'
-    if "'" not in caption:
-        return f" '{caption}'"
-    return ' "' + caption.replace('"', "'") + '"'
+    quote = "'" if '"' in caption and "'" not in caption else '"'
+    escaped = caption.replace("\\", "\\\\").replace(quote, f"\\{quote}")
+    return f" {quote}{escaped}{quote}"
 
 
 def _media_markdown(file_id: str, kind: str, *, alt: str, caption: str) -> str:
@@ -1068,6 +1361,33 @@ def _is_indented_code(line: str) -> bool:
     return line.startswith("    ") or line.startswith("\t")
 
 
+def _interrupts_paragraph(blocks: list[Block], absolute_index: int) -> bool:
+    """True when the line at ``absolute_index`` continues the paragraph above it.
+
+    Indented code cannot interrupt a paragraph — an indented line right under
+    prose is continuation text, not a code block. Reading it as code would make
+    the scanner opaque to whatever the line holds, and an indented media
+    reference would then be shipped as a literal local path instead of being
+    resolved and uploaded. A spacer paragraph is not prose, so it never absorbs
+    the line below it.
+
+    A ``media`` block counts as a paragraph here: it *is* one — a paragraph
+    whose single line happens to be nothing but a media reference — so the line
+    under it is continuation text for the same reason. Without that, the
+    ``![](a.png)`` / indented ``![](b.png)`` pair (an Obsidian embed followed by
+    an indented one) would read as media-then-code and ship ``b.png`` as a
+    literal local path, the one silent drop ``scan_media`` promises never to
+    make.
+    """
+
+    if not blocks:
+        return False
+    previous = blocks[-1]
+    if previous.kind not in ("paragraph", "media") or previous.end != absolute_index:
+        return False
+    return not is_spacer_line(previous.lines[-1])
+
+
 def _leading_ws(line: str) -> int:
     return len(line) - len(line.lstrip())
 
@@ -1116,7 +1436,21 @@ def _media_block_at(lines: list[str], index: int) -> MediaRef | None:
     return media if _starts_new_block(lines, nxt) else None
 
 
-def _scan(lines: list[str], offset: int) -> tuple[Block, ...]:
+def _scan_nested(lines: list[str], offset: int, depth: int) -> tuple[Block, ...]:
+    """Scan a container's body one level deeper, or stop at the nesting bound.
+
+    Returning ``()`` makes the caller emit a leaf block: its ``lines`` still
+    carry the whole body verbatim (nothing is dropped from the send), it just
+    weighs 1 and is opaque to the spacing/grouping passes — which is the right
+    answer at 64 levels deep, where the 500-block budget is long spent anyway.
+    """
+
+    if depth >= MAX_BLOCK_NESTING:
+        return ()
+    return _scan(lines, offset, depth + 1)
+
+
+def _scan(lines: list[str], offset: int, depth: int = 0) -> tuple[Block, ...]:
     blocks: list[Block] = []
     index = 0
     total = len(lines)
@@ -1131,7 +1465,7 @@ def _scan(lines: list[str], offset: int) -> tuple[Block, ...]:
             blocks.append(Block("paragraph", (line,), offset + index, offset + index + 1))
             index += 1
             continue
-        if _is_indented_code(line):
+        if _is_indented_code(line) and not _interrupts_paragraph(blocks, offset + index):
             index = _consume_indented_code(lines, index, offset, blocks)
             continue
         if _fence_open(line):
@@ -1139,7 +1473,7 @@ def _scan(lines: list[str], offset: int) -> tuple[Block, ...]:
             continue
         tag = _html_open(line)
         if tag:
-            index = _consume_html(lines, index, offset, blocks, tag)
+            index = _consume_html(lines, index, offset, blocks, tag, depth)
             continue
         if _is_table_start(lines, index):
             index = _consume_table(lines, index, offset, blocks)
@@ -1162,7 +1496,7 @@ def _scan(lines: list[str], offset: int) -> tuple[Block, ...]:
             index += 1
             continue
         if _QUOTE_RE.match(line):
-            index = _consume_quote(lines, index, offset, blocks)
+            index = _consume_quote(lines, index, offset, blocks, depth)
             continue
         if _LIST_RE.match(line):
             index = _consume_list(lines, index, offset, blocks)
@@ -1212,7 +1546,7 @@ def _consume_fence(lines: list[str], index: int, offset: int, blocks: list[Block
 
 
 def _consume_html(
-    lines: list[str], index: int, offset: int, blocks: list[Block], tag: str
+    lines: list[str], index: int, offset: int, blocks: list[Block], tag: str, depth: int = 0
 ) -> int:
     if _html_closed_on(lines[index], tag):
         end = index + 1
@@ -1225,7 +1559,7 @@ def _consume_html(
         inner_end = min(end, len(lines))
         if end < len(lines):
             end += 1
-    children = _scan(lines[inner_start:inner_end], offset + inner_start)
+    children = _scan_nested(lines[inner_start:inner_end], offset + inner_start, depth)
     blocks.append(
         Block(
             "html",
@@ -1256,12 +1590,14 @@ def _consume_table(lines: list[str], index: int, offset: int, blocks: list[Block
     return end
 
 
-def _consume_quote(lines: list[str], index: int, offset: int, blocks: list[Block]) -> int:
+def _consume_quote(
+    lines: list[str], index: int, offset: int, blocks: list[Block], depth: int = 0
+) -> int:
     end = index
     while end < len(lines) and _QUOTE_RE.match(lines[end]):
         end += 1
     inner = [re.sub(r"^ {0,3}> ?", "", line) for line in lines[index:end]]
-    children = _scan(inner, offset + index)
+    children = _scan_nested(inner, offset + index, depth)
     blocks.append(
         Block(
             "quote",

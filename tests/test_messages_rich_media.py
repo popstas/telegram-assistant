@@ -15,6 +15,7 @@ covered here too.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -120,7 +121,31 @@ def test_relative_path_is_resolved_and_rewritten(tmp_path: Path) -> None:
             kind="photo",
         ),
     )
-    assert scan.remote == ()
+
+
+def test_indented_reference_under_prose_is_resolved(tmp_path: Path) -> None:
+    # Indented code cannot interrupt a paragraph, so this line is prose the
+    # sweep must reach — treating it as code would ship the local path.
+    _touch(tmp_path / "shot.png")
+    scan = scan_media("Some paragraph\n    ![[shot.png]]\n", base_dir=tmp_path)
+
+    assert scan.markdown == "Some paragraph\n    ![](tg://photo?id=shot)\n"
+    assert [file.path for file in scan.files] == [str((tmp_path / "shot.png").resolve())]
+
+
+def test_indented_reference_under_a_media_line_is_resolved(tmp_path: Path) -> None:
+    # A media block is a paragraph too, so the indented embed under it is
+    # continuation text the sweep must reach — reading it as code would ship
+    # `b.png` as a literal local path while `a.png` uploaded fine.
+    _touch(tmp_path / "a.png")
+    _touch(tmp_path / "b.png")
+    scan = scan_media("![[a.png]]\n    ![[b.png]]\n", base_dir=tmp_path)
+
+    assert scan.markdown == "![](tg://photo?id=a)\n    ![](tg://photo?id=b)\n"
+    assert [file.path for file in scan.files] == [
+        str((tmp_path / "a.png").resolve()),
+        str((tmp_path / "b.png").resolve()),
+    ]
 
 
 def test_absolute_path_is_resolved(tmp_path: Path) -> None:
@@ -202,7 +227,6 @@ def test_remote_media_is_left_untouched(tmp_path: Path) -> None:
 
     assert scan.markdown is markdown
     assert scan.files == ()
-    assert scan.remote == ("https://example.com/a.jpg",)
 
 
 def test_media_inside_fenced_code_is_not_resolved(tmp_path: Path) -> None:
@@ -213,12 +237,284 @@ def test_media_inside_fenced_code_is_not_resolved(tmp_path: Path) -> None:
     assert scan.files == ()
 
 
+def test_media_inside_an_inline_code_span_is_not_resolved(tmp_path: Path) -> None:
+    """An article documenting the dialect writes the syntax in backticks. Left
+    unmasked it either uploads a file nobody asked for (when the name happens
+    to exist next to the article) or fails the whole send on a path that was
+    never meant to be one — a fence is opaque, and so is a code span."""
+    _touch(tmp_path / "shot.png")
+    markdown = "Write `![](shot.png)` to embed a local file.\n"
+    scan = scan_media(markdown, base_dir=tmp_path)
+
+    assert scan.markdown is markdown
+    assert scan.files == ()
+
+
+def test_a_real_reference_beside_a_code_span_is_still_resolved(tmp_path: Path) -> None:
+    """Masking is per-span, not per-line: the prose example stays text and the
+    reference next to it still uploads."""
+    _touch(tmp_path / "shot.png")
+    scan = scan_media(
+        "Write `![](gone.png)` — like ![](shot.png) here.\n", base_dir=tmp_path
+    )
+
+    assert scan.markdown == "Write `![](gone.png)` — like ![](tg://photo?id=shot) here.\n"
+    assert [file.id for file in scan.files] == ["shot"]
+
+
+def test_a_masked_copy_does_not_steal_the_rewrite_of_the_real_reference(
+    tmp_path: Path,
+) -> None:
+    """The article that documents the dialect *and* embeds the file writes the
+    same reference twice on one line — once in backticks, once for real. The
+    rewrite splices at the matched span, so a first-occurrence search can no
+    longer land on the masked copy and ship the real one as a local path."""
+    _touch(tmp_path / "shot.png")
+    scan = scan_media(
+        "Write `![](shot.png)` to embed, like ![](shot.png) here.\n", base_dir=tmp_path
+    )
+
+    assert scan.markdown == (
+        "Write `![](shot.png)` to embed, like ![](tg://photo?id=shot) here.\n"
+    )
+    assert [file.id for file in scan.files] == ["shot"]
+
+
+def test_a_code_span_inside_a_caption_does_not_mask_the_reference(
+    tmp_path: Path,
+) -> None:
+    """The mask asks whether the reference sits *inside* a code span, not
+    whether the two touch. A caption quoting a command puts a code span inside
+    the reference — skipping on overlap would leave it unresolved and ship the
+    local path verbatim, the one silent drop ``scan_media`` never makes."""
+    _touch(tmp_path / "shot.png")
+    scan = scan_media('![](shot.png "run `make` first")\n', base_dir=tmp_path)
+
+    assert scan.markdown == '![](tg://photo?id=shot "run `make` first")\n'
+    assert [(file.id, file.caption) for file in scan.files] == [
+        ("shot", "run `make` first")
+    ]
+
+
+def test_a_code_span_inside_an_obsidian_caption_does_not_mask_the_embed(
+    tmp_path: Path,
+) -> None:
+    """Same shape in the Obsidian dialect: ``![[file|`cap`]]`` only overlaps a
+    code span, so it is still resolved."""
+    _touch(tmp_path / "shot.png")
+    scan = scan_media("![[shot.png|`make` output]]\n", base_dir=tmp_path)
+
+    assert scan.markdown == '![`make` output](tg://photo?id=shot "`make` output")\n'
+    assert [(file.id, file.caption) for file in scan.files] == [
+        ("shot", "`make` output")
+    ]
+
+
+def test_a_masked_obsidian_embed_does_not_steal_the_rewrite(tmp_path: Path) -> None:
+    """Same shape in the Obsidian dialect: the masked ``![[…]]`` stays literal
+    text and the real embed is the one that becomes a ``tg://`` reference."""
+    _touch(tmp_path / "shot.png")
+    scan = scan_media("`![[shot.png]]` docs, then ![[shot.png]].\n", base_dir=tmp_path)
+
+    assert scan.markdown == "`![[shot.png]]` docs, then ![](tg://photo?id=shot).\n"
+    assert [file.id for file in scan.files] == ["shot"]
+
+
+def test_a_masked_copy_in_a_quote_keeps_its_prefix(tmp_path: Path) -> None:
+    """A quote child is scanned from the *de-prefixed* body, so the span must be
+    taken against the document line or the splice would land two characters
+    early and eat the ``> `` marker."""
+    _touch(tmp_path / "shot.png")
+    scan = scan_media(
+        "> prose `![](shot.png)` and ![](shot.png) end\n", base_dir=tmp_path
+    )
+
+    assert scan.markdown == (
+        "> prose `![](shot.png)` and ![](tg://photo?id=shot) end\n"
+    )
+    assert [file.id for file in scan.files] == ["shot"]
+
+
+def test_media_on_an_html_containers_own_tag_line_is_resolved(tmp_path: Path) -> None:
+    """``_consume_html`` puts only the body between the tags into ``children``,
+    so a reference on the opening (or closing) tag line is owned by no child.
+    Skipping the parent wholesale would send the literal local path — the one
+    silent drop ``scan_media`` promises never to make."""
+    _touch(tmp_path / "shot.png")
+    markdown = "<details><summary>![](shot.png)</summary>\nbody\n</details>\n"
+    scan = scan_media(markdown, base_dir=tmp_path)
+
+    assert scan.markdown == (
+        "<details><summary>![](tg://photo?id=shot)</summary>\nbody\n</details>\n"
+    )
+    assert [file.id for file in scan.files] == ["shot"]
+
+
+def test_media_inside_an_html_container_is_resolved_exactly_once(tmp_path: Path) -> None:
+    """The parent now sweeps its uncovered lines, so a child-owned line must
+    still not be swept twice — one file, one id, one rewrite."""
+    _touch(tmp_path / "shot.png")
+    markdown = "<details>\n![](shot.png)\n</details>\n"
+    scan = scan_media(markdown, base_dir=tmp_path)
+
+    assert scan.markdown == "<details>\n![](tg://photo?id=shot)\n</details>\n"
+    assert [file.id for file in scan.files] == ["shot"]
+
+
 def test_media_inside_a_quote_keeps_its_prefix(tmp_path: Path) -> None:
     _touch(tmp_path / "shot.png")
     scan = scan_media("> ![](shot.png)\n", base_dir=tmp_path)
 
     assert scan.markdown == "> ![](tg://photo?id=shot)\n"
     assert scan.files[0].kind == "photo"
+
+
+def test_media_followed_by_a_caption_line_is_still_resolved(tmp_path: Path) -> None:
+    """The common Obsidian shape: an embed with its caption on the next line.
+
+    Prose on the following line keeps the reference out of a *media block* (it
+    opens a paragraph instead), but it is still a local file the send must
+    upload. Leaving it as written would put the literal ``![[…]]`` — a local
+    path — into the delivered article, the one silent drop this module promises
+    never to make.
+    """
+    _touch(tmp_path / "shot.png")
+    scan = scan_media("![[shot.png]]\nПодпись под фото.\n", base_dir=tmp_path)
+
+    assert scan.markdown == "![](tg://photo?id=shot)\nПодпись под фото.\n"
+    assert scan.files[0].path == str((tmp_path / "shot.png").resolve())
+
+
+def test_a_run_of_media_is_resolved_whole_when_prose_follows_it(
+    tmp_path: Path,
+) -> None:
+    """The last member of a run must not be dropped by what comes after it."""
+    _touch(tmp_path / "a.png")
+    _touch(tmp_path / "b.png")
+    scan = scan_media("![](a.png)\n![](b.png)\nCaption.\n", base_dir=tmp_path)
+
+    assert scan.markdown == "![](tg://photo?id=a)\n![](tg://photo?id=b)\nCaption.\n"
+    assert [f.id for f in scan.files] == ["a", "b"]
+
+
+def test_media_with_a_caption_line_inside_a_quote_keeps_its_prefix(
+    tmp_path: Path,
+) -> None:
+    _touch(tmp_path / "shot.png")
+    scan = scan_media("> ![](shot.png)\n> caption\n", base_dir=tmp_path)
+
+    assert scan.markdown == "> ![](tg://photo?id=shot)\n> caption\n"
+    assert scan.files[0].kind == "photo"
+
+
+def test_missing_media_followed_by_prose_is_an_error_not_a_silent_pass(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(MediaResolutionError, match="gone.png"):
+        scan_media("![](gone.png)\ncaption\n", base_dir=tmp_path)
+
+
+def test_media_in_a_bullet_list_is_resolved(tmp_path: Path) -> None:
+    """The Obsidian shape: an embed inside a list item is not its own block."""
+    _touch(tmp_path / "a.png")
+    _touch(tmp_path / "b.png")
+    scan = scan_media(
+        "- item ![[a.png]]\n- two ![](b.png)\n", base_dir=tmp_path, vault_dir=tmp_path
+    )
+
+    assert scan.markdown == "- item ![](tg://photo?id=a)\n- two ![](tg://photo?id=b)\n"
+    assert [f.id for f in scan.files] == ["a", "b"]
+
+
+def test_media_mid_sentence_is_resolved_in_place(tmp_path: Path) -> None:
+    _touch(tmp_path / "shot.png")
+    scan = scan_media("Text with inline ![](shot.png) reference.\n", base_dir=tmp_path)
+
+    assert scan.markdown == "Text with inline ![](tg://photo?id=shot) reference.\n"
+    assert scan.files[0].id == "shot"
+
+
+def test_media_in_a_table_cell_is_resolved(tmp_path: Path) -> None:
+    _touch(tmp_path / "shot.png")
+    scan = scan_media(
+        "| h | i |\n|---|---|\n| ![](shot.png) | y |\n", base_dir=tmp_path
+    )
+
+    assert scan.markdown == "| h | i |\n|---|---|\n| ![](tg://photo?id=shot) | y |\n"
+    assert scan.files[0].id == "shot"
+
+
+def test_media_in_a_footnote_is_resolved(tmp_path: Path) -> None:
+    _touch(tmp_path / "shot.png")
+    scan = scan_media("[^1]: note ![](shot.png)\n", base_dir=tmp_path)
+
+    assert scan.markdown == "[^1]: note ![](tg://photo?id=shot)\n"
+    assert scan.files[0].id == "shot"
+
+
+def test_media_in_a_quoted_list_item_keeps_its_prefix(tmp_path: Path) -> None:
+    _touch(tmp_path / "shot.png")
+    scan = scan_media(
+        "> quote ![](shot.png) inline\n> - li ![[shot.png]]\n",
+        base_dir=tmp_path,
+        vault_dir=tmp_path,
+    )
+
+    assert scan.markdown == (
+        "> quote ![](tg://photo?id=shot) inline\n> - li ![](tg://photo?id=shot)\n"
+    )
+    # One upload: both references resolve to the same file.
+    assert [f.id for f in scan.files] == ["shot"]
+
+
+def test_two_references_to_one_file_on_a_line_are_both_rewritten(
+    tmp_path: Path,
+) -> None:
+    _touch(tmp_path / "shot.png")
+    scan = scan_media("Dup ![](shot.png) and ![](shot.png).\n", base_dir=tmp_path)
+
+    assert scan.markdown == (
+        "Dup ![](tg://photo?id=shot) and ![](tg://photo?id=shot).\n"
+    )
+    assert [f.id for f in scan.files] == ["shot"]
+
+
+def test_missing_media_in_a_list_item_is_an_error_not_a_silent_pass(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(MediaResolutionError, match="gone.png"):
+        scan_media("- item ![](gone.png)\n", base_dir=tmp_path)
+
+
+def test_media_inside_a_fence_is_never_resolved_wherever_it_sits(
+    tmp_path: Path,
+) -> None:
+    _touch(tmp_path / "shot.png")
+    markdown = "```\n- item ![](shot.png)\n| ![](shot.png) |\n```\n"
+    scan = scan_media(markdown, base_dir=tmp_path)
+
+    assert scan.markdown == markdown
+    assert scan.files == ()
+
+
+def test_a_relative_base_dir_still_picks_the_nearest_match(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``--rich-markdown note.md`` hands ``Path(".")`` down as the base.
+
+    Its ``parts`` is empty, so an unresolved base would make "distance from the
+    article" mean "absolute depth of the candidate" and upload a file from an
+    unrelated directory.
+    """
+    vault = tmp_path / "vault"
+    article_dir = vault / "notes"
+    near = _touch(article_dir / "sub" / "shot.png")
+    _touch(vault / "a" / "shot.png")
+    monkeypatch.chdir(article_dir)
+
+    scan = scan_media("![[shot.png]]\n", base_dir=Path("note.md").parent, vault_dir=vault)
+
+    assert scan.files[0].path == str(near.resolve())
 
 
 def test_caption_comes_from_the_title_and_falls_back_to_alt(tmp_path: Path) -> None:
@@ -280,6 +576,43 @@ def test_override_resolves_a_file_outside_the_article_directory(tmp_path: Path) 
 
     assert scan.files[0].path == str(outside.resolve())
     assert scan.markdown == "![](tg://photo?id=real)\n"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "img/my%20shot.png",  # exactly as written in the article
+        "img/my shot.png",  # its URL-decoded form
+        "my shot.png",  # the bare file name, which is what a human types
+    ],
+)
+def test_override_is_keyed_by_any_of_the_three_forms(tmp_path: Path, key: str) -> None:
+    """``--rich-file`` accepts the reference as written, decoded, or by name —
+    a percent-encoded target makes all three differ."""
+    outside = _touch(tmp_path / "outside" / "real.png")
+
+    scan = scan_media(
+        "![](img/my%20shot.png)\n", base_dir=tmp_path, overrides={key: outside}
+    )
+
+    assert scan.files[0].path == str(outside.resolve())
+    assert scan.markdown == "![](tg://photo?id=real)\n"
+
+
+def test_an_embed_carrying_a_partial_path_requires_those_directories(
+    tmp_path: Path,
+) -> None:
+    """``![[notes/shot.png]]`` must not match a ``shot.png`` sitting elsewhere,
+    even when that one is nearer the article."""
+    vault = tmp_path / "vault"
+    article_dir = vault / "article"
+    article_dir.mkdir(parents=True)
+    _touch(article_dir / "shot.png")
+    deep = _touch(vault / "far" / "notes" / "shot.png")
+
+    scan = scan_media("![[notes/shot.png]]\n", base_dir=article_dir, vault_dir=vault)
+
+    assert scan.files[0].path == str(deep.resolve())
 
 
 def test_override_matching_nothing_is_an_error(tmp_path: Path) -> None:
@@ -492,7 +825,43 @@ async def test_missing_rich_file_is_rejected_before_the_operation_row(
     assert store.find_by_idempotency_key(key) is None
 
 
-@pytest.mark.parametrize("bad_id", ["shot.png", "фото", "a b", ""])
+async def test_unreadable_rich_file_is_rejected_before_the_operation_row(
+    tmp_path: Path, store: OperationStore
+) -> None:
+    """Existing but unreadable: the upload would fail after the article's ids
+    are already written, so it is caught with the rest of the pre-checks."""
+    path = _touch(tmp_path / "locked.png")
+    path.chmod(0o000)
+    if os.access(path, os.R_OK):  # pragma: no cover - root ignores the mode bits
+        pytest.skip("running as root: file modes do not restrict reads")
+    try:
+        with pytest.raises(ValueError, match="is not readable"):
+            await send_message(
+                backend=RecordingBackend(),
+                store=store,
+                request=SendMessageRequest(
+                    telegram_chat_id=-100,
+                    text="",
+                    rich_markdown="# T\n",
+                    rich_files=(
+                        RichFile(id="l", path=str(path), caption="", kind="photo"),
+                    ),
+                    operation_id="rich-files-unreadable",
+                ),
+            )
+    finally:
+        path.chmod(0o600)
+    key = idempotency.message_send_key(
+        telegram_chat_id=-100, telegram_topic_id=None, operation_id="rich-files-unreadable"
+    )
+    assert store.find_by_idempotency_key(key) is None
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["shot.png", "фото", "a b", "", "shot\n"],
+    ids=["dot", "cyrillic", "space", "empty", "trailing-newline"],
+)
 async def test_a_file_id_the_server_would_reject_is_rejected_here(
     tmp_path: Path, store: OperationStore, bad_id: str
 ) -> None:
