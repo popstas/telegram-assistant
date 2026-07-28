@@ -5,6 +5,7 @@
 
 ### Documentation
 
+- Implementation plan for members list
 - Design spec for members list command
 
 ### Testing
