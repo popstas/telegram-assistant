@@ -532,6 +532,14 @@ class TelethonMessageBackend:
                     result = await self._client(
                         functions.messages.UploadMediaRequest(peer=peer, media=media)
                     )
+                    _log.info(
+                        "rich media uploaded",
+                        path=rich_file.path,
+                        kind=rich_file.kind,
+                        file_id=rich_file.id,
+                        size_bytes=source.stat().st_size if source.exists() else None,
+                        converted=is_gif,
+                    )
                 except Exception as exc:
                     raise _translate_rich_send_error(exc, chat_id=chat_id) from exc
             finally:

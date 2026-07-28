@@ -2084,3 +2084,41 @@ async def test_audio_gets_no_thumbnail(tmp_path: Any, monkeypatch: Any) -> None:
 
     assert calls == []
     assert client.upload_media[0].media.thumb is None
+
+
+@pytest.mark.asyncio
+async def test_each_rich_media_upload_is_logged(
+    tmp_path: Any, monkeypatch: Any, _restore_logging: Any
+) -> None:
+    """Uploading 34 files used to write nothing to the log at all, even at
+    DEBUG, so a broken article could not be diagnosed after the fact.
+
+    ``get_logger`` is structlog-backed (``PrintLoggerFactory``), which writes
+    straight to its configured stream rather than through the stdlib
+    ``logging`` module — so ``caplog`` never sees it, hence the stream-capture
+    pattern from ``test_a_failed_probe_is_logged_with_the_file`` above.
+    """
+    from telegram_assistant.messages import media_probe
+    from telegram_assistant.messages.media_probe import MediaProbe
+
+    _fake_probe(
+        monkeypatch,
+        MediaProbe(duration=73.681, width=854, height=480, has_video=True, has_audio=True),
+    )
+    monkeypatch.setattr(media_probe, "extract_thumbnail", lambda path, *, duration: None)
+    photo = _rich_file(tmp_path, "shot.png", "shot", "photo")
+    video = _rich_file(tmp_path, "clip.mp4", "clip", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    buf = io.StringIO()
+    configure_logging(level="INFO", stream=buf, force=True)
+
+    await backend.send_message(
+        chat_id=1, text="", rich_markdown=MEDIA_MD, rich_files=(photo, video)
+    )
+
+    lines = [json.loads(line) for line in buf.getvalue().strip().splitlines() if line.strip()]
+    uploaded = [r for r in lines if r.get("event") == "rich media uploaded"]
+    assert any("shot.png" in r.get("path", "") for r in uploaded), lines
+    assert any("clip.mp4" in r.get("path", "") for r in uploaded), lines

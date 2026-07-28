@@ -5,6 +5,7 @@
 
 ### Features
 
+- rich-markdown: Reject a GIF up front when ffmpeg is missing
 - rich-markdown: Upload an animated GIF as a converted mp4
 - rich-markdown: Attach a generated thumbnail to rich-message videos
 - rich-markdown: Fill video and audio attributes from the probe
