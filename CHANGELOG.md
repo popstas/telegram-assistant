@@ -5,6 +5,7 @@
 
 ### Documentation
 
+- access: Implementation plan for skipping unresolvable chat rules
 - access: Spec for skipping unresolvable chat rules with a warning
 
 ## v0.10.0 - 2026-07-28
