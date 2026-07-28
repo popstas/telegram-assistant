@@ -17,7 +17,7 @@ All runtime state — `config.yml`, Telethon session, SQLite DB, bearer token �
 ## Common commands
 
 - Run the API: `uvicorn telegram_assistant.http_api.app:create_app --factory --port 8085`
-- Run the CLI: `telegram-assistant <resource> <action> [options]` (e.g. `health`, `auth`, `groups create`, `topics bulk-create`, `members bulk-add`, `messages send`, `messages forward`, `notifications mute`, `folders inspect`, `operations status`)
+- Run the CLI: `telegram-assistant <resource> <action> [options]` (e.g. `health`, `auth`, `groups create`, `topics bulk-create`, `members bulk-add`, `members list`, `messages send`, `messages forward`, `notifications mute`, `folders inspect`, `operations status`)
 - Manual MCP smoke: enable `mcp:` in `data/config.yml`, run the API, then use `npx @modelcontextprotocol/inspector` against `http://localhost:8085/mcp` (requires Node.js/npm; see `docs/mcp-inspector-e2e.md`)
 - Tests: `pytest` (asyncio mode auto). Single test: `pytest tests/test_groups.py::test_name` or filter with `-k pattern`
 - Lint: `ruff check src tests` (line-length 100, py312, ignores E501)
@@ -48,6 +48,8 @@ Each domain area (`groups/`, `topics/`, `members/`, `messages/`, `folders/`, `no
 
 - `service.py` — pure domain logic; defines a `Backend` protocol it depends on.
 - `telethon_backend.py` — production Telethon adapter implementing that protocol.
+
+`members/` splits its one **read** op out of the bulk queue logic: `listing.py` holds `list_members` (`Participant`, `MemberListResult`, `MemberListBackend`) — READ-gated, no operation row, no `--dry-run` — and `TelethonMemberListBackend` sits at the bottom of `members/telethon_backend.py`. Supergroups walk `channels.GetParticipants` with `ChannelParticipantsSearch` (**not** `Recent`, which caps near 200 and does not page — Telethon's own `iter_participants` uses Search for the same reason), 200 per page, and `truncated` reports a walk that stopped at `limit` or at Telegram's ~10k enumeration ceiling; `admins`/`bots` use their dedicated filters and therefore re-apply `--query` locally. Legacy basic groups have neither RPC, so they fall back to one `messages.GetFullChat` whose roster is filtered locally; a peer that is neither (a user, self) raises `ValueError` → 400 / exit 2 rather than an opaque RPC error. `--user` answers membership with a single `channels.GetParticipant` — `UserNotParticipantError` is a normal negative (`None`, not an error), and `left`/`banned` are **not** members (`NON_MEMBER_ROLES`): Telegram answers for them too, and counting them as present would defeat the check the flag exists for, so the role stays in the payload to tell "never joined" from "left". There is deliberately no folder-wide sweep: the caller loops `--user` over the chats, which keeps one RPC per chat.
 
 `messages/` is split more narrowly: `attachments.py` holds surface-level attachment validation, `service.py` handles send/recent/mass send (including rich-message send), `reactions.py`, `forwarding.py`, `editing.py`, `pinning.py`, `media_download.py` (download media *from* an existing message — distinct from `downloads.py`, which fetches a URL to a temp file *for* sending), `pacing.py` (`Pacer`, `PacedFloodWaitError`, `pin_pacing_key`, `retry_after_details`), and `search.py` hold their small domain operations, and `messages/telethon_backend.py` contains the send/read/reaction/forward/edit/pin/download/search Telethon adapters.
 

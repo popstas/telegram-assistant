@@ -5,6 +5,7 @@
 
 ### Features
 
+- mcp: Add telegram_members_list tool
 - http: Add GET /telegram/members/list
 - cli: Add members list command
 - members: Add Telethon participants-list adapter
