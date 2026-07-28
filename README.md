@@ -65,6 +65,10 @@ dimensions, generate a video preview frame, and convert an animated `.gif` into 
 Telegram needs. Without them videos still send but may render as an empty rectangle in the
 clients, and a `.gif` is rejected with a message telling you to install ffmpeg or convert
 the file yourself. Install with `apt install ffmpeg` (Debian/Ubuntu) or `brew install ffmpeg`.
+The Docker image does **not** include `ffmpeg`/`ffprobe` — it is built to run the API only,
+which never touches local media (that path is CLI-only) — so running `telegram-assistant
+messages send --rich-markdown` with local media *inside the container* hits the no-ffmpeg
+degradation above: a `.gif` is hard-rejected and videos may render as an empty rectangle.
 
 ## Commands
 
