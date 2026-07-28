@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import enum
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from telegram_assistant.config.models import AccessConfig
+from telegram_assistant.entities.service import EntityError
 from telegram_assistant.observability.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids import cycles
@@ -114,6 +116,23 @@ def _normalise_memberships(items: Iterable[Membership | str]) -> set[Membership]
             folder_id, folder_name = item
             result.add((folder_id, folder_name))
     return result
+
+
+@dataclass(frozen=True)
+class UnresolvedAccessRef:
+    """A ``chat:`` rule reference that could not be resolved at index build.
+
+    Recorded and logged rather than raised: one stale ref must not take the
+    whole policy — and therefore every gated command — down with it. Skipping a
+    ref only ever *narrows* rights under deny-by-default, so the failure mode is
+    a loud 403 on a chat that should have been granted, never a silent grant.
+    """
+
+    ref: str
+    error: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"ref": self.ref, "error": self.error}
 
 
 class AccessDenied(RuntimeError):
@@ -207,11 +226,24 @@ class Authorizer:
         self._folder_edit_only: dict[str, bool] = {}
         self._folder_id_edit_only: dict[int, bool] = {}
         self._memberships: dict[int, set[Membership]] | None = None
+        # `chat:` rule refs skipped during the index build (stale/ambiguous).
+        self._unresolved_refs: tuple[UnresolvedAccessRef, ...] = ()
 
     @property
     def enabled(self) -> bool:
         """Whether a policy is active (``False`` ⇒ allow-all no-op)."""
         return self._config is not None
+
+    @property
+    def unresolved_refs(self) -> tuple[UnresolvedAccessRef, ...]:
+        """``chat:`` rule refs skipped during the last index build.
+
+        Empty until the index is built — that happens lazily, on the first
+        ``require`` / ``allows`` / ``describe`` call. Surfaced by ``access
+        check`` so a stale rule is named rather than left for the operator to
+        find in the logs.
+        """
+        return self._unresolved_refs
 
     async def _ensure_index(self) -> None:
         if self._built or self._config is None:
@@ -228,6 +260,7 @@ class Authorizer:
         chat_edit_only: dict[int, bool] = {}
         folder_edit_only: dict[str, bool] = {}
         folder_id_edit_only: dict[int, bool] = {}
+        unresolved: list[UnresolvedAccessRef] = []
 
         def _merge_only(existing: bool | None, new: bool) -> bool:
             # Restrictive (True) wins on conflict within a level.
@@ -275,7 +308,27 @@ class Authorizer:
                         "chat-targeted access rules"
                     )
                 for ref in refs:
-                    resolved = await self._resolver.resolve(ref)
+                    try:
+                        resolved = await self._resolver.resolve(ref)
+                    except EntityError as exc:
+                        # A stale or ambiguous ref must not abort the index
+                        # build — that would take the whole policy, and with it
+                        # every gated command, down over one dead config line.
+                        # Skipping narrows rights (deny-by-default), so the
+                        # worst case is a loud 403. Deliberately narrow: a
+                        # translated FloodWaitError is *not* an EntityError and
+                        # keeps propagating, so the queue can pause-and-retry
+                        # instead of denying a chat during a throttle.
+                        _log.warning(
+                            "access_rule_ref_unresolved",
+                            ref=str(ref),
+                            error=str(exc),
+                            permissions=sorted(rule.effective_permissions),
+                        )
+                        unresolved.append(
+                            UnresolvedAccessRef(ref=str(ref), error=str(exc))
+                        )
+                        continue
                     chat_caps.setdefault(resolved.chat_id, set()).update(levels)
                     if delete_override is not None:
                         chat_delete_only[resolved.chat_id] = _merge_only(
@@ -297,6 +350,7 @@ class Authorizer:
         self._chat_edit_only = chat_edit_only
         self._folder_edit_only = folder_edit_only
         self._folder_id_edit_only = folder_id_edit_only
+        self._unresolved_refs = tuple(unresolved)
         self._built = True
 
     async def _folder_memberships(self, chat_id: int) -> set[Membership]:
@@ -718,4 +772,5 @@ __all__ = [
     "AccessDenied",
     "AccessLevel",
     "Authorizer",
+    "UnresolvedAccessRef",
 ]

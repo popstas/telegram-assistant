@@ -12,9 +12,14 @@ import json
 
 import pytest
 
-from telegram_assistant.access import AccessDenied, AccessLevel, Authorizer
+from telegram_assistant.access import (
+    AccessDenied,
+    AccessLevel,
+    Authorizer,
+    UnresolvedAccessRef,
+)
 from telegram_assistant.config.models import AccessConfig, AccessRule
-from telegram_assistant.entities import ResolvedEntity
+from telegram_assistant.entities import EntityNotFoundError, ResolvedEntity
 from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.observability import configure_logging
 
@@ -904,3 +909,131 @@ async def test_folder_id_rule_denies_caller_supplied_name_memberships() -> None:
         await auth.require(10, AccessLevel.WRITE, folder_memberships=["Clients"])
     # An explicit (id, name) membership pair does match.
     await auth.require(10, AccessLevel.WRITE, folder_memberships=[(1, "Clients")])
+
+
+# ---------------------------------------------------------------------------
+# Unresolvable `chat:` rules are skipped, not fatal
+# ---------------------------------------------------------------------------
+
+
+class PartialResolver:
+    """Resolver whose lookup table may be missing refs.
+
+    A miss raises :class:`EntityNotFoundError` — exactly what the Telethon
+    resolver does for a stale ``chat:`` rule pointing at a chat that no longer
+    exists (or was never reachable from this account).
+    """
+
+    def __init__(self, mapping: dict[object, int]) -> None:
+        self._mapping = mapping
+        self.calls: list[object] = []
+
+    async def resolve(self, ref: object) -> ResolvedEntity:
+        self.calls.append(ref)
+        if ref not in self._mapping:
+            raise EntityNotFoundError(f"no entity found for reference {ref!r}")
+        return ResolvedEntity(
+            chat_id=self._mapping[ref], title=str(ref), kind="channel"
+        )
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_chat_rule_does_not_break_the_policy() -> None:
+    # One dead rule must not take the whole policy — and therefore every gated
+    # command — down with it.
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(chat="ghost", permission="write"),
+                AccessRule(chat="@live", permission="write"),
+            ]
+        ),
+        resolver=PartialResolver({"@live": 42}),
+    )
+    # The live rule still grants...
+    await auth.require(42, AccessLevel.WRITE)
+    # ...and the dead one grants nothing rather than exploding.
+    caps, matched = await auth.describe(999)
+    assert caps == frozenset()
+    assert matched is None
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_ref_does_not_cost_its_siblings_their_grant() -> None:
+    # A rule may carry several refs; a dead one must be skipped per-ref, not
+    # take the whole rule (and its live siblings) with it.
+    auth = Authorizer(
+        AccessConfig(
+            rules=[AccessRule(chats=["@good", "ghost"], permission="write")]
+        ),
+        resolver=PartialResolver({"@good": 7}),
+    )
+    await auth.require(7, AccessLevel.WRITE)
+    assert [u.ref for u in auth.unresolved_refs] == ["ghost"]
+    assert isinstance(auth.unresolved_refs[0], UnresolvedAccessRef)
+    assert "no entity found" in auth.unresolved_refs[0].error
+    assert auth.unresolved_refs[0].to_dict() == {
+        "ref": "ghost",
+        "error": auth.unresolved_refs[0].error,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_chat_rule_is_skipped_too() -> None:
+    from telegram_assistant.entities import AmbiguousEntityError
+
+    class AmbiguousResolver:
+        async def resolve(self, ref: object) -> ResolvedEntity:
+            raise AmbiguousEntityError(ref=str(ref), matches=[1, 2])
+
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(chat="Team", permission="write")]),
+        resolver=AmbiguousResolver(),
+    )
+    caps, matched = await auth.describe(1)
+    assert caps == frozenset()
+    assert matched is None
+    assert [u.ref for u in auth.unresolved_refs] == ["Team"]
+
+
+@pytest.mark.asyncio
+async def test_flood_wait_during_rule_resolution_still_propagates() -> None:
+    # The narrow `except EntityError` exists to protect this: swallowing a
+    # throttle would silently deny a chat instead of letting the queue
+    # pause-and-retry.
+    from telegram_assistant.worker.queue import FloodWaitError
+
+    class FloodingResolver:
+        async def resolve(self, ref: object) -> ResolvedEntity:
+            raise FloodWaitError(30)
+
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(chat="@x", permission="write")]),
+        resolver=FloodingResolver(),
+    )
+    with pytest.raises(FloodWaitError):
+        await auth.require(1, AccessLevel.READ)
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_rule_emits_structured_warning(_restore_logging) -> None:
+    buf = io.StringIO()
+    configure_logging(level="DEBUG", stream=buf, force=True)
+    auth = Authorizer(
+        AccessConfig(
+            rules=[AccessRule(chat="ghost", permissions=["read", "write"])]
+        ),
+        resolver=PartialResolver({}),
+    )
+    await auth.describe(1)
+    skipped = [
+        r
+        for r in _capture_access_log(buf)
+        if r.get("event") == "access_rule_ref_unresolved"
+    ]
+    assert skipped, "expected an access_rule_ref_unresolved log line"
+    record = skipped[-1]
+    assert record["ref"] == "ghost"
+    assert "no entity found" in record["error"]
+    assert record["permissions"] == ["read", "write"]
+    assert record["level"] == "warning"
