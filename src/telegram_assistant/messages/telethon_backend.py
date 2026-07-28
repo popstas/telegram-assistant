@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from telegram_assistant.messages import media_probe
@@ -213,7 +214,12 @@ def _translate_rich_send_error(exc: BaseException, *, chat_id: int) -> BaseExcep
 
 
 def _document_attributes(
-    path: str, kind: str, *, probe: media_probe.MediaProbe | None
+    path: str,
+    kind: str,
+    *,
+    probe: media_probe.MediaProbe | None,
+    animated: bool = False,
+    file_name: str | None = None,
 ) -> tuple[list[Any], str]:
     """Build the ``InputMediaUploadedDocument`` attributes for one rich file.
 
@@ -230,6 +236,11 @@ def _document_attributes(
     and the thumbnail. ``None`` means the probe failed: the pre-probe behaviour
     is kept — the stub for video, ``duration=0`` for audio, which is what makes
     ``tg://audio`` resolve at all — and a warning names the file.
+
+    *animated* marks the document as an animation. It is driven by the source
+    file being a ``.gif``, not by the mime type: by the time this runs the
+    upload is already the converted mp4. *file_name* overrides the name derived
+    from that temp file so the article shows the author's own name.
     """
     from telethon import utils
     from telethon.tl import types
@@ -277,14 +288,17 @@ def _document_attributes(
                 isinstance(attr, types.DocumentAttributeAudio) for attr in attributes
             ):
                 attributes.append(types.DocumentAttributeAudio(duration=0))
-    if (
-        kind == "video"
-        and mime_type == "image/gif"
-        and not any(
-            isinstance(attr, types.DocumentAttributeAnimated) for attr in attributes
-        )
+    if animated and not any(
+        isinstance(attr, types.DocumentAttributeAnimated) for attr in attributes
     ):
         attributes.append(types.DocumentAttributeAnimated())
+    if file_name is not None:
+        attributes = [
+            attr
+            for attr in attributes
+            if not isinstance(attr, types.DocumentAttributeFilename)
+        ]
+        attributes.append(types.DocumentAttributeFilename(file_name=file_name))
     return attributes, mime_type
 
 
@@ -475,36 +489,54 @@ class TelethonMessageBackend:
 
         uploaded: list[Any] = []
         for rich_file in rich_files:
+            source = Path(rich_file.path)
+            is_gif = rich_file.kind == "video" and source.suffix.lower() == ".gif"
+            temp_path: Path | None = None
             try:
-                handle = await self._client.upload_file(rich_file.path)
-                if rich_file.kind == "photo":
-                    media: Any = types.InputMediaUploadedPhoto(file=handle)
-                else:
-                    probe = await asyncio.to_thread(
-                        media_probe.probe_media, rich_file.path
+                if is_gif:
+                    # Outside the RPC try/except below: a conversion failure is
+                    # bad input, not a Telegram rights or FLOOD_WAIT problem.
+                    temp_path = await asyncio.to_thread(
+                        media_probe.convert_gif_to_mp4, source
                     )
-                    attributes, mime_type = _document_attributes(
-                        rich_file.path, rich_file.kind, probe=probe
-                    )
-                    thumb = None
-                    if rich_file.kind == "video":
-                        thumb = await self._upload_video_thumbnail(
-                            path=rich_file.path,
-                            duration=probe.duration if probe is not None else 0.0,
+                upload_path = str(temp_path) if temp_path is not None else rich_file.path
+                try:
+                    handle = await self._client.upload_file(upload_path)
+                    if rich_file.kind == "photo":
+                        media: Any = types.InputMediaUploadedPhoto(file=handle)
+                    else:
+                        probe = await asyncio.to_thread(
+                            media_probe.probe_media, upload_path
                         )
-                    media = types.InputMediaUploadedDocument(
-                        file=handle,
-                        mime_type=mime_type,
-                        attributes=attributes,
-                        thumb=thumb,
+                        attributes, mime_type = _document_attributes(
+                            upload_path,
+                            rich_file.kind,
+                            probe=probe,
+                            animated=is_gif,
+                            file_name=f"{source.stem}.mp4" if is_gif else None,
+                        )
+                        thumb = None
+                        if rich_file.kind == "video":
+                            thumb = await self._upload_video_thumbnail(
+                                path=upload_path,
+                                duration=probe.duration if probe is not None else 0.0,
+                            )
+                        media = types.InputMediaUploadedDocument(
+                            file=handle,
+                            mime_type=mime_type,
+                            attributes=attributes,
+                            thumb=thumb,
+                        )
+                    # uploadMedia binds the upload to the destination peer, which
+                    # is also where a media-rights rejection surfaces first.
+                    result = await self._client(
+                        functions.messages.UploadMediaRequest(peer=peer, media=media)
                     )
-                # uploadMedia binds the upload to the destination peer, which is
-                # also where a media-rights rejection surfaces first.
-                result = await self._client(
-                    functions.messages.UploadMediaRequest(peer=peer, media=media)
-                )
-            except Exception as exc:
-                raise _translate_rich_send_error(exc, chat_id=chat_id) from exc
+                except Exception as exc:
+                    raise _translate_rich_send_error(exc, chat_id=chat_id) from exc
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
             if rich_file.kind == "photo":
                 uploaded.append(
                     photo_type(

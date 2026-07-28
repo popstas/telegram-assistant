@@ -5,6 +5,7 @@
 
 ### Features
 
+- rich-markdown: Attach a generated thumbnail to rich-message videos
 - rich-markdown: Fill video and audio attributes from the probe
 - rich-markdown: Add thumbnail extraction and GIF-to-mp4 conversion
 - rich-markdown: Read media metadata with ffprobe

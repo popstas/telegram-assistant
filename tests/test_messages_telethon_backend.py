@@ -1031,13 +1031,25 @@ async def test_too_long_caption_is_not_reported_as_a_rights_problem() -> None:
 
 
 @pytest.mark.asyncio
-async def test_rich_send_gif_carries_the_animated_attribute(tmp_path: Any) -> None:
-    """A ``.gif`` is referenced as ``tg://video`` but its mime is ``image/gif``,
-    so Telethon infers no ``DocumentAttributeVideo`` — the same gap that made an
-    unmarked ``.mp3`` unreachable through ``tg://audio``. Mark it as an
-    animation rather than uploading a bare document."""
-    from telethon.tl.types import DocumentAttributeAnimated
+async def test_a_gif_is_uploaded_as_a_converted_mp4(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """An ``image/gif`` upload does not attach to an article at all. Telegram
+    stores "GIFs" as silent mp4 documents marked ``DocumentAttributeAnimated``,
+    so the file is converted before it is uploaded."""
+    from telethon.tl.types import DocumentAttributeAnimated, DocumentAttributeFilename
 
+    from telegram_assistant.messages import media_probe
+    from telegram_assistant.messages.media_probe import MediaProbe
+
+    converted = tmp_path / "converted.mp4"
+    converted.write_bytes(b"\x00mp4")
+    monkeypatch.setattr(media_probe, "convert_gif_to_mp4", lambda path: converted)
+    _fake_probe(
+        monkeypatch,
+        MediaProbe(duration=3.5, width=480, height=270, has_video=True, has_audio=False),
+    )
+    monkeypatch.setattr(media_probe, "extract_thumbnail", lambda path, *, duration: None)
     gif = _rich_file(tmp_path, "loop.gif", "loop", "video")
     client = _UploadingClient()
     backend = TelethonMessageBackend(client)
@@ -1050,8 +1062,99 @@ async def test_rich_send_gif_carries_the_animated_attribute(tmp_path: Any) -> No
     )
 
     media = client.upload_media[0].media
-    assert media.mime_type == "image/gif"
-    assert any(isinstance(attr, DocumentAttributeAnimated) for attr in media.attributes)
+    assert media.mime_type == "video/mp4"
+    assert any(isinstance(a, DocumentAttributeAnimated) for a in media.attributes)
+    names = [a.file_name for a in media.attributes if isinstance(a, DocumentAttributeFilename)]
+    # The temp file's name must not leak: the article shows the author's name.
+    assert names == ["loop.mp4"]
+    assert client.uploads == [str(converted)]
+
+
+@pytest.mark.asyncio
+async def test_the_converted_gif_temp_file_is_removed(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    from telegram_assistant.messages import media_probe
+    from telegram_assistant.messages.media_probe import MediaProbe
+
+    converted = tmp_path / "converted.mp4"
+    converted.write_bytes(b"\x00mp4")
+    monkeypatch.setattr(media_probe, "convert_gif_to_mp4", lambda path: converted)
+    _fake_probe(
+        monkeypatch,
+        MediaProbe(duration=3.5, width=480, height=270, has_video=True, has_audio=False),
+    )
+    monkeypatch.setattr(media_probe, "extract_thumbnail", lambda path, *, duration: None)
+    gif = _rich_file(tmp_path, "loop.gif", "loop", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1,
+        text="",
+        rich_markdown="![](tg://video?id=loop)\n",
+        rich_files=(gif,),
+    )
+
+    assert not converted.exists()
+
+
+@pytest.mark.asyncio
+async def test_the_converted_gif_temp_file_is_removed_after_a_failed_send(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A failed upload must not leave the temp mp4 behind."""
+    from telegram_assistant.messages import media_probe
+    from telegram_assistant.messages.media_probe import MediaProbe
+
+    converted = tmp_path / "converted.mp4"
+    converted.write_bytes(b"\x00mp4")
+    monkeypatch.setattr(media_probe, "convert_gif_to_mp4", lambda path: converted)
+    _fake_probe(
+        monkeypatch,
+        MediaProbe(duration=3.5, width=480, height=270, has_video=True, has_audio=False),
+    )
+    monkeypatch.setattr(media_probe, "extract_thumbnail", lambda path, *, duration: None)
+    gif = _rich_file(tmp_path, "loop.gif", "loop", "video")
+    client = _UploadingClient(upload_error=RuntimeError("boom"))
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(Exception):  # noqa: B017 - any translated error is fine here
+        await backend.send_message(
+            chat_id=1,
+            text="",
+            rich_markdown="![](tg://video?id=loop)\n",
+            rich_files=(gif,),
+        )
+
+    assert not converted.exists()
+
+
+@pytest.mark.asyncio
+async def test_a_failed_gif_conversion_is_a_value_error(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """``MediaConversionError`` reaches the surfaces as a ``ValueError`` so the
+    operator reads the ffmpeg reason on exit 2, not an empty 500."""
+    from telegram_assistant.messages import media_probe
+
+    def boom(path: Any) -> Any:
+        raise media_probe.MediaConversionError("ffmpeg: moov atom not found")
+
+    monkeypatch.setattr(media_probe, "convert_gif_to_mp4", boom)
+    gif = _rich_file(tmp_path, "loop.gif", "loop", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    with pytest.raises(ValueError, match="moov atom"):
+        await backend.send_message(
+            chat_id=1,
+            text="",
+            rich_markdown="![](tg://video?id=loop)\n",
+            rich_files=(gif,),
+        )
+
+    assert client.upload_media == []
 
 
 @pytest.mark.asyncio
