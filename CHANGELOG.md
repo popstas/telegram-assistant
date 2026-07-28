@@ -1,6 +1,12 @@
 # Changelog
 
 
+## Unreleased
+
+### Documentation
+
+- access: Spec for skipping unresolvable chat rules with a warning
+
 ## v0.10.0 - 2026-07-28
 
 ### Features
