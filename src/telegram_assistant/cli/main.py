@@ -3584,19 +3584,18 @@ def messages_send(
     ),
 ) -> None:
     """Send a message or service command (targeted or folder-wide mass mode)."""
+    from telegram_assistant.cli.rich_send import (
+        resolve_rich_send_input,
+        rich_dry_run_markers,
+    )
     from telegram_assistant.folders import (
         FolderError,
         resolve_chat_in_folder,
         resolve_folder,
     )
     from telegram_assistant.messages import (
-        MAX_RICH_MARKDOWN_CHARS,
-        MEDIA_GROUP_MODES,
         AttachmentError,
         MassSendRequest,
-        MediaGroupChoice,
-        MediaGroupError,
-        MediaResolutionError,
         MessageSendFailed,
         MessageSendNeedsReview,
         MessageSendPending,
@@ -3607,15 +3606,12 @@ def messages_send(
         make_url_downloader,
         mass_send_message,
         media_grouping_default,
-        normalize_rich_markdown,
         parse_delay,
         parse_schedule_at,
         redact_message_text,
         resolve_schedule_at,
-        scan_media,
         send_message,
         spaced_paragraphs_default,
-        strip_yaml_frontmatter,
         validate_file_urls,
         validate_local_files,
     )
@@ -3654,152 +3650,22 @@ def messages_send(
     has_attachments = bool(files or file_urls)
     has_schedule_input = schedule_at is not None or delay is not None
 
-    # A rich message carries its whole body in the markdown source: a caption or
-    # attachment alongside it would be silently dropped by the server, and mass
-    # mode has no single-article semantics (same rules as MessageSendBody._shape).
-    # Read and bound the file here so bad input costs no backend connection, in
+    # Everything --rich-markdown needs — flag exclusivity, the file read, the
+    # --rich-file/--media-group parsing, local-media resolution and the length
+    # bound — lives in cli.rich_send; ``None`` means this is a plain send. It
+    # runs before any backend is opened, so bad input costs no connection in
     # dry-run and real runs alike.
-    rich_markdown_text: str | None = None
-    rich_files: tuple[object, ...] = ()
-    rich_file_args = list(rich_file or ())
-    media_group_args = list(media_group or ())
-    media_group_choices: tuple[MediaGroupChoice, ...] = ()
-    if rich_markdown is None and (rich_file_args or vault_dir is not None):
-        # Both only steer how local media in the article is resolved; accepting
-        # them for a plain send would silently do nothing.
-        typer.echo(
-            "--rich-file/--vault-dir are only meaningful with --rich-markdown",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    if rich_markdown is None and media_group_args:
-        typer.echo(
-            "--media-group is only meaningful with --rich-markdown",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    if spaced_paragraphs is not None and rich_markdown is None:
-        # The knob only affects how markdown is rewritten before it is parsed
-        # server-side; accepting it for a plain send would silently do nothing.
-        typer.echo(
-            "--spaced-paragraphs/--no-spaced-paragraphs is only meaningful with "
-            "--rich-markdown",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    if line_breaks is not None and rich_markdown is None:
-        typer.echo(
-            "--line-breaks/--no-line-breaks is only meaningful with --rich-markdown",
-            err=True,
-        )
-        raise typer.Exit(code=2)
-    if rich_markdown is not None:
-        if (text and text.strip()) or has_attachments:
-            typer.echo(
-                "--rich-markdown cannot be combined with --text, --file, or --file-url",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        if is_mass:
-            typer.echo(
-                "--rich-markdown is only supported for targeted sends, not mass mode",
-                err=True,
-            )
-            raise typer.Exit(code=2)
-        try:
-            # ``utf-8-sig`` drops a leading BOM: a BOM-prefixed file would
-            # otherwise send "﻿# Title" and silently lose its first
-            # heading. Invalid UTF-8 still raises UnicodeDecodeError.
-            rich_markdown_text = rich_markdown.read_text(encoding="utf-8-sig")
-        except UnicodeDecodeError as exc:
-            typer.echo(
-                f"--rich-markdown file is not valid UTF-8: {rich_markdown}",
-                err=True,
-            )
-            raise typer.Exit(code=2) from exc
-        except OSError as exc:
-            typer.echo(f"--rich-markdown file cannot be read: {exc}", err=True)
-            raise typer.Exit(code=2) from exc
-        # An Obsidian note opens with YAML frontmatter, which this dialect has
-        # no notion of: the scanner reads it as a divider plus a setext heading
-        # and the article would start with a rule and a big "tags: [...]"
-        # heading. Strip it here, at the same file-read boundary as the BOM —
-        # and before the empty check, so a note that is *only* frontmatter is
-        # reported as empty rather than sent as a bare heading.
-        rich_markdown_text = strip_yaml_frontmatter(rich_markdown_text)
-        if not rich_markdown_text.strip():
-            typer.echo(f"--rich-markdown file is empty: {rich_markdown}", err=True)
-            raise typer.Exit(code=2)
-        overrides: dict[str, Path] = {}
-        for entry in rich_file_args:
-            reference, sep, override_path = entry.partition("=")
-            if not sep or not reference.strip() or not override_path.strip():
-                typer.echo(
-                    f"--rich-file must be <reference>=<path> ({entry!r} given)",
-                    err=True,
-                )
-                raise typer.Exit(code=2)
-            overrides[reference.strip()] = Path(override_path.strip())
-        choices: list[MediaGroupChoice] = []
-        for entry in media_group_args:
-            raw_index, sep, raw_mode = entry.partition("=")
-            mode = raw_mode.strip().lower()
-            # ``int`` inside the validation, not after it: ``"²".isdigit()`` is
-            # true but ``int("²")`` raises, which would surface as the internal
-            # exit 1 instead of this argument error.
-            index: int | None = None
-            if sep and mode in MEDIA_GROUP_MODES:
-                try:
-                    index = int(raw_index.strip())
-                except ValueError:
-                    index = None
-            if index is None or index < 0:
-                typer.echo(
-                    "--media-group must be <index>=<"
-                    + "|".join(MEDIA_GROUP_MODES)
-                    + f"> ({entry!r} given)",
-                    err=True,
-                )
-                raise typer.Exit(code=2)
-            choices.append(MediaGroupChoice(index=index, mode=mode))
-        media_group_choices = tuple(choices)
-        # Local media is CLI-only (the CLI is the trusted, local surface): the
-        # article's own directory is the base, so a note can be sent as written.
-        # This runs before the length check so the bound applies to the rewritten
-        # body — the tg:// references replace the original paths.
-        try:
-            media_scan = scan_media(
-                rich_markdown_text,
-                base_dir=rich_markdown.parent,
-                vault_dir=vault_dir,
-                overrides=overrides,
-            )
-        except MediaResolutionError as exc:
-            typer.echo(str(exc), err=True)
-            raise typer.Exit(code=2) from exc
-        rich_markdown_text = media_scan.markdown
-        rich_files = media_scan.files
-        if media_group_choices:
-            # Check the indexes against the article's actual media runs here,
-            # so a typo costs no backend connection. The modes do not matter
-            # for that check, hence the cheapest possible pass.
-            try:
-                normalize_rich_markdown(
-                    rich_markdown_text,
-                    spaced_paragraphs=False,
-                    grouping="none",
-                    media_groups=media_group_choices,
-                )
-            except MediaGroupError as exc:
-                typer.echo(str(exc), err=True)
-                raise typer.Exit(code=2) from exc
-        if len(rich_markdown_text) > MAX_RICH_MARKDOWN_CHARS:
-            typer.echo(
-                f"--rich-markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
-                f"({len(rich_markdown_text)} given)",
-                err=True,
-            )
-            raise typer.Exit(code=2)
+    rich_input = resolve_rich_send_input(
+        rich_markdown=rich_markdown,
+        rich_file=rich_file,
+        media_group=media_group,
+        vault_dir=vault_dir,
+        spaced_paragraphs=spaced_paragraphs,
+        line_breaks=line_breaks,
+        text=text,
+        has_attachments=has_attachments,
+        is_mass=is_mass,
+    )
 
     # Media, scheduling, and reply threading are targeted-only; mass mode
     # iterates many chats and has no single attachment/schedule/reply semantics.
@@ -3866,11 +3732,7 @@ def messages_send(
         effective_folder_id = folder_id
 
     if dry_run:
-        if (
-            not (text and text.strip())
-            and not has_attachments
-            and rich_markdown_text is None
-        ):
+        if not (text and text.strip()) and not has_attachments and rich_input is None:
             typer.echo(
                 "messages send requires non-empty --text, --rich-markdown, or at "
                 "least one --file/--file-url attachment",
@@ -4068,20 +3930,12 @@ def messages_send(
             rch_id = info["telegram_chat_id"]
             rch_name = info.get("chat_name")
             rtopic_id = info["telegram_topic_id"]
-            is_rich = rich_markdown_text is not None
-            # Preview exactly what the real send would hand to Telegram: the
-            # domain normalises before its own length check, so the numbers
-            # reported here are post-normalization.
-            rich_normalization = (
-                normalize_rich_markdown(
-                    rich_markdown_text or "",
-                    spaced_paragraphs=effective_spaced_paragraphs,
-                    line_breaks=effective_line_breaks,
-                    grouping=effective_media_grouping,
-                    media_groups=media_group_choices,
-                )
-                if is_rich
-                else None
+            rich_report = rich_dry_run_markers(
+                rich_input,
+                rich_markdown=rich_markdown,
+                spaced_paragraphs=effective_spaced_paragraphs,
+                line_breaks=effective_line_breaks,
+                media_grouping=effective_media_grouping,
             )
             resolved_payload = {
                 "mode": "targeted",
@@ -4101,76 +3955,7 @@ def messages_send(
                 ),
                 "scheduled": resolved_schedule_at is not None,
                 "reply_to_message_id": reply_to,
-                # The article body can be up to 32k chars and is the payload of
-                # the send, not a routing decision — report a marker + length
-                # and the source path, never the markdown itself.
-                "rich_markdown": is_rich,
-                "rich_markdown_chars": (
-                    len(rich_normalization.markdown)
-                    if rich_normalization is not None
-                    else None
-                ),
-                "rich_markdown_blocks": (
-                    rich_normalization.blocks
-                    if rich_normalization is not None
-                    else None
-                ),
-                "rich_markdown_media": (
-                    rich_normalization.media
-                    if rich_normalization is not None
-                    else None
-                ),
-                "rich_markdown_file": (str(rich_markdown) if is_rich else None),
-                # Local media the real send would upload. The files are listed,
-                # never read — a dry run touches no bytes and no network.
-                "rich_files": (
-                    [
-                        {
-                            "id": rf.id,
-                            "path": rf.path,
-                            "kind": rf.kind,
-                            "caption": rf.caption,
-                        }
-                        for rf in rich_files
-                    ]
-                    if is_rich
-                    else None
-                ),
-                # ``spaced_paragraphs`` echoes the *effective* decision: the
-                # flag, else the config default. ``spaced`` is what the pass
-                # actually did (a block-limit rollback turns it False).
-                "spaced_paragraphs": (
-                    effective_spaced_paragraphs if is_rich else None
-                ),
-                "line_breaks": effective_line_breaks if is_rich else None,
-                "spaced": (
-                    rich_normalization.spaced
-                    if rich_normalization is not None
-                    else None
-                ),
-                # Every run of 2+ consecutive media, with the mode it would be
-                # sent as — this is what a caller asks the human about before
-                # re-running with --media-group.
-                "media_grouping": (
-                    effective_media_grouping if is_rich else None
-                ),
-                "rich_markdown_groups": (
-                    [
-                        {
-                            "index": group.index,
-                            "size": group.size,
-                            "mode": group.mode,
-                            "preceding_text": group.preceding_text,
-                            # The captions of the run's media, joined: what the
-                            # group will be captioned with, since Telegram shows
-                            # no caption on a grouped medium itself.
-                            "caption": group.caption,
-                        }
-                        for group in rich_normalization.groups
-                    ]
-                    if rich_normalization is not None
-                    else None
-                ),
+                **rich_report.markers,
             }
             if chat_name is not None:
                 resolved_payload["folder_name"] = resolved_folder_name
@@ -4179,25 +3964,7 @@ def messages_send(
                 if rtopic_id is not None
                 else f"chat {rch_id}"
             )
-            what = (
-                f"rich message ({len(rich_normalization.markdown)} chars)"
-                if rich_normalization is not None
-                else "message"
-            )
-            rich_warnings = list(
-                rich_normalization.warnings if rich_normalization is not None else ()
-            )
-            if (
-                rich_normalization is not None
-                and len(rich_normalization.markdown) > MAX_RICH_MARKDOWN_CHARS
-            ):
-                # The real send would raise on the post-normalization length;
-                # say so here rather than reporting a plan that cannot run.
-                rich_warnings.append(
-                    f"rich_markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
-                    f"({len(rich_normalization.markdown)} after normalization); "
-                    "the real send would fail"
-                )
+            what = rich_report.what
             payload = {
                 "status": "dry_run",
                 "dry_run": True,
@@ -4205,7 +3972,7 @@ def messages_send(
                 "would": f"send {what} to {target}",
                 "resolved": resolved_payload,
                 "planned_actions": [f"would send {what} to {target}"],
-                "warnings": rich_warnings,
+                "warnings": rich_report.warnings,
             }
         typer.echo(json.dumps(payload, sort_keys=True, default=str))
         return
@@ -4286,12 +4053,12 @@ def messages_send(
                 file_urls=file_urls,
                 schedule_at=resolved_schedule_at,
                 reply_to_message_id=reply_to,
-                rich_markdown=rich_markdown_text,
+                rich_markdown=rich_input.markdown if rich_input is not None else None,
                 spaced_paragraphs=effective_spaced_paragraphs,
                 line_breaks=effective_line_breaks,
                 media_grouping=effective_media_grouping,
-                media_groups=media_group_choices,
-                rich_files=rich_files,
+                media_groups=rich_input.choices if rich_input is not None else (),
+                rich_files=rich_input.files if rich_input is not None else (),
             )
             result_single, op = await send_message(
                 backend=message_backend,

@@ -3,6 +3,14 @@
 
 ## Unreleased
 
+### Documentation
+
+- rich-markdown: Spec for a shared ffprobe-backed media attribute path
+- access: Implementation plan for skipping unresolvable chat rules
+- access: Spec for skipping unresolvable chat rules with a warning
+
+## v0.10.0 - 2026-07-28
+
 ### Features
 
 - members: Read-only members list with single-request membership check (#19)
