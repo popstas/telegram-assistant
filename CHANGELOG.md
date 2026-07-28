@@ -5,6 +5,7 @@
 
 ### Features
 
+- rich-markdown: Add thumbnail extraction and GIF-to-mp4 conversion
 - rich-markdown: Read media metadata with ffprobe
 - access: Report skipped chat rules in access check
 

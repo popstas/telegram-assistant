@@ -13,12 +13,17 @@ imports. Two adapters live here:
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
+from telegram_assistant.messages import media_probe
 from telegram_assistant.messages.service import RecentMessage
+from telegram_assistant.observability.logging import get_logger
 from telegram_assistant.telegram_client.errors import translate_flood_wait
+
+_log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from telegram_assistant.messages.media_download import (
@@ -207,30 +212,71 @@ def _translate_rich_send_error(exc: BaseException, *, chat_id: int) -> BaseExcep
     return translate_flood_wait(exc)
 
 
-def _document_attributes(path: str, kind: str) -> tuple[list[Any], str]:
+def _document_attributes(
+    path: str, kind: str, *, probe: media_probe.MediaProbe | None
+) -> tuple[list[Any], str]:
     """Build the ``InputMediaUploadedDocument`` attributes for one rich file.
 
-    Delegates to Telethon's own inference (which derives
-    ``DocumentAttributeVideo`` from a ``video/*`` mime type even without a
-    metadata library) and fills the two gaps it leaves:
+    This is the single place a video/audio/animation attribute is built.
+    Telethon's ``utils.get_attributes()`` is still asked, but only for the
+    filename attribute and the mime type: without a metadata library it returns
+    a stub ``DocumentAttributeVideo(duration=0, w=1, h=1)`` for every mp4 and no
+    ``DocumentAttributeAudio`` at all. Telegram repairs the metadata server-side
+    for smaller uploads only (measured live: fine up to 6.30 MB, still stubbed
+    from 12.72 MB up), and a client that receives 1x1 with no duration draws an
+    empty rectangle.
 
-    * audio — without ``hachoir`` installed no ``DocumentAttributeAudio`` is
-      emitted at all, and the spike proved an ``.mp3`` is only reachable
-      through ``tg://audio`` when it carries one;
-    * ``.gif`` — its mime is ``image/gif``, not ``video/*``, so Telethon emits
-      only a filename attribute even though the reference syntax for it is
-      ``tg://video``. ``DocumentAttributeAnimated`` is the marker Telegram
-      defines for an animation document; the audio gap above is the proven
-      precedent that an unmarked document is not reachable through its scheme.
+    *probe* is supplied by the caller so one ``ffprobe`` run serves both this
+    and the thumbnail. ``None`` means the probe failed: the pre-probe behaviour
+    is kept — the stub for video, ``duration=0`` for audio, which is what makes
+    ``tg://audio`` resolve at all — and a warning names the file.
     """
     from telethon import utils
     from telethon.tl import types
 
-    attributes, mime_type = utils.get_attributes(path)
-    if kind == "audio" and not any(
-        isinstance(attr, types.DocumentAttributeAudio) for attr in attributes
-    ):
-        attributes.append(types.DocumentAttributeAudio(duration=0))
+    raw_attributes, mime_type = utils.get_attributes(path)
+    attributes = list(raw_attributes)
+    if kind == "video":
+        if probe is not None and probe.has_video and probe.width and probe.height:
+            attributes = [
+                attr
+                for attr in attributes
+                if not isinstance(attr, types.DocumentAttributeVideo)
+            ]
+            attributes.append(
+                types.DocumentAttributeVideo(
+                    duration=round(probe.duration),
+                    w=probe.width,
+                    h=probe.height,
+                    supports_streaming=True,
+                )
+            )
+        else:
+            _log.warning(
+                "rich media video metadata unavailable, sending stub attributes",
+                path=path,
+                reason="no_probe" if probe is None else "no_video_stream",
+            )
+    elif kind == "audio":
+        if probe is not None:
+            attributes = [
+                attr
+                for attr in attributes
+                if not isinstance(attr, types.DocumentAttributeAudio)
+            ]
+            attributes.append(
+                types.DocumentAttributeAudio(duration=round(probe.duration))
+            )
+        else:
+            _log.warning(
+                "rich media audio metadata unavailable, sending stub attributes",
+                path=path,
+                reason="no_probe",
+            )
+            if not any(
+                isinstance(attr, types.DocumentAttributeAudio) for attr in attributes
+            ):
+                attributes.append(types.DocumentAttributeAudio(duration=0))
     if (
         kind == "video"
         and mime_type == "image/gif"
@@ -239,7 +285,7 @@ def _document_attributes(path: str, kind: str) -> tuple[list[Any], str]:
         )
     ):
         attributes.append(types.DocumentAttributeAnimated())
-    return list(attributes), mime_type
+    return attributes, mime_type
 
 
 def _extract_rich_message_id(result: Any, *, random_id: int | None = None) -> int | None:
@@ -434,8 +480,11 @@ class TelethonMessageBackend:
                 if rich_file.kind == "photo":
                     media: Any = types.InputMediaUploadedPhoto(file=handle)
                 else:
+                    probe = await asyncio.to_thread(
+                        media_probe.probe_media, rich_file.path
+                    )
                     attributes, mime_type = _document_attributes(
-                        rich_file.path, rich_file.kind
+                        rich_file.path, rich_file.kind, probe=probe
                     )
                     media = types.InputMediaUploadedDocument(
                         file=handle, mime_type=mime_type, attributes=attributes

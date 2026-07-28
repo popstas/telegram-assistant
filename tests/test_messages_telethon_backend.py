@@ -10,6 +10,9 @@ carrying every filter, plus ``offset_id`` pagination.
 
 from __future__ import annotations
 
+import io
+import json
+import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -28,6 +31,7 @@ from telegram_assistant.messages.telethon_backend import (
     TelethonMessageBackend,
     TelethonSearchBackend,
 )
+from telegram_assistant.observability.logging import configure_logging
 from telegram_assistant.worker.queue import FloodWaitError
 
 
@@ -1715,3 +1719,176 @@ async def test_search_paging_is_capped(monkeypatch: pytest.MonkeyPatch) -> None:
 
     assert rows == []
     assert len(client.requests) == 3
+
+
+# ---------------------------------------------------------------------------
+# Media attributes from the ffprobe-backed prober
+# ---------------------------------------------------------------------------
+
+
+def _fake_probe(monkeypatch: Any, probe: Any) -> None:
+    """Make every ``probe_media`` call in the backend answer with *probe*."""
+    from telegram_assistant.messages import media_probe
+
+    monkeypatch.setattr(media_probe, "probe_media", lambda path: probe)
+
+
+@pytest.mark.asyncio
+async def test_video_carries_the_probed_duration_and_dimensions(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Telethon's stub is ``duration=0, w=1, h=1`` for every mp4 and the server
+    only repairs small files — a 12 MB+ video keeps the stub and renders as an
+    empty rectangle."""
+    from telethon.tl.types import DocumentAttributeVideo
+
+    from telegram_assistant.messages.media_probe import MediaProbe
+
+    _fake_probe(
+        monkeypatch,
+        MediaProbe(duration=73.681, width=854, height=480, has_video=True, has_audio=True),
+    )
+    video = _rich_file(tmp_path, "clip.mp4", "clip", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1, text="", rich_markdown=MEDIA_MD, rich_files=(video,)
+    )
+
+    attributes = client.upload_media[0].media.attributes
+    video_attrs = [a for a in attributes if isinstance(a, DocumentAttributeVideo)]
+    # Exactly one: two DocumentAttributeVideo in one document is a malformed
+    # request, so the probed one replaces Telethon's stub rather than joining it.
+    assert len(video_attrs) == 1
+    assert video_attrs[0].duration == 74
+    assert video_attrs[0].w == 854
+    assert video_attrs[0].h == 480
+    assert video_attrs[0].supports_streaming is True
+
+
+@pytest.mark.asyncio
+async def test_audio_carries_the_probed_duration(tmp_path: Any, monkeypatch: Any) -> None:
+    """The hard-coded ``duration=0`` made ``tg://audio`` resolve but showed a
+    zero-length track in the clients."""
+    from telethon.tl.types import DocumentAttributeAudio
+
+    from telegram_assistant.messages.media_probe import MediaProbe
+
+    _fake_probe(
+        monkeypatch,
+        MediaProbe(duration=184.5, width=None, height=None, has_video=False, has_audio=True),
+    )
+    audio = _rich_file(tmp_path, "voice.mp3", "voice", "audio")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1,
+        text="",
+        rich_markdown="![](tg://audio?id=voice)\n",
+        rich_files=(audio,),
+    )
+
+    attributes = client.upload_media[0].media.attributes
+    audio_attrs = [a for a in attributes if isinstance(a, DocumentAttributeAudio)]
+    assert len(audio_attrs) == 1
+    assert audio_attrs[0].duration == 184
+
+
+@pytest.mark.asyncio
+async def test_a_failed_probe_keeps_the_send_working(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """No ffprobe on the box is not a send failure: the pre-probe stub goes out,
+    exactly as it did before this feature."""
+    from telethon.tl.types import DocumentAttributeAudio, DocumentAttributeVideo
+
+    _fake_probe(monkeypatch, None)
+    video = _rich_file(tmp_path, "clip.mp4", "clip", "video")
+    audio = _rich_file(tmp_path, "voice.mp3", "voice", "audio")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1,
+        text="",
+        rich_markdown="![](tg://video?id=clip)\n\n![](tg://audio?id=voice)\n",
+        rich_files=(video, audio),
+    )
+
+    assert any(
+        isinstance(a, DocumentAttributeVideo)
+        for a in client.upload_media[0].media.attributes
+    )
+    # Still present, so tg://audio keeps resolving without a prober.
+    assert any(
+        isinstance(a, DocumentAttributeAudio)
+        for a in client.upload_media[1].media.attributes
+    )
+
+
+@pytest.fixture
+def _restore_logging():
+    """Snapshot/restore the root logger so ``configure_logging(force=True)``
+    below doesn't leave the root handler writing to a dead ``StringIO`` buffer
+    (which would corrupt log capture in later tests).
+
+    ``get_logger`` is structlog-backed (``PrintLoggerFactory``), which writes
+    straight to its configured stream rather than through the stdlib
+    ``logging`` module — so ``caplog`` never sees it. This mirrors the
+    stream-capture pattern ``tests/test_access.py`` and
+    ``tests/test_observability_logging.py`` already use for the same reason.
+    """
+    root = logging.getLogger()
+    saved_handlers = root.handlers[:]
+    saved_level = root.level
+    try:
+        yield
+    finally:
+        root.handlers[:] = saved_handlers
+        root.setLevel(saved_level)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_probe_is_logged_with_the_file(
+    tmp_path: Any, monkeypatch: Any, _restore_logging: Any
+) -> None:
+    """Uploads used to write nothing to the log at all, so a broken article was
+    undiagnosable after the fact."""
+    _fake_probe(monkeypatch, None)
+    video = _rich_file(tmp_path, "clip.mp4", "clip", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    buf = io.StringIO()
+    configure_logging(level="DEBUG", stream=buf, force=True)
+
+    await backend.send_message(
+        chat_id=1, text="", rich_markdown=MEDIA_MD, rich_files=(video,)
+    )
+
+    lines = [json.loads(line) for line in buf.getvalue().strip().splitlines() if line.strip()]
+    warnings = [r for r in lines if r.get("level") == "warning"]
+    assert any("clip.mp4" in r.get("path", "") for r in warnings), lines
+
+
+@pytest.mark.asyncio
+async def test_a_photo_is_never_probed(tmp_path: Any, monkeypatch: Any) -> None:
+    """A photo is uploaded as ``InputMediaUploadedPhoto`` and has no attributes
+    at all — probing it would spend a subprocess per image for nothing."""
+    from telegram_assistant.messages import media_probe
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        media_probe, "probe_media", lambda path: calls.append(str(path)) or None
+    )
+    photo = _rich_file(tmp_path, "shot.png", "shot", "photo")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1, text="", rich_markdown="![](tg://photo?id=shot)\n", rich_files=(photo,)
+    )
+
+    assert calls == []
