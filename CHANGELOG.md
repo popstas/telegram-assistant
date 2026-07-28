@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Documentation
+
+- Design spec for members list command
+
 ### Testing
 
 - e2e: Retarget scripts to Saved Messages
