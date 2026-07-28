@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- members: Add read-only list_members domain op
+
 ### Documentation
 
 - Implementation plan for members list
