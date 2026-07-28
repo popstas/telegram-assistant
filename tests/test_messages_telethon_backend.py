@@ -729,11 +729,12 @@ class _UploadingClient(_RawClient):
         self._upload_error = upload_error
         self._send_error = send_error
 
-    async def upload_file(self, path: Any) -> Any:
+    async def upload_file(self, path: Any, **kwargs: Any) -> Any:
         if self._upload_error is not None:
             raise self._upload_error
-        self.uploads.append(str(path))
-        return f"handle:{path}"
+        label = kwargs.get("file_name") or str(path)
+        self.uploads.append(label)
+        return f"handle:{label}"
 
     async def __call__(self, request: Any) -> Any:
         from telethon.tl.functions.messages import UploadMediaRequest
@@ -1892,3 +1893,91 @@ async def test_a_photo_is_never_probed(tmp_path: Any, monkeypatch: Any) -> None:
     )
 
     assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_video_carries_a_generated_thumbnail(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A large video comes back from the server with ``thumbs=None``; without a
+    preview the clients draw an empty rectangle even with correct dimensions."""
+    from telegram_assistant.messages import media_probe
+    from telegram_assistant.messages.media_probe import MediaProbe
+
+    _fake_probe(
+        monkeypatch,
+        MediaProbe(duration=73.681, width=854, height=480, has_video=True, has_audio=True),
+    )
+    seen: dict[str, Any] = {}
+
+    def fake_thumb(path: Any, *, duration: float) -> bytes:
+        seen["duration"] = duration
+        return b"\xff\xd8jpeg"
+
+    monkeypatch.setattr(media_probe, "extract_thumbnail", fake_thumb)
+    video = _rich_file(tmp_path, "clip.mp4", "clip", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1, text="", rich_markdown=MEDIA_MD, rich_files=(video,)
+    )
+
+    assert client.upload_media[0].media.thumb == "handle:thumb.jpg"
+    # The probe is reused rather than run a second time for the seek offset.
+    assert seen["duration"] == pytest.approx(73.681)
+
+
+@pytest.mark.asyncio
+async def test_a_missing_thumbnail_does_not_fail_the_send(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    from telegram_assistant.messages import media_probe
+    from telegram_assistant.messages.media_probe import MediaProbe
+
+    _fake_probe(
+        monkeypatch,
+        MediaProbe(duration=5.0, width=100, height=100, has_video=True, has_audio=False),
+    )
+    monkeypatch.setattr(media_probe, "extract_thumbnail", lambda path, *, duration: None)
+    video = _rich_file(tmp_path, "clip.mp4", "clip", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1, text="", rich_markdown=MEDIA_MD, rich_files=(video,)
+    )
+
+    assert client.upload_media[0].media.thumb is None
+
+
+@pytest.mark.asyncio
+async def test_audio_gets_no_thumbnail(tmp_path: Any, monkeypatch: Any) -> None:
+    """Only videos need a preview frame; running ffmpeg over every mp3 would
+    spend a subprocess for nothing."""
+    from telegram_assistant.messages import media_probe
+    from telegram_assistant.messages.media_probe import MediaProbe
+
+    calls: list[Any] = []
+    _fake_probe(
+        monkeypatch,
+        MediaProbe(duration=184.5, width=None, height=None, has_video=False, has_audio=True),
+    )
+    monkeypatch.setattr(
+        media_probe,
+        "extract_thumbnail",
+        lambda path, *, duration: calls.append(path) or None,
+    )
+    audio = _rich_file(tmp_path, "voice.mp3", "voice", "audio")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1,
+        text="",
+        rich_markdown="![](tg://audio?id=voice)\n",
+        rich_files=(audio,),
+    )
+
+    assert calls == []
+    assert client.upload_media[0].media.thumb is None

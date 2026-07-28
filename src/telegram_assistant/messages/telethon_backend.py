@@ -486,8 +486,17 @@ class TelethonMessageBackend:
                     attributes, mime_type = _document_attributes(
                         rich_file.path, rich_file.kind, probe=probe
                     )
+                    thumb = None
+                    if rich_file.kind == "video":
+                        thumb = await self._upload_video_thumbnail(
+                            path=rich_file.path,
+                            duration=probe.duration if probe is not None else 0.0,
+                        )
                     media = types.InputMediaUploadedDocument(
-                        file=handle, mime_type=mime_type, attributes=attributes
+                        file=handle,
+                        mime_type=mime_type,
+                        attributes=attributes,
+                        thumb=thumb,
                     )
                 # uploadMedia binds the upload to the destination peer, which is
                 # also where a media-rights rejection surfaces first.
@@ -513,6 +522,28 @@ class TelethonMessageBackend:
                     )
                 )
         return uploaded
+
+    async def _upload_video_thumbnail(self, *, path: str, duration: float) -> Any:
+        """Return an uploaded preview frame for *path*, or ``None``.
+
+        Telegram's clients draw an empty rectangle for a video with no
+        thumbnail, and the server only generates one for smaller uploads. A
+        failure here is never a send failure — the article goes out without a
+        preview and the reason is logged.
+        """
+        thumb_bytes = await asyncio.to_thread(
+            media_probe.extract_thumbnail, path, duration=duration
+        )
+        if not thumb_bytes:
+            _log.warning("rich media thumbnail could not be generated", path=path)
+            return None
+        try:
+            return await self._client.upload_file(thumb_bytes, file_name="thumb.jpg")
+        except Exception as exc:  # noqa: BLE001 - a preview is never worth the send
+            _log.warning(
+                "rich media thumbnail upload failed", path=path, error=str(exc)
+            )
+            return None
 
     async def _send_rich_message(
         self,
