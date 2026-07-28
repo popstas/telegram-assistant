@@ -14,10 +14,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from telegram_assistant.cli import main as cli_main
+from telegram_assistant.config import load_config_from_text
 from telegram_assistant.entities import ResolvedEntity
+from telegram_assistant.http_api import create_app
 from telegram_assistant.members import MemberListResult, Participant
 from telegram_assistant.persistence import OperationStore
 
@@ -297,3 +300,121 @@ def test_cli_members_list_access_denied_exits_3(
 
     assert result.exit_code == 3
     assert backend.list_calls == []
+
+
+# ---------------------------------------------------------------------------
+# HTTP
+# ---------------------------------------------------------------------------
+
+
+def _http_client(
+    *,
+    access_block: str | None = None,
+    backend: FakeListBackend | None = None,
+    resolver: FakeResolver | None = None,
+    has_factory: bool = True,
+) -> TestClient:
+    config = load_config_from_text(_config_with_access(access_block))
+    app = create_app(
+        config,
+        session_manager=None,
+        member_list_backend_factory=(
+            (lambda _r: backend) if has_factory else (lambda _r: None)
+        ),
+        folder_backend_factory=lambda _r: None,
+        resolver_factory=(
+            (lambda _r: resolver) if resolver is not None else (lambda _r: None)
+        ),
+        operation_store=_make_store(),
+    )
+    return TestClient(app)
+
+
+def test_http_members_list_returns_rows() -> None:
+    backend = FakeListBackend([_participant(i) for i in range(1, 4)])
+    client = _http_client(access_block=_READ_ACCESS, backend=backend)
+
+    resp = client.get(
+        "/telegram/members/list",
+        params={"chat_id": -100123, "limit": 2},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["telegram_chat_id"] == -100123
+    assert body["count"] == 2
+    assert body["participants_count"] == 3
+    assert body["truncated"] is True
+    assert body["participants"][0]["user_id"] == 1
+    assert "is_member" not in body
+
+
+def test_http_members_list_user_check() -> None:
+    backend = FakeListBackend([], found=_participant(7, is_bot=True))
+    client = _http_client(access_block=_READ_ACCESS, backend=backend)
+
+    resp = client.get(
+        "/telegram/members/list",
+        params={"chat_id": -100123, "user": "@pressfinity_news_bot"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["is_member"] is True
+
+
+def test_http_members_list_resolves_entity() -> None:
+    backend = FakeListBackend([_participant(1)])
+    client = _http_client(
+        access_block=_READ_ACCESS,
+        backend=backend,
+        resolver=FakeResolver({"@team": -100999}),
+    )
+
+    resp = client.get(
+        "/telegram/members/list", params={"entity": "@team"}, headers=AUTH
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert backend.list_calls[-1]["chat_id"] == -100999
+
+
+def test_http_members_list_requires_exactly_one_ref() -> None:
+    client = _http_client(access_block=_READ_ACCESS, backend=FakeListBackend([]))
+    resp = client.get("/telegram/members/list", headers=AUTH)
+    assert resp.status_code == 400
+
+
+def test_http_members_list_rejects_unknown_filter() -> None:
+    backend = FakeListBackend([])
+    client = _http_client(access_block=_READ_ACCESS, backend=backend)
+
+    resp = client.get(
+        "/telegram/members/list",
+        params={"chat_id": -100123, "filter": "kicked"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 400
+    assert backend.list_calls == []
+
+
+def test_http_members_list_denied_without_read() -> None:
+    backend = FakeListBackend([_participant(1)])
+    client = _http_client(access_block=_WRITE_ACCESS, backend=backend)
+
+    resp = client.get(
+        "/telegram/members/list", params={"chat_id": -100123}, headers=AUTH
+    )
+
+    assert resp.status_code == 403
+    assert backend.list_calls == []
+
+
+def test_http_members_list_503_without_backend() -> None:
+    client = _http_client(access_block=_READ_ACCESS, has_factory=False)
+    resp = client.get(
+        "/telegram/members/list", params={"chat_id": -100123}, headers=AUTH
+    )
+    assert resp.status_code == 503

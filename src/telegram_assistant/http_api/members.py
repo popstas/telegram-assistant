@@ -11,10 +11,12 @@ from telegram_assistant.access import AccessDenied
 from telegram_assistant.folders import FolderBackend
 from telegram_assistant.http_api.access import (
     build_authorizer,
+    resolve_entity_chat_id,
     translate_access_error,
 )
 from telegram_assistant.http_api.auth import BearerAuth
 from telegram_assistant.members import (
+    DEFAULT_MEMBER_LIST_LIMIT,
     BulkMemberAddFailed,
     BulkMemberAddNeedsReview,
     BulkMemberAddPending,
@@ -26,9 +28,11 @@ from telegram_assistant.members import (
     BulkMemberRemovePending,
     BulkMemberRemoveRequest,
     MemberAddBackend,
+    MemberListBackend,
     MemberRemoveBackend,
     bulk_add_members,
     bulk_remove_members,
+    list_members,
     normalize_user_ref,
     protected_user_set,
 )
@@ -71,6 +75,22 @@ def _member_backend_or_503(request: Request) -> MemberAddBackend:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Telegram member backend is not available",
+        )
+    return backend
+
+
+def _member_list_backend_or_503(request: Request) -> MemberListBackend:
+    factory = getattr(request.app.state, "member_list_backend_factory", None)
+    if factory is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram member-list backend is not configured (session may be unauthorized)",
+        )
+    backend = factory(request)
+    if backend is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Telegram member-list backend is not available",
         )
     return backend
 
@@ -135,6 +155,63 @@ def _worker_queue_for_request(request: Request) -> WorkerQueue:
 
 def build_router() -> APIRouter:
     router = APIRouter(dependencies=[BearerAuth])
+
+    @router.get("/members/list")
+    async def members_list(
+        request: Request,
+        chat_id: int | None = None,
+        entity: str | None = None,
+        limit: int = DEFAULT_MEMBER_LIST_LIMIT,
+        query: str | None = None,
+        filter: str = "all",
+        user: str | None = None,
+    ) -> dict[str, Any]:
+        """List a chat's participants, or check one user's membership (READ-gated).
+
+        Accepts either a numeric ``chat_id`` or a flexible ``entity`` reference,
+        mirroring ``GET /telegram/messages/recent``. ``user`` answers membership
+        for one user with a single request and is mutually exclusive with
+        ``query``; ``filter`` is one of ``all``, ``admins``, ``bots``.
+        """
+        if (chat_id is None) == (entity is None):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="provide exactly one of chat_id or entity",
+            )
+
+        backend = _member_list_backend_or_503(request)
+        if entity is not None:
+            resolved_chat_id = await resolve_entity_chat_id(request, entity)
+        else:
+            resolved_chat_id = chat_id  # type: ignore[assignment]
+
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
+        try:
+            result = await list_members(
+                backend=backend,
+                chat_id=resolved_chat_id,
+                limit=limit,
+                query=query,
+                filter=filter,
+                user=user,
+                authorizer=authorizer,
+            )
+        except AccessDenied as exc:
+            raise translate_access_error(exc) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            ) from exc
+
+        return {
+            "telegram_chat_id": resolved_chat_id,
+            "limit": limit,
+            "query": query,
+            "filter": filter,
+            **result.to_dict(),
+        }
 
     @router.post("/groups/{chat_id}/members/bulk-add")
     async def bulk_add(

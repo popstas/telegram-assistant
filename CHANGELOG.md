@@ -5,6 +5,7 @@
 
 ### Features
 
+- cli: Add members list command
 - members: Add Telethon participants-list adapter
 - members: Add read-only list_members domain op
 
