@@ -5,20 +5,7 @@
 
 ### Features
 
-- mcp: Add telegram_members_list tool
-- http: Add GET /telegram/members/list
-- cli: Add members list command
-- members: Add Telethon participants-list adapter
-- members: Add read-only list_members domain op
-
-### Documentation
-
-- Implementation plan for members list
-- Design spec for members list command
-
-### Testing
-
-- e2e: Retarget scripts to Saved Messages
+- members: Read-only members list with single-request membership check (#19)
 
 ## v0.9.0 - 2026-07-27
 
