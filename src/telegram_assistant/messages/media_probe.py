@@ -19,8 +19,10 @@ domain layer import :func:`ffmpeg_available` for its pre-flight check.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -145,3 +147,106 @@ def probe_media(path: Path | str) -> MediaProbe | None:
         has_video=video is not None,
         has_audio=audio is not None,
     )
+
+
+THUMBNAIL_TIMEOUT_SECONDS = 30
+CONVERT_TIMEOUT_SECONDS = 120
+THUMBNAIL_WIDTH = 320
+
+
+class MediaConversionError(ValueError):
+    """``ffmpeg`` could not produce the upload shape Telegram needs.
+
+    A ``ValueError`` on purpose: every surface already maps one to 400 / exit 2
+    with its message, while an unmapped error would surface as an empty 500.
+    """
+
+
+def extract_thumbnail(path: Path | str, *, duration: float = 0.0) -> bytes | None:
+    """Return JPEG bytes for a video preview, or ``None`` on any failure.
+
+    Telegram's clients draw an empty rectangle for a video with no thumbnail
+    and no real dimensions, which is the symptom this whole module exists for.
+    The frame is taken 10% into the clip — frame 0 of a real recording is
+    frequently black — and written to stdout, so no temp file is involved.
+    """
+    if not ffmpeg_available():
+        return None
+    seek = max(0.0, duration * 0.1)
+    completed = _run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-ss",
+            f"{seek:.3f}",
+            "-i",
+            str(path),
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale={THUMBNAIL_WIDTH}:-2",
+            "-f",
+            "mjpeg",
+            "-",
+        ],
+        timeout=THUMBNAIL_TIMEOUT_SECONDS,
+    )
+    if completed is None or completed.returncode != 0 or not completed.stdout:
+        return None
+    return completed.stdout
+
+
+def convert_gif_to_mp4(path: Path | str) -> Path:
+    """Convert *path* to a silent mp4 in a temp file and return its path.
+
+    Telegram stores "GIFs" as silent mp4 documents marked
+    ``DocumentAttributeAnimated``; an actual ``image/gif`` upload does not
+    attach to an article at all. ``yuv420p`` needs even dimensions, hence the
+    ``trunc`` scale filter, and ``+faststart`` puts the moov atom first so the
+    clients can start playing without the whole file.
+
+    The caller owns the returned path and must unlink it.
+    """
+    if not ffmpeg_available():
+        raise MediaConversionError(
+            f"{path}: Telegram only attaches an animated GIF to an article as an "
+            f"mp4, and ffmpeg was not found on PATH — install ffmpeg or convert "
+            f"the file to mp4 yourself"
+        )
+    handle, target = tempfile.mkstemp(prefix="tg-gif-", suffix=".mp4")
+    os.close(handle)
+    target_path = Path(target)
+    completed = _run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-y",
+            "-i",
+            str(path),
+            "-movflags",
+            "+faststart",
+            "-pix_fmt",
+            "yuv420p",
+            "-vf",
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+            "-an",
+            str(target_path),
+        ],
+        timeout=CONVERT_TIMEOUT_SECONDS,
+    )
+    failed = (
+        completed is None
+        or completed.returncode != 0
+        or not target_path.exists()
+        or target_path.stat().st_size == 0
+    )
+    if failed:
+        target_path.unlink(missing_ok=True)
+        detail = "ffmpeg could not be run"
+        if completed is not None:
+            stderr = (completed.stderr or b"").decode("utf-8", "replace").strip()
+            detail = stderr[-500:] or f"ffmpeg exited with {completed.returncode}"
+        raise MediaConversionError(f"{path}: GIF to mp4 conversion failed: {detail}")
+    return target_path

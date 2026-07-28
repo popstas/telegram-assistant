@@ -5,6 +5,7 @@
 
 ### Features
 
+- rich-markdown: Read media metadata with ffprobe
 - access: Report skipped chat rules in access check
 
 ### Bug Fixes

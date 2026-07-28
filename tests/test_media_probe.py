@@ -166,3 +166,126 @@ def test_probe_media_never_uses_a_shell(
     assert seen["argv"][0] == "ffprobe"
     assert str(clip) in seen["argv"]
     assert seen["kwargs"].get("shell") in (None, False)
+
+
+def test_extract_thumbnail_returns_the_jpeg_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(media_probe.subprocess, "run", _fake_run(b"\xff\xd8jpeg"))
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"\x00")
+
+    assert media_probe.extract_thumbnail(clip, duration=73.68) == b"\xff\xd8jpeg"
+
+
+def test_extract_thumbnail_seeks_into_the_clip(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Frame 0 of a real recording is often black; seek 10% in instead."""
+    seen: dict[str, Any] = {}
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, b"\xff\xd8jpeg", b"")
+
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(media_probe.subprocess, "run", run)
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"\x00")
+
+    media_probe.extract_thumbnail(clip, duration=100.0)
+
+    argv = seen["argv"]
+    assert argv[0] == "ffmpeg"
+    assert "-ss" in argv
+    assert float(argv[argv.index("-ss") + 1]) == pytest.approx(10.0)
+
+
+@pytest.mark.parametrize(
+    "stdout,returncode",
+    [(b"", 0), (b"\xff\xd8", 1)],
+    ids=["empty-output", "nonzero-exit"],
+)
+def test_extract_thumbnail_returns_none_on_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stdout: bytes, returncode: int
+) -> None:
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(media_probe.subprocess, "run", _fake_run(stdout, returncode))
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"\x00")
+
+    assert media_probe.extract_thumbnail(clip, duration=1.0) is None
+
+
+def test_extract_thumbnail_returns_none_without_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: None)
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"\x00")
+
+    assert media_probe.extract_thumbnail(clip, duration=1.0) is None
+
+
+def test_convert_gif_to_mp4_returns_the_converted_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        Path(argv[-1]).write_bytes(b"fake mp4 bytes")
+        return subprocess.CompletedProcess(argv, 0, b"", b"")
+
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(media_probe.subprocess, "run", run)
+    gif = tmp_path / "loop.gif"
+    gif.write_bytes(b"GIF89a")
+
+    converted = media_probe.convert_gif_to_mp4(gif)
+    try:
+        assert converted.suffix == ".mp4"
+        assert converted.read_bytes() == b"fake mp4 bytes"
+    finally:
+        converted.unlink(missing_ok=True)
+
+
+def test_convert_gif_to_mp4_cleans_up_after_a_failed_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A half-written temp file must not survive: the caller's ``finally`` only
+    knows about a path it was handed."""
+    created: list[Path] = []
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        created.append(Path(argv[-1]))
+        return subprocess.CompletedProcess(argv, 1, b"", b"moov atom not found")
+
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(media_probe.subprocess, "run", run)
+    gif = tmp_path / "loop.gif"
+    gif.write_bytes(b"GIF89a")
+
+    with pytest.raises(media_probe.MediaConversionError) as excinfo:
+        media_probe.convert_gif_to_mp4(gif)
+
+    assert "moov atom not found" in str(excinfo.value)
+    assert created and not created[0].exists()
+
+
+def test_convert_gif_to_mp4_without_ffmpeg_names_the_fix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: None)
+    gif = tmp_path / "loop.gif"
+    gif.write_bytes(b"GIF89a")
+
+    with pytest.raises(media_probe.MediaConversionError) as excinfo:
+        media_probe.convert_gif_to_mp4(gif)
+
+    assert "ffmpeg" in str(excinfo.value)
+    assert "mp4" in str(excinfo.value)
+
+
+def test_media_conversion_error_is_a_value_error() -> None:
+    """Surfaces map ``ValueError`` to 400 / exit 2; anything else would surface
+    as an empty 500."""
+    assert issubclass(media_probe.MediaConversionError, ValueError)
