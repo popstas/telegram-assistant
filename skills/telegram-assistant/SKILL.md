@@ -639,6 +639,11 @@ command rather than after `folder_cache_ttl` seconds.
   every resolved file under `rich_files` (`id`, `path`, `kind`,
   `caption`) without reading a byte. A chat that forbids media rejects
   the whole article (see the error list).
+- Local media in an article needs `ffmpeg`/`ffprobe` on the box for correct
+  playback metadata. An animated `.gif` is **converted to mp4** automatically;
+  without `ffmpeg` a `.gif` is rejected (exit 2) with a message naming the fix.
+  Videos without a probe still send — they may just show as an empty
+  rectangle — and the reason is in the server log at `WARNING`.
 - Media grouping (**default `collage`**): a run of 2+ consecutive media
   blocks with no text between them is wrapped in `<tg-collage>`, so the
   usual two or three Obsidian screenshots render as one collage instead

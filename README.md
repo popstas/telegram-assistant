@@ -59,6 +59,13 @@ telegram-assistant health    # show current health
 uvicorn telegram_assistant.http_api.app:create_app --factory --port 8085
 ```
 
+`ffmpeg` and `ffprobe` are optional external binaries (not pip dependencies) used only by
+`messages send --rich-markdown` with local media: they fill in video/audio duration and
+dimensions, generate a video preview frame, and convert an animated `.gif` into the mp4
+Telegram needs. Without them videos still send but may render as an empty rectangle in the
+clients, and a `.gif` is rejected with a message telling you to install ffmpeg or convert
+the file yourself. Install with `apt install ffmpeg` (Debian/Ubuntu) or `brew install ffmpeg`.
+
 ## Commands
 
 Every CLI subcommand maps 1:1 to an HTTP endpoint (except the admin-only commands `auth`, `operations status`, and `operations retry`). Run any command with `--help` for full flag documentation.
