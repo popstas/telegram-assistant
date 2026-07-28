@@ -198,7 +198,7 @@ Config edits are hot-reloaded: a `watchdog` observer on `data/config.yml` re-run
 `access` — inspect and edit the access policy (CLI + skill only; not exposed over MCP):
 
 - `access list` — print the effective policy (allow-all, or the deny-by-default rules and the capabilities each grants).
-- `access check --entity <ref> --permission read|write|delete` — resolve a chat and report the grant verdict (exit `0` granted, `3` denied, `2` unresolved).
+- `access check --entity <ref> --permission read|write|delete` — resolve a chat and report the grant verdict (exit `0` granted, `3` denied, `2` unresolved). The payload's `unresolved_refs` names any `chat:` rule ref that could not be resolved — those rules are skipped with a warning rather than failing the command, so a stale entry shows up here instead of breaking every gated call.
 - `access add` — append one rule (`--entity`/`--folder`/`--all` + `--permission read,write,delete`) to `data/config.yml`; the hot-reload watcher then applies it live. `--dry-run` prints the rule without writing.
 
 `operations` — inspect and retry queued operations:

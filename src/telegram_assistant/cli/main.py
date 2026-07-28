@@ -7152,7 +7152,11 @@ def access_check(
                 config, resolver=resolver, folder_backend=folder_backend
             )
             caps, matched = await authorizer.describe(resolved.chat_id)
-            return resolved, caps, matched, level in caps
+            # `describe` builds the rule index, so any `chat:` rule ref that
+            # failed to resolve has been recorded by now. Report it: the rule
+            # was skipped (deny-by-default narrows rights), and a silently
+            # missing grant is exactly what this command exists to explain.
+            return resolved, caps, matched, level in caps, authorizer.unresolved_refs
         finally:
             try:
                 await manager.disconnect()
@@ -7160,7 +7164,7 @@ def access_check(
                 pass
 
     try:
-        resolved, caps, matched, granted = asyncio.run(_run())
+        resolved, caps, matched, granted, unresolved = asyncio.run(_run())
     except Exception as exc:
         _raise_for_access_or_entity_error(exc)
         typer.echo(f"access check failed: {exc}", err=True)
@@ -7173,6 +7177,9 @@ def access_check(
         "granted": granted,
         "granted_permissions": sorted(c.name.lower() for c in caps),
         "matched_rule": matched,
+        "unresolved_refs": [
+            entry.to_dict() for entry in sorted(unresolved, key=lambda e: e.ref)
+        ],
     }
     typer.echo(json.dumps(payload, sort_keys=True))
     if not granted:

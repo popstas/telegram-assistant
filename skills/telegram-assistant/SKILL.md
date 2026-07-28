@@ -238,7 +238,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `operations` | `status` | Read-only: show queue status for a previously created operation. | `telegram-assistant operations status ...` |
 | `operations` | `retry` | Reset a failed or `needs_review` operation so the worker can re-run it. | `telegram-assistant operations retry ...` |
 | `access` | `list` | Read-only: print the effective access policy (allow-all, or the deny-by-default rules and the capabilities each grants). | `telegram-assistant access list` |
-| `access` | `check` | Resolve a chat and report whether the policy grants `read`/`write`/`delete` (exit 0 granted, 3 denied, 2 unresolved). | `telegram-assistant access check --entity <ref> --permission read\|write\|delete` |
+| `access` | `check` | Resolve a chat and report whether the policy grants `read`/`write`/`delete` (exit 0 granted, 3 denied, 2 unresolved). `unresolved_refs` in the payload names stale `chat:` rules, which are skipped with a warning rather than failing the command. | `telegram-assistant access check --entity <ref> --permission read\|write\|delete` |
 | `access` | `add` | Append one access rule (`--entity`/`--folder`/`--all` + `--permission read,write,delete`) to `data/config.yml`; hot-reload applies it live. Supports `--dry-run`. | `telegram-assistant access add ...` |
 
 ### Per-pair extraction and flag rules

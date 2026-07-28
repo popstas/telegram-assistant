@@ -254,6 +254,85 @@ def test_check_invalid_permission_exit_2(
     assert result.exit_code == 2
 
 
+class SelectiveFakeResolver:
+    """Resolves refs in ``mapping``; every other ref is not found.
+
+    Mirrors the Telethon resolver's behaviour for a stale ``chat:`` rule while
+    still resolving the entity the command was asked about.
+    """
+
+    def __init__(self, mapping: dict[str, int]) -> None:
+        self._mapping = mapping
+
+    async def resolve(self, ref) -> ResolvedEntity:
+        key = str(ref)
+        if key not in self._mapping:
+            raise EntityNotFoundError(f"no entity found for reference {key!r}")
+        return ResolvedEntity(
+            chat_id=self._mapping[key], title=key, kind="channel"
+        )
+
+
+def test_check_reports_unresolved_rule_refs(
+    minimal_config_yaml: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A stale rule must not turn a grant verdict into an exit-2 resolver error.
+    access = textwrap.dedent(
+        """
+        access:
+          rules:
+            - chat: "ghost"
+              permission: write
+            - chat: "@client"
+              permissions:
+                - read
+                - write
+        """
+    ).strip() + "\n"
+    cfg = _write_config(tmp_path, _with_access(minimal_config_yaml, access))
+    _patch_access_resolver(
+        monkeypatch, SelectiveFakeResolver({"@client": 555})
+    )
+
+    result = _run(
+        ["access", "check", "--entity", "@client", "--permission", "write",
+         "--config", str(cfg)]
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["granted"] is True
+    assert payload["unresolved_refs"] == [
+        {"ref": "ghost", "error": "no entity found for reference 'ghost'"}
+    ]
+
+
+def test_check_unresolved_refs_empty_when_policy_is_clean(
+    minimal_config_yaml: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    access = textwrap.dedent(
+        """
+        access:
+          rules:
+            - chat: "@client"
+              permissions:
+                - read
+                - write
+        """
+    ).strip() + "\n"
+    cfg = _write_config(tmp_path, _with_access(minimal_config_yaml, access))
+    _patch_access_resolver(
+        monkeypatch, SelectiveFakeResolver({"@client": 555})
+    )
+
+    result = _run(
+        ["access", "check", "--entity", "@client", "--permission", "read",
+         "--config", str(cfg)]
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["unresolved_refs"] == []
+
+
 # ---------------------------------------------------------------------------
 # access add
 # ---------------------------------------------------------------------------
