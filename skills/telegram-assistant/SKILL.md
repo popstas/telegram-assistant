@@ -238,7 +238,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `operations` | `status` | Read-only: show queue status for a previously created operation. | `telegram-assistant operations status ...` |
 | `operations` | `retry` | Reset a failed or `needs_review` operation so the worker can re-run it. | `telegram-assistant operations retry ...` |
 | `access` | `list` | Read-only: print the effective access policy (allow-all, or the deny-by-default rules and the capabilities each grants). | `telegram-assistant access list` |
-| `access` | `check` | Resolve a chat and report whether the policy grants `read`/`write`/`delete` (exit 0 granted, 3 denied, 2 unresolved). | `telegram-assistant access check --entity <ref> --permission read\|write\|delete` |
+| `access` | `check` | Resolve a chat and report whether the policy grants `read`/`write`/`delete` (exit 0 granted, 3 denied, 2 unresolved). `unresolved_refs` in the payload names stale `chat:` rules, which are skipped with a warning rather than failing the command. | `telegram-assistant access check --entity <ref> --permission read\|write\|delete` |
 | `access` | `add` | Append one access rule (`--entity`/`--folder`/`--all` + `--permission read,write,delete`) to `data/config.yml`; hot-reload applies it live. Supports `--dry-run`. | `telegram-assistant access add ...` |
 
 ### Per-pair extraction and flag rules
@@ -778,7 +778,12 @@ command rather than after `folder_cache_ttl` seconds.
   deletes to messages this server process sent; it can be overridden per
   access rule (chat > folder > `all` > policy default), so a chat like `me`
   may set `delete_only_session_messages: false` while the global default
-  stays `true`.
+  stays `true`. One fail-safe: if any `chat:` rule ref fails to resolve and
+  that rule set `delete_only_session_messages: true` (same for
+  `edit_only_session_messages`), the `true` applies to **every** chat until
+  the config is fixed — the hardened chat can no longer be identified. If a
+  delete/edit is unexpectedly refused, run `access check` and fix the ref it
+  lists under `unresolved_refs`.
 - Temp file: no.
 - Automation: none — DELETE-gated destructive change. Run `--dry-run` first
   (resolves + authorizes + runs the session-limit check without deleting),

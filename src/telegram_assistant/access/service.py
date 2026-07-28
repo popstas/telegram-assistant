@@ -28,15 +28,17 @@ from __future__ import annotations
 
 import enum
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from telegram_assistant.config.models import AccessConfig
+from telegram_assistant.entities.service import EntityError
 from telegram_assistant.observability.logging import get_logger
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, avoids import cycles
     from collections.abc import Iterable
 
-    from telegram_assistant.entities.service import EntityResolver
+    from telegram_assistant.entities.service import EntityResolver, ResolvedEntity
     from telegram_assistant.folders.service import FolderBackend
     from telegram_assistant.persistence.folder_cache import (
         FolderMembershipCache,
@@ -114,6 +116,45 @@ def _normalise_memberships(items: Iterable[Membership | str]) -> set[Membership]
             folder_id, folder_name = item
             result.add((folder_id, folder_name))
     return result
+
+
+def _merge_only(existing: bool | None, new: bool) -> bool:
+    """Collapse two ``*_only_session_messages`` values restrictively.
+
+    ``True`` (restrict to messages this process sent) wins over ``False`` on
+    conflict. Used both when merging rules within one specificity level at index
+    build time and when applying the fail-safe floor left behind by a skipped
+    ``chat:`` ref, so the two can never disagree about what "more restrictive"
+    means.
+    """
+    return new if existing is None else (existing or new)
+
+
+@dataclass(frozen=True)
+class UnresolvedAccessRef:
+    """A ``chat:`` rule reference that could not be resolved at index build.
+
+    Recorded and logged rather than raised: one stale ref must not take the
+    whole policy — and therefore every gated command — down with it. Skipping a
+    ref narrows *capabilities* under deny-by-default, so the failure mode there
+    is a loud 403 on a chat that should have been granted, never a silent grant.
+
+    A rule's ``delete_only_session_messages`` / ``edit_only_session_messages``
+    is **not** a capability, though — it is a restriction, and simply dropping
+    it would *relax* the policy on the very chat the operator hardened. So a
+    skipped ref whose rule sets one of those to ``True`` leaves that ``True``
+    behind as a global floor (see :attr:`Authorizer.delete_only_floor`),
+    applied to every chat until the config is fixed: the chat that was meant to
+    be hardened can no longer be identified, so the safe answer is to harden
+    all of them. A skipped ``False`` contributes no floor — losing a relaxation
+    already fails safe.
+    """
+
+    ref: str
+    error: str
+
+    def to_dict(self) -> dict[str, str]:
+        return {"ref": self.ref, "error": self.error}
 
 
 class AccessDenied(RuntimeError):
@@ -207,11 +248,45 @@ class Authorizer:
         self._folder_edit_only: dict[str, bool] = {}
         self._folder_id_edit_only: dict[int, bool] = {}
         self._memberships: dict[int, set[Membership]] | None = None
+        # `chat:` rule refs skipped during the index build (stale/ambiguous).
+        self._unresolved_refs: tuple[UnresolvedAccessRef, ...] = ()
+        # Fail-safe floors left behind by a skipped ref whose rule *restricted*
+        # deletes/edits to session messages. See `UnresolvedAccessRef`.
+        self._delete_only_floor = False
+        self._edit_only_floor = False
 
     @property
     def enabled(self) -> bool:
         """Whether a policy is active (``False`` ⇒ allow-all no-op)."""
         return self._config is not None
+
+    @property
+    def unresolved_refs(self) -> tuple[UnresolvedAccessRef, ...]:
+        """``chat:`` rule refs skipped during the last index build.
+
+        Empty until the index is built — that happens lazily, on the first
+        ``require`` / ``allows`` / ``describe`` call. Surfaced by ``access
+        check`` so a stale rule is named rather than left for the operator to
+        find in the logs.
+        """
+        return self._unresolved_refs
+
+    @property
+    def delete_only_floor(self) -> bool:
+        """Whether a skipped ref left a global ``delete_only`` restriction.
+
+        ``True`` when some skipped ``chat:`` ref belonged to a rule setting
+        ``delete_only_session_messages: true``. The chat it named cannot be
+        identified, so the restriction is applied to *every* chat rather than
+        dropped — see :class:`UnresolvedAccessRef`. ``False`` until the index is
+        built.
+        """
+        return self._delete_only_floor
+
+    @property
+    def edit_only_floor(self) -> bool:
+        """Mirror of :attr:`delete_only_floor` for ``edit_only_session_messages``."""
+        return self._edit_only_floor
 
     async def _ensure_index(self) -> None:
         if self._built or self._config is None:
@@ -228,10 +303,17 @@ class Authorizer:
         chat_edit_only: dict[int, bool] = {}
         folder_edit_only: dict[str, bool] = {}
         folder_id_edit_only: dict[int, bool] = {}
-
-        def _merge_only(existing: bool | None, new: bool) -> bool:
-            # Restrictive (True) wins on conflict within a level.
-            return new if existing is None else (existing or new)
+        unresolved: list[UnresolvedAccessRef] = []
+        delete_only_floor = False
+        edit_only_floor = False
+        # One resolution attempt per *distinct* ref per build. A non-numeric
+        # stale ref costs `resolve_by_handle` plus a full `iter_dialogs` title
+        # scan, and the authorizer is per-request, so N rules naming the same
+        # dead ref would otherwise mean N scans on every gated call. Misses are
+        # memoized too (`None`) — caching only successes is what left the stale
+        # path unbounded. Scoped to this build: an aborted build (see the
+        # assignment block below) discards it, so the next call retries.
+        resolutions: dict[str | int, ResolvedEntity | None] = {}
 
         for rule in self._config.rules:
             levels = {
@@ -275,7 +357,48 @@ class Authorizer:
                         "chat-targeted access rules"
                     )
                 for ref in refs:
-                    resolved = await self._resolver.resolve(ref)
+                    if ref in resolutions:
+                        resolved = resolutions[ref]
+                    else:
+                        try:
+                            resolved = await self._resolver.resolve(ref)
+                        except EntityError as exc:
+                            # A stale or ambiguous ref must not abort the index
+                            # build — that would take the whole policy, and with
+                            # it every gated command, down over one dead config
+                            # line. Skipping narrows *capabilities*
+                            # (deny-by-default), so the worst case there is a
+                            # loud 403; the rule's restrictive `*_only` override
+                            # is *not* a capability and is preserved as a floor
+                            # below rather than silently relaxing the policy.
+                            # Deliberately narrow: a translated FloodWaitError
+                            # is *not* an EntityError and keeps propagating, so
+                            # the queue can pause-and-retry instead of denying a
+                            # chat during a throttle.
+                            resolved = None
+                            _log.warning(
+                                "access_rule_ref_unresolved",
+                                ref=str(ref),
+                                error=str(exc),
+                                permissions=sorted(rule.effective_permissions),
+                            )
+                            unresolved.append(
+                                UnresolvedAccessRef(ref=str(ref), error=str(exc))
+                            )
+                        resolutions[ref] = resolved
+                    if resolved is None:
+                        # Fail-safe floor: the hardened chat can no longer be
+                        # identified, so a restrictive override applies to every
+                        # chat. Computed per *rule occurrence*, not per distinct
+                        # ref — the memo above is about the resolution, and a
+                        # second rule naming the same dead ref still gets a say.
+                        # `is True` on purpose: a skipped `False` (a relaxation)
+                        # contributes nothing — losing it already fails safe.
+                        if delete_override is True:
+                            delete_only_floor = True
+                        if edit_override is True:
+                            edit_only_floor = True
+                        continue
                     chat_caps.setdefault(resolved.chat_id, set()).update(levels)
                     if delete_override is not None:
                         chat_delete_only[resolved.chat_id] = _merge_only(
@@ -297,6 +420,9 @@ class Authorizer:
         self._chat_edit_only = chat_edit_only
         self._folder_edit_only = folder_edit_only
         self._folder_id_edit_only = folder_id_edit_only
+        self._unresolved_refs = tuple(unresolved)
+        self._delete_only_floor = delete_only_floor
+        self._edit_only_floor = edit_only_floor
         self._built = True
 
     async def _folder_memberships(self, chat_id: int) -> set[Membership]:
@@ -533,6 +659,12 @@ class Authorizer:
         restrictive ``True`` from either wins. Within one level a restrictive
         ``True`` already won at index-build time. The override maps are read
         *after* :meth:`_ensure_index` populates them.
+
+        Finally the fail-safe floor left by a skipped ``chat:`` ref is applied
+        on top, through the same restrictive-``True``-wins merge: it outranks
+        every level because the chat whose rule set it can no longer be
+        identified. This is the single place both public accessors resolve the
+        question, so the floor cannot be bypassed by one of them.
         """
         await self._ensure_index()
         if which == "delete":
@@ -540,11 +672,13 @@ class Authorizer:
             folder_overrides_map = self._folder_delete_only
             folder_id_overrides_map = self._folder_id_delete_only
             chat_overrides_map = self._chat_delete_only
+            floor = self._delete_only_floor
         else:
             default_override = self._default_edit_only
             folder_overrides_map = self._folder_edit_only
             folder_id_overrides_map = self._folder_id_edit_only
             chat_overrides_map = self._chat_edit_only
+            floor = self._edit_only_floor
         lookup_id = _canonical_chat_id(chat_id)
         if folder_memberships is None:
             memberships: Iterable[Membership] = await self._folder_memberships(
@@ -571,7 +705,7 @@ class Authorizer:
             effective = any(folder_overrides)
         if lookup_id in chat_overrides_map:
             effective = chat_overrides_map[lookup_id]
-        return effective
+        return _merge_only(effective, floor)
 
     async def delete_only_session_messages(
         self,
@@ -584,8 +718,10 @@ class Authorizer:
 
         Starts from the policy-level ``default`` and applies the most specific
         matching rule override (chat rule > folder rule > all rule). Within one
-        level a restrictive ``True`` already won at index-build time. With no
-        active policy the ``default`` is returned unchanged.
+        level a restrictive ``True`` already won at index-build time. A skipped
+        ``chat:`` ref whose rule restricted deletes raises a global floor that
+        outranks all of it (see :class:`UnresolvedAccessRef`). With no active
+        policy the ``default`` is returned unchanged.
         """
         if self._config is None:
             return default
@@ -607,7 +743,8 @@ class Authorizer:
 
         Mirror of :meth:`delete_only_session_messages`: chat rule > folder rule
         > all rule > policy ``default``, restrictive ``True`` wins on same-level
-        conflict. With no active policy the ``default`` is returned unchanged.
+        conflict, and a skipped-ref floor outranks all of it. With no active
+        policy the ``default`` is returned unchanged.
         """
         if self._config is None:
             return default
@@ -718,4 +855,5 @@ __all__ = [
     "AccessDenied",
     "AccessLevel",
     "Authorizer",
+    "UnresolvedAccessRef",
 ]

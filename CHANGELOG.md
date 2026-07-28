@@ -3,9 +3,21 @@
 
 ## Unreleased
 
+### Features
+
+- access: Report skipped chat rules in access check
+
+### Bug Fixes
+
+- access: Skip unresolvable chat rules with a warning
+
 ### Documentation
 
 - rich-markdown: Implementation plan for the ffprobe-backed media path
+
+### Miscellaneous
+
+- Todo
 
 ### Refactor
 

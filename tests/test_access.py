@@ -12,9 +12,14 @@ import json
 
 import pytest
 
-from telegram_assistant.access import AccessDenied, AccessLevel, Authorizer
+from telegram_assistant.access import (
+    AccessDenied,
+    AccessLevel,
+    Authorizer,
+    UnresolvedAccessRef,
+)
 from telegram_assistant.config.models import AccessConfig, AccessRule
-from telegram_assistant.entities import ResolvedEntity
+from telegram_assistant.entities import EntityNotFoundError, ResolvedEntity
 from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.observability import configure_logging
 
@@ -904,3 +909,352 @@ async def test_folder_id_rule_denies_caller_supplied_name_memberships() -> None:
         await auth.require(10, AccessLevel.WRITE, folder_memberships=["Clients"])
     # An explicit (id, name) membership pair does match.
     await auth.require(10, AccessLevel.WRITE, folder_memberships=[(1, "Clients")])
+
+
+# ---------------------------------------------------------------------------
+# Unresolvable `chat:` rules are skipped, not fatal
+# ---------------------------------------------------------------------------
+
+
+class PartialResolver:
+    """Resolver whose lookup table may be missing refs.
+
+    A miss raises :class:`EntityNotFoundError` — exactly what the Telethon
+    resolver does for a stale ``chat:`` rule pointing at a chat that no longer
+    exists (or was never reachable from this account).
+    """
+
+    def __init__(self, mapping: dict[object, int]) -> None:
+        self._mapping = mapping
+        self.calls: list[object] = []
+
+    async def resolve(self, ref: object) -> ResolvedEntity:
+        self.calls.append(ref)
+        if ref not in self._mapping:
+            raise EntityNotFoundError(f"no entity found for reference {ref!r}")
+        return ResolvedEntity(
+            chat_id=self._mapping[ref], title=str(ref), kind="channel"
+        )
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_chat_rule_does_not_break_the_policy() -> None:
+    # One dead rule must not take the whole policy — and therefore every gated
+    # command — down with it.
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(chat="ghost", permission="write"),
+                AccessRule(chat="@live", permission="write"),
+            ]
+        ),
+        resolver=PartialResolver({"@live": 42}),
+    )
+    # The live rule still grants...
+    await auth.require(42, AccessLevel.WRITE)
+    # ...and the dead one grants nothing rather than exploding.
+    caps, matched = await auth.describe(999)
+    assert caps == frozenset()
+    assert matched is None
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_ref_does_not_cost_its_siblings_their_grant() -> None:
+    # A rule may carry several refs; a dead one must be skipped per-ref, not
+    # take the whole rule (and its live siblings) with it.
+    auth = Authorizer(
+        AccessConfig(
+            rules=[AccessRule(chats=["@good", "ghost"], permission="write")]
+        ),
+        resolver=PartialResolver({"@good": 7}),
+    )
+    await auth.require(7, AccessLevel.WRITE)
+    assert [u.ref for u in auth.unresolved_refs] == ["ghost"]
+    assert isinstance(auth.unresolved_refs[0], UnresolvedAccessRef)
+    assert "no entity found" in auth.unresolved_refs[0].error
+    assert auth.unresolved_refs[0].to_dict() == {
+        "ref": "ghost",
+        "error": auth.unresolved_refs[0].error,
+    }
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_chat_rule_is_skipped_too() -> None:
+    from telegram_assistant.entities import AmbiguousEntityError
+
+    class AmbiguousResolver:
+        async def resolve(self, ref: object) -> ResolvedEntity:
+            raise AmbiguousEntityError(ref=str(ref), matches=[1, 2])
+
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(chat="Team", permission="write")]),
+        resolver=AmbiguousResolver(),
+    )
+    caps, matched = await auth.describe(1)
+    assert caps == frozenset()
+    assert matched is None
+    assert [u.ref for u in auth.unresolved_refs] == ["Team"]
+
+
+@pytest.mark.asyncio
+async def test_flood_wait_during_rule_resolution_still_propagates() -> None:
+    # The narrow `except EntityError` exists to protect this: swallowing a
+    # throttle would silently deny a chat instead of letting the queue
+    # pause-and-retry.
+    from telegram_assistant.worker.queue import FloodWaitError
+
+    class FloodingResolver:
+        async def resolve(self, ref: object) -> ResolvedEntity:
+            raise FloodWaitError(30)
+
+    auth = Authorizer(
+        AccessConfig(rules=[AccessRule(chat="@x", permission="write")]),
+        resolver=FloodingResolver(),
+    )
+    with pytest.raises(FloodWaitError):
+        await auth.require(1, AccessLevel.READ)
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_rule_emits_structured_warning(_restore_logging) -> None:
+    buf = io.StringIO()
+    configure_logging(level="DEBUG", stream=buf, force=True)
+    auth = Authorizer(
+        AccessConfig(
+            rules=[AccessRule(chat="ghost", permissions=["read", "write"])]
+        ),
+        resolver=PartialResolver({}),
+    )
+    await auth.describe(1)
+    skipped = [
+        r
+        for r in _capture_access_log(buf)
+        if r.get("event") == "access_rule_ref_unresolved"
+    ]
+    assert skipped, "expected an access_rule_ref_unresolved log line"
+    record = skipped[-1]
+    assert record["ref"] == "ghost"
+    assert "no entity found" in record["error"]
+    assert record["permissions"] == ["read", "write"]
+    assert record["level"] == "warning"
+
+
+# ---------------------------------------------------------------------------
+# A skipped ref keeps its rule's restrictive `*_only_session_messages` as a
+# global floor
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_skipped_ref_keeps_restrictive_delete_only_as_a_floor() -> None:
+    # The operator hardened one chat with `delete_only_session_messages: true`
+    # on top of a permissive `all:` baseline. The ref goes stale, so the chat it
+    # named cannot be identified — dropping the restriction would let
+    # `messages delete` prune arbitrary messages in exactly the chat that was
+    # hardened. Fail safe: the `True` becomes a floor for every chat.
+    auth = Authorizer(
+        AccessConfig(
+            delete_only_session_messages=False,
+            rules=[
+                AccessRule(all=True, permissions=["read", "write", "delete"]),
+                AccessRule(
+                    chat="Team Alpha",
+                    permissions=["read", "write", "delete"],
+                    delete_only_session_messages=True,
+                ),
+            ],
+        ),
+        resolver=PartialResolver({}),
+    )
+    # The `all:` rule still grants delete...
+    await auth.require(999, AccessLevel.DELETE)
+    # ...but the hardening survives the skipped ref, for every chat.
+    assert await auth.delete_only_session_messages(999, default=False) is True
+    assert await auth.delete_only_session_messages(12345, default=False) is True
+    # Edit is a separate capability: nothing raised an edit floor.
+    assert await auth.edit_only_session_messages(999, default=False) is False
+
+
+@pytest.mark.asyncio
+async def test_skipped_ref_keeps_restrictive_edit_only_as_a_floor() -> None:
+    auth = Authorizer(
+        AccessConfig(
+            edit_only_session_messages=False,
+            rules=[
+                AccessRule(all=True, permissions=["read", "write"]),
+                AccessRule(
+                    chat="Team Alpha",
+                    permissions=["read", "write"],
+                    edit_only_session_messages=True,
+                ),
+            ],
+        ),
+        resolver=PartialResolver({}),
+    )
+    assert await auth.edit_only_session_messages(999, default=False) is True
+    assert await auth.delete_only_session_messages(999, default=False) is False
+
+
+@pytest.mark.asyncio
+async def test_skipped_ref_with_relaxing_override_sets_no_floor() -> None:
+    # A skipped rule whose override *relaxes* (`false`) contributes no floor:
+    # dropping a relaxation already fails safe.
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(all=True, permissions=["read", "write", "delete"]),
+                AccessRule(
+                    chat="Saved",
+                    permissions=["read", "write", "delete"],
+                    delete_only_session_messages=False,
+                    edit_only_session_messages=False,
+                ),
+            ],
+        ),
+        resolver=PartialResolver({}),
+    )
+    assert await auth.delete_only_session_messages(999, default=False) is False
+    assert await auth.edit_only_session_messages(999, default=False) is False
+
+
+@pytest.mark.asyncio
+async def test_clean_policy_raises_no_floor() -> None:
+    # Nothing skipped ⇒ existing specificity behaviour, untouched: the
+    # restriction applies to the chat it names and to no other.
+    auth = Authorizer(
+        AccessConfig(
+            delete_only_session_messages=False,
+            rules=[
+                AccessRule(all=True, permissions=["read", "write", "delete"]),
+                AccessRule(
+                    chat="@alpha",
+                    permissions=["read", "write", "delete"],
+                    delete_only_session_messages=True,
+                ),
+            ],
+        ),
+        resolver=PartialResolver({"@alpha": 11}),
+    )
+    assert auth.unresolved_refs == ()
+    assert await auth.delete_only_session_messages(11, default=False) is True
+    assert await auth.delete_only_session_messages(999, default=False) is False
+
+
+# ---------------------------------------------------------------------------
+# One resolution attempt per distinct ref per index build
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_repeated_ref_costs_one_resolution_attempt_per_build() -> None:
+    # A stale non-numeric ref costs a full `iter_dialogs` title scan; N rules
+    # naming it must not cost N scans (the account has been throttled before).
+    resolver = PartialResolver({"@live": 42})
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(chat="ghost", permission="read"),
+                AccessRule(chats=["ghost", "@live"], permission="write"),
+                AccessRule(chat="@live", permission="delete"),
+            ]
+        ),
+        resolver=resolver,
+    )
+    caps, _matched = await auth.describe(42)
+    assert resolver.calls == ["ghost", "@live"]
+    # ...and the dedup does not cost a rule its contribution.
+    assert caps == frozenset({AccessLevel.WRITE, AccessLevel.DELETE})
+    assert [u.ref for u in auth.unresolved_refs] == ["ghost"]
+
+
+@pytest.mark.asyncio
+async def test_deduped_ref_still_contributes_every_rules_override() -> None:
+    # Memoizing the resolution must not collapse the *policy*: both rules
+    # naming the same ref still contribute caps and `*_only` overrides.
+    resolver = PartialResolver({"@live": 42})
+    auth = Authorizer(
+        AccessConfig(
+            delete_only_session_messages=False,
+            rules=[
+                AccessRule(chat="@live", permission="read"),
+                AccessRule(
+                    chat="@live",
+                    permissions=["write", "delete"],
+                    delete_only_session_messages=True,
+                ),
+            ],
+        ),
+        resolver=resolver,
+    )
+    caps, _matched = await auth.describe(42)
+    assert caps == frozenset(
+        {AccessLevel.READ, AccessLevel.WRITE, AccessLevel.DELETE}
+    )
+    assert resolver.calls == ["@live"]
+    assert await auth.delete_only_session_messages(42, default=False) is True
+
+
+@pytest.mark.asyncio
+async def test_repeated_skipped_ref_raises_the_floor_from_any_rule() -> None:
+    # The memo is about the *resolution*, not the rule: a second rule naming the
+    # same dead ref must still contribute its restrictive override.
+    resolver = PartialResolver({})
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(all=True, permissions=["read", "write", "delete"]),
+                AccessRule(chat="ghost", permission="delete"),
+                AccessRule(
+                    chat="ghost",
+                    permission="delete",
+                    delete_only_session_messages=True,
+                ),
+            ]
+        ),
+        resolver=resolver,
+    )
+    assert await auth.delete_only_session_messages(999, default=False) is True
+    assert resolver.calls == ["ghost"]
+    assert [u.ref for u in auth.unresolved_refs] == ["ghost"]
+
+
+@pytest.mark.asyncio
+async def test_flood_wait_mid_build_leaves_the_index_unbuilt() -> None:
+    # A build that raises must leave no half-state: no recorded unresolved refs
+    # (they belong to an index that was never installed) and a clean rebuild on
+    # the next call.
+    from telegram_assistant.worker.queue import FloodWaitError
+
+    class FloodOnceResolver:
+        def __init__(self) -> None:
+            self.calls: list[object] = []
+            self.flood = True
+
+        async def resolve(self, ref: object) -> ResolvedEntity:
+            self.calls.append(ref)
+            if ref == "ghost":
+                raise EntityNotFoundError(f"no entity found for {ref!r}")
+            if self.flood:
+                self.flood = False
+                raise FloodWaitError(30)
+            return ResolvedEntity(chat_id=42, title=str(ref), kind="channel")
+
+    resolver = FloodOnceResolver()
+    auth = Authorizer(
+        AccessConfig(
+            rules=[
+                AccessRule(chat="ghost", permission="write"),
+                AccessRule(chat="@live", permission="write"),
+            ]
+        ),
+        resolver=resolver,
+    )
+    with pytest.raises(FloodWaitError):
+        await auth.describe(42)
+    assert auth.unresolved_refs == ()
+    # The next call rebuilds from scratch — including re-attempting the ref
+    # whose miss was memoized only for the aborted build.
+    caps, _matched = await auth.describe(42)
+    assert caps == frozenset({AccessLevel.WRITE})
+    assert [u.ref for u in auth.unresolved_refs] == ["ghost"]
+    assert resolver.calls == ["ghost", "@live", "ghost", "@live"]
