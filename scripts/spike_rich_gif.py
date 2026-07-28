@@ -38,9 +38,9 @@ Usage::
     .venv/bin/python scripts/spike_rich_gif.py --file loop.gif --only gif-probed
     .venv/bin/python scripts/spike_rich_gif.py --file loop.gif --dry-run
 
-Exit codes: 0 = every attempted candidate was sent (accepted or not, the
-taxonomy is the finding), 2 = precondition missing (no file, no session, no
-config, Telethon too old, no ffmpeg), 3 = an upload failed outright.
+Exit codes: 0 = at least one candidate was accepted (or dry run), 2 =
+precondition missing (no file, no session, no config, Telethon too old, no
+ffmpeg), 3 = the server rejected the upload or send for *every* candidate.
 """
 
 from __future__ import annotations
@@ -340,7 +340,7 @@ async def _run(args: argparse.Namespace) -> int:
             if ok:
                 sent.append(candidate.name)
         print(f"\nsent: {', '.join(sent) if sent else '(none)'}")
-        return 0
+        return 0 if sent else 3
     finally:
         await manager.disconnect()
 

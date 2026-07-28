@@ -21,6 +21,7 @@
 
 ### Documentation
 
+- rich-markdown: Record the ffprobe-backed media attribute path
 - rich-markdown: Implementation plan for the ffprobe-backed media path
 
 ### Miscellaneous
