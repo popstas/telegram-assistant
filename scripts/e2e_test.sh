@@ -3,22 +3,35 @@
 #
 # Prerequisites (manual, see Task 17 in docs/plans/20260518-telegram-assistant-mvp.md):
 #   1. data/config.yml exists with valid api_id / api_hash / bearer_token.
-#   2. data/sessions/expertizemeAssistant/session.session is an authorized
-#      Telethon session for the test account (use `telegram-assistant auth`
-#      to create one if missing).
-#   3. The test account is a member of a Telegram folder called "Clients" that
-#      contains a chat named "Client chat test".
-#   4. The server is running locally on the port from data/config.yml
+#   2. data/sessions/popstas/session.session is an authorized Telethon session
+#      for the test account (use `telegram-assistant auth` to create one if
+#      missing). The path is read from data/config.yml, not hardcoded here.
+#   3. The test account has a Telegram folder called "Клиенты" (${FOLDER}).
+#      The group-shaped steps create their own chat inside it; nothing
+#      pre-existing in that folder is written to.
+#   4. telegram.access grants WRITE on the destination folder — `groups create`
+#      is gated on the folder it places the new chat into. Saved Messages needs
+#      `chat: me` with permissions [write, delete].
+#   5. The server is running locally on the port from data/config.yml
 #      (default 8085), e.g.:
 #        uvicorn telegram_assistant.http_api:create_app --factory --port 8085
 #
+# Targets:
+#   * Every message-shaped step goes to Saved Messages (${TEST_CHAT}) — it is
+#     always writable, never shared, and self-cleaning by nature.
+#   * Only the genuinely group-shaped steps (create group, topics, members)
+#     touch a chat, and that chat is created by this script.
+#   ⚠️ Mass send to a folder is deliberately NOT covered live: it would fan out
+#   to every chat in "${FOLDER}", including real ones. Mass mode stays under the
+#   unit tests with fakes (tests/test_messages.py).
+#
 # What this script verifies:
 #   - GET  /health
-#   - GET  /telegram/folders/Clients
-#   - POST /telegram/groups            (creates "Client chat test 2")
+#   - GET  /telegram/folders/{folder}
+#   - POST /telegram/groups            (creates "${GROUP_TITLE}")
 #   - POST /telegram/topics/bulk-create (Topic 1/2/3 in the new group)
-#   - POST /telegram/groups/{chat_id}/members/bulk-add (adds @popstas)
-#   - POST /telegram/messages          (mass send to folder + topic)
+#   - POST /telegram/groups/{chat_id}/members/bulk-add (adds ${USER_TO_ADD})
+#   - POST /telegram/messages          (targeted send to Saved Messages)
 #   - POST /telegram/messages          (reply_to: parent + threaded reply)
 #   - GET  /telegram/messages/recent   (?minutes= windowed read)
 #   - POST /telegram/messages/delete   (delete a message this process just
@@ -32,8 +45,9 @@ set -euo pipefail
 
 BASE_URL="${BASE_URL:-http://127.0.0.1:8085}"
 BEARER="${BEARER:-e2e-test-token}"
-FOLDER="${FOLDER:-Clients}"
-NEW_CHAT_TITLE="${NEW_CHAT_TITLE:-Client chat test 2}"
+FOLDER="${FOLDER:-Клиенты}"
+TEST_CHAT="${TEST_CHAT:-me}"
+GROUP_TITLE="${GROUP_TITLE:-e2e test group}"
 PLANFIX_TASK_ID="${PLANFIX_TASK_ID:-e2e-task-1}"
 USER_TO_ADD="${USER_TO_ADD:-@popstas}"
 
@@ -63,6 +77,10 @@ fi
 auth_header=(-H "Authorization: Bearer ${BEARER}")
 json_header=(-H "Content-Type: application/json")
 
+# The folder name is non-ASCII ("Клиенты"), so percent-encode it before it goes
+# into a URL path — curl passes raw bytes through unencoded.
+folder_enc=$(jq -rn --arg f "${FOLDER}" '$f|@uri')
+
 step() {
     echo
     echo ">>> $*"
@@ -72,12 +90,24 @@ step "health"
 curl -sS "${BASE_URL}/health" | jq .
 
 step "inspect folder '${FOLDER}'"
-folder_response=$(curl -sS "${auth_header[@]}" "${BASE_URL}/telegram/folders/${FOLDER}")
+folder_response=$(curl -sS "${auth_header[@]}" "${BASE_URL}/telegram/folders/${folder_enc}")
 echo "${folder_response}" | jq .
 
-step "create group '${NEW_CHAT_TITLE}'"
+# Resolve Saved Messages once — every message-shaped step below addresses it by
+# numeric id, which is also what the GET /messages/recent query param takes.
+step "resolve test chat '${TEST_CHAT}' (Saved Messages)"
+test_chat_id=$(curl -sS "${auth_header[@]}" \
+    "${BASE_URL}/telegram/messages/recent?entity=${TEST_CHAT}&limit=1" \
+    | jq -r '.telegram_chat_id // empty')
+if [[ -z "${test_chat_id}" ]]; then
+    echo "could not resolve test chat '${TEST_CHAT}' — aborting" >&2
+    exit 1
+fi
+echo "resolved test_chat_id=${test_chat_id}"
+
+step "create group '${GROUP_TITLE}'"
 create_payload=$(jq -nc \
-    --arg title "${NEW_CHAT_TITLE}" \
+    --arg title "${GROUP_TITLE}" \
     --arg pid "${PLANFIX_TASK_ID}" \
     --arg folder "${FOLDER}" \
     '{title: $title, planfix_task_id: $pid, folder_name: $folder, members: [], admins: []}')
@@ -111,15 +141,15 @@ curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
     -d "${add_payload}" \
     "${BASE_URL}/telegram/groups/${chat_id}/members/bulk-add" | jq .
 
-step "mass send to folder '${FOLDER}', topic 'Topic 1'"
-mass_payload=$(jq -nc --arg folder "${FOLDER}" \
-    '{folder_name: $folder, topic_name: "Topic 1", text: "e2e ping"}')
+step "targeted send to '${TEST_CHAT}' (chat ${test_chat_id})"
+send_payload=$(jq -nc --arg cid "${test_chat_id}" \
+    '{telegram_chat_id: ($cid|tonumber), text: "e2e ping"}')
 curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
-    -d "${mass_payload}" \
-    "${BASE_URL}/telegram/messages" | jq .
+    -d "${send_payload}" \
+    "${BASE_URL}/telegram/messages" | jq '{telegram_message_id, scheduled, operation_status}'
 
-step "reply_to: send a parent into chat ${chat_id}, then reply to it"
-parent_payload=$(jq -nc --arg cid "${chat_id}" \
+step "reply_to: send a parent into chat ${test_chat_id}, then reply to it"
+parent_payload=$(jq -nc --arg cid "${test_chat_id}" \
     '{telegram_chat_id: ($cid|tonumber), text: "e2e parent for reply"}')
 parent_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
     -d "${parent_payload}" \
@@ -127,20 +157,20 @@ parent_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
 echo "${parent_resp}" | jq '{telegram_message_id}'
 parent_id=$(echo "${parent_resp}" | jq -r '.telegram_message_id // empty')
 if [[ -n "${parent_id}" ]]; then
-    reply_payload=$(jq -nc --arg cid "${chat_id}" --argjson pid "${parent_id}" \
+    reply_payload=$(jq -nc --arg cid "${test_chat_id}" --argjson pid "${parent_id}" \
         '{telegram_chat_id: ($cid|tonumber), text: "e2e reply", reply_to_message_id: $pid}')
     curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
         -d "${reply_payload}" \
         "${BASE_URL}/telegram/messages" | jq '{telegram_message_id, scheduled}'
 fi
 
-step "messages recent ?minutes=60 for chat ${chat_id} (limit 3)"
+step "messages recent ?minutes=60 for chat ${test_chat_id} (limit 3)"
 curl -sS "${auth_header[@]}" \
-    "${BASE_URL}/telegram/messages/recent?chat_id=${chat_id}&limit=3&minutes=60" \
+    "${BASE_URL}/telegram/messages/recent?chat_id=${test_chat_id}&limit=3&minutes=60" \
     | jq '{telegram_chat_id, minutes, limit, count}'
 
-step "delete: send a throwaway message into chat ${chat_id}, then delete it"
-del_payload=$(jq -nc --arg cid "${chat_id}" \
+step "delete: send a throwaway message into chat ${test_chat_id}, then delete it"
+del_payload=$(jq -nc --arg cid "${test_chat_id}" \
     '{telegram_chat_id: ($cid|tonumber), text: "e2e delete target (self-cleaning)"}')
 del_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
     -d "${del_payload}" \
@@ -148,7 +178,7 @@ del_resp=$(curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
 echo "${del_resp}" | jq '{telegram_message_id}'
 del_id=$(echo "${del_resp}" | jq -r '.telegram_message_id // empty')
 if [[ -n "${del_id}" ]]; then
-    delete_payload=$(jq -nc --arg cid "${chat_id}" --argjson mid "${del_id}" \
+    delete_payload=$(jq -nc --arg cid "${test_chat_id}" --argjson mid "${del_id}" \
         '{telegram_chat_id: ($cid|tonumber), message_ids: [$mid], revoke: true}')
     curl -sS -X POST "${auth_header[@]}" "${json_header[@]}" \
         -d "${delete_payload}" \

@@ -12,6 +12,7 @@ import typer
 from telegram_assistant import __version__
 from telegram_assistant.config import ConfigError, load_config
 from telegram_assistant.health import collect_health, default_database_path
+from telegram_assistant.members import DEFAULT_MEMBER_LIST_LIMIT
 from telegram_assistant.observability.logging import configure_logging
 from telegram_assistant.persistence import (
     OperationNotFoundError,
@@ -3218,6 +3219,184 @@ def members_bulk_remove(
     except Exception as exc:
         _raise_for_access_or_entity_error(exc)
         typer.echo(f"members bulk-remove failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
+def _build_member_list_backends(config_path: Path | None):
+    """Open the Telethon-backed participants-list + folder backends + resolver.
+
+    Mirrors :func:`_build_message_read_backends`: a read op needs the read
+    backend, the folder backend (for ``--chat-name`` and folder access rules)
+    and a shared entity resolver so ``--entity`` works. Tests monkeypatch this
+    to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.entities import TelethonEntityResolver
+        from telegram_assistant.folders import TelethonFolderBackend
+        from telegram_assistant.members.telethon_backend import (
+            TelethonMemberListBackend,
+        )
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonMemberListBackend(client),
+            TelethonFolderBackend(client),
+            TelethonEntityResolver(client),
+        )
+
+    return config, manager, _open
+
+
+@members_app.command("list")
+def members_list(
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id to read.",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, t.me/invite link, "
+        "phone, or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    limit: int = typer.Option(
+        DEFAULT_MEMBER_LIST_LIMIT,
+        "--limit",
+        help="Maximum number of participants to return (default 200).",
+    ),
+    query: str | None = typer.Option(
+        None,
+        "--query",
+        help="Substring match on username/first/last name (server-side for the "
+        "default filter).",
+    ),
+    filter: str = typer.Option(
+        "all",
+        "--filter",
+        help="Which participants to list: all|admins|bots.",
+    ),
+    user: str | None = typer.Option(
+        None,
+        "--user",
+        help="Check one user's membership with a single request instead of "
+        "listing (mutually exclusive with --query).",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """List a chat's participants, or check one user's membership (READ-gated)."""
+    from telegram_assistant.folders import (
+        FolderError,
+        resolve_chat_in_folder,
+    )
+    from telegram_assistant.members import list_members
+
+    refs = sum([chat_id is not None, chat_name is not None, entity is not None])
+    if refs != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_member_list_backends(config_path)
+
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _run() -> dict[str, object]:
+        try:
+            list_backend, folder_backend, resolver = await open_backends()
+            if entity is not None:
+                resolved_chat_id = (await resolver.resolve(entity)).chat_id
+            elif chat_id is not None:
+                resolved_chat_id = chat_id
+            else:
+                resolved = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=resolved_folder_name or "",
+                    chat_name=chat_name or "",
+                    folder_id=effective_folder_id,
+                )
+                resolved_chat_id = resolved.chat_id
+
+            authorizer = _cli_authorizer(
+                config, resolver=resolver, folder_backend=folder_backend
+            )
+            result = await list_members(
+                backend=list_backend,
+                chat_id=resolved_chat_id,
+                limit=limit,
+                query=query,
+                filter=filter,
+                user=user,
+                authorizer=authorizer,
+            )
+            return {
+                "telegram_chat_id": resolved_chat_id,
+                "limit": limit,
+                "query": query,
+                "filter": filter,
+                **result.to_dict(),
+            }
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except ValueError as exc:
+        # Bad caller input (limit, filter, user+query) — exit 2 like the rest of
+        # the domain rejections. AccessDenied/EntityError are RuntimeErrors, so
+        # they fall through to the access/entity mapping below.
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"members list failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
     typer.echo(json.dumps(payload, sort_keys=True, default=str))

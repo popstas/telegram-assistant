@@ -69,8 +69,8 @@ telegram-assistant health
 Commands fall into three buckets:
 
 1. **Read-only** — `health`, `folders inspect`, `operations status`,
-   `groups get-layout`. Run them immediately, no confirmation, no
-   `--dry-run`.
+   `groups get-layout`, `members list`. Run them immediately, no
+   confirmation, no `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `groups rename`, `topics create`, `topics close`, `topics open`,
    `topics rename`,
@@ -219,6 +219,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `topics` | `rename` | Rename an existing forum topic (change its title). | `telegram-assistant topics rename ...` |
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
+| `members` | `list` | Read-only: list a chat's participants (`--query`, `--filter all\|admins\|bots`, `--limit`, default 200), or check one user's membership with `--user` (READ-gated, never writes). | `telegram-assistant members list ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. `--rich-markdown <file.md>` sends a Telegram rich message (article) instead of plain text, with paragraph spacing, line splitting and `<tg-collage>` grouping on by default (`--no-spaced-paragraphs`, `--no-line-breaks`, `--media-group`) and local media resolved from the article's directory (`--rich-file`, `--vault-dir`). | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
@@ -1351,6 +1352,41 @@ Request: «Убери @employee_username из чата Клиент / проек
 5. After explicit confirmation, run without `--dry-run` and with
    `--yes`. Only add `--force` when the human approves it for the
    specific protected users named in the plan.
+
+### `members list`
+
+Request: «Кто состоит в чате Клиент / проект?» / «Есть ли
+@planfix_bot в этих чатах?»
+
+1. Resource/action: `members` / `list`. Read-only — run it immediately,
+   no `--dry-run` (there is none), no confirmation.
+2. Membership of one user is a **separate mode**: `--user <ref>` answers
+   it with a single request per chat and returns `is_member` plus the
+   role. Never use `members bulk-add --dry-run` for this — it plans an
+   add without checking membership (`action: would_add` even for a user
+   who is already there), so it answers a different question.
+
+   ```bash
+   telegram-assistant members list \
+     --chat-name "Клиент / проект" \
+     --user @planfix_bot
+   ```
+
+3. Full roster: omit `--user`. `--filter all|admins|bots` picks the
+   Telegram-side filter, `--query <substring>` searches by
+   username/first/last name (server-side for the default filter), and
+   `--limit` caps the walk (default 200). `--user` and `--query` are
+   mutually exclusive.
+4. Read the reply: `participants_count` is the chat's total and
+   `truncated: true` means the walk stopped early (limit reached, or
+   Telegram's ~10k ceiling on a full enumeration) — say so instead of
+   presenting a partial list as complete.
+5. Checking many chats: loop the `--user` form over the chat ids from
+   `folders inspect`. There is no folder-wide mode by design — one
+   request per chat keeps it read-only and cheap.
+6. Typical errors: `exactly one of --chat-id, --chat-name, or --entity
+   must be supplied` and `unknown filter '...'` (exit 2); a chat with no
+   READ grant exits 3.
 
 ### `messages send` — targeted
 

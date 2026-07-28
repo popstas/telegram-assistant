@@ -1,5 +1,14 @@
 """Member-management domain shared by HTTP, CLI, and the worker."""
 
+from telegram_assistant.members.listing import (
+    DEFAULT_MEMBER_LIST_LIMIT,
+    NON_MEMBER_ROLES,
+    VALID_MEMBER_FILTERS,
+    MemberListBackend,
+    MemberListResult,
+    Participant,
+    list_members,
+)
 from telegram_assistant.members.service import (
     BulkMemberAddFailed,
     BulkMemberAddNeedsReview,
@@ -32,6 +41,9 @@ from telegram_assistant.members.service import (
 )
 
 __all__ = [
+    "DEFAULT_MEMBER_LIST_LIMIT",
+    "NON_MEMBER_ROLES",
+    "VALID_MEMBER_FILTERS",
     "BulkMemberAddFailed",
     "BulkMemberAddNeedsReview",
     "BulkMemberAddPending",
@@ -49,12 +61,16 @@ __all__ = [
     "MemberAddBackend",
     "MemberAddError",
     "MemberAlreadyPresentError",
+    "MemberListBackend",
+    "MemberListResult",
     "MemberNotPresentError",
     "MemberPrivacyError",
     "MemberRemoveBackend",
     "NormalizedMember",
+    "Participant",
     "bulk_add_members",
     "bulk_remove_members",
+    "list_members",
     "coerce_user_ref",
     "looks_like_phone",
     "normalize_phone",

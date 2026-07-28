@@ -75,6 +75,7 @@ from telegram_assistant.http_api.members import (
     BulkMemberRemoveBody,
     BulkMemberRemoveItemBody,
     _member_backend_or_503,
+    _member_list_backend_or_503,
     _member_remove_backend_or_503,
 )
 from telegram_assistant.http_api.members import (
@@ -152,6 +153,7 @@ from telegram_assistant.http_api.topics import (
     _worker_queue_for_request as _topic_worker_queue_for_request,
 )
 from telegram_assistant.members import (
+    DEFAULT_MEMBER_LIST_LIMIT,
     BulkMemberAddFailed,
     BulkMemberAddNeedsReview,
     BulkMemberAddPending,
@@ -164,6 +166,7 @@ from telegram_assistant.members import (
     BulkMemberRemoveRequest,
     bulk_add_members,
     bulk_remove_members,
+    list_members,
     normalize_user_ref,
     protected_user_set,
 )
@@ -2005,6 +2008,58 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
             payload["operation_id"] = op.id
             payload["operation_status"] = op.status.value
             return payload
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_members_list",
+        annotations=READ_TELEGRAM,
+        structured_output=True,
+    )
+    async def telegram_members_list(
+        chat_id: int | None = None,
+        entity: str | None = None,
+        limit: int = DEFAULT_MEMBER_LIST_LIMIT,
+        query: str | None = None,
+        filter: str = "all",
+        user: str | None = None,
+    ) -> dict[str, Any]:
+        """List a chat's participants, or check whether one user is a member.
+
+        ``user`` answers membership for a single user with one request (and is
+        mutually exclusive with ``query``) — use it to check many chats cheaply.
+        ``filter`` is one of ``all``, ``admins``, ``bots``.
+        """
+        request = _request(provider)
+        try:
+            if (chat_id is None) == (entity is None):
+                raise ValueError("provide exactly one of chat_id or entity")
+            backend = _member_list_backend_or_503(request)  # type: ignore[arg-type]
+            resolved_chat_id = (
+                await resolve_entity_chat_id(request, entity)  # type: ignore[arg-type]
+                if entity is not None
+                else chat_id
+            )
+            authorizer = build_authorizer(
+                request,
+                folder_backend=_member_folder_backend_optional(request),  # type: ignore[arg-type]
+            )
+            result = await list_members(
+                backend=backend,
+                chat_id=resolved_chat_id,  # type: ignore[arg-type]
+                limit=limit,
+                query=query,
+                filter=filter,
+                user=user,
+                authorizer=authorizer,
+            )
+            return {
+                "telegram_chat_id": resolved_chat_id,
+                "limit": limit,
+                "query": query,
+                "filter": filter,
+                **result.to_dict(),
+            }
         except Exception as exc:
             _raise_from_exception(exc)
 

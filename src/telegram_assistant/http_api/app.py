@@ -39,7 +39,11 @@ from telegram_assistant.http_api.notifications import (
     build_router as build_notifications_router,
 )
 from telegram_assistant.http_api.topics import build_router as build_topics_router
-from telegram_assistant.members import MemberAddBackend, MemberRemoveBackend
+from telegram_assistant.members import (
+    MemberAddBackend,
+    MemberListBackend,
+    MemberRemoveBackend,
+)
 from telegram_assistant.messages import (
     DeleteBackend,
     EditBackend,
@@ -70,6 +74,7 @@ GroupBackendFactory = Callable[[Request], GroupBackend | None]
 TopicBackendFactory = Callable[[Request], TopicBackend | None]
 MemberBackendFactory = Callable[[Request], MemberAddBackend | None]
 MemberRemoveBackendFactory = Callable[[Request], MemberRemoveBackend | None]
+MemberListBackendFactory = Callable[[Request], MemberListBackend | None]
 MessageBackendFactory = Callable[[Request], MessageBackend | None]
 MessageReadBackendFactory = Callable[[Request], MessageReadBackend | None]
 SearchBackendFactory = Callable[[Request], SearchBackend | None]
@@ -189,6 +194,30 @@ def _default_member_backend_factory(
         )
 
         return TelethonMemberBackend(client)
+
+    return _factory
+
+
+def _default_member_list_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> MemberListBackendFactory:
+    """Build a Telethon-backed participants-list factory for the read op.
+
+    Mirrors :func:`_default_message_read_backend_factory`: returns ``None``
+    until a Telethon client is available so the endpoint can return 503.
+    """
+
+    def _factory(_request: Request) -> MemberListBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.members.telethon_backend import (
+            TelethonMemberListBackend,
+        )
+
+        return TelethonMemberListBackend(client)
 
     return _factory
 
@@ -551,6 +580,7 @@ def create_app(
     topic_backend_factory: TopicBackendFactory | None = None,
     member_backend_factory: MemberBackendFactory | None = None,
     member_remove_backend_factory: MemberRemoveBackendFactory | None = None,
+    member_list_backend_factory: MemberListBackendFactory | None = None,
     message_backend_factory: MessageBackendFactory | None = None,
     message_read_backend_factory: MessageReadBackendFactory | None = None,
     search_backend_factory: SearchBackendFactory | None = None,
@@ -805,6 +835,11 @@ def create_app(
         else _default_member_backend_factory(session_manager)
     )
     app.state.member_remove_backend_factory = member_remove_backend_factory
+    app.state.member_list_backend_factory = (
+        member_list_backend_factory
+        if member_list_backend_factory is not None
+        else _default_member_list_backend_factory(session_manager)
+    )
     app.state.resolver_factory = (
         resolver_factory
         if resolver_factory is not None
