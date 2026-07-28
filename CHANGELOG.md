@@ -3,11 +3,9 @@
 
 ## Unreleased
 
-### Documentation
+### Refactor
 
-- rich-markdown: Spec for a shared ffprobe-backed media attribute path
-- access: Implementation plan for skipping unresolvable chat rules
-- access: Spec for skipping unresolvable chat rules with a warning
+- cli: Extract rich-send input handling out of `messages send` (#20)
 
 ## v0.10.0 - 2026-07-28
 
