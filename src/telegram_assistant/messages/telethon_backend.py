@@ -220,6 +220,7 @@ def _document_attributes(
     probe: media_probe.MediaProbe | None,
     animated: bool = False,
     file_name: str | None = None,
+    log_path: str | None = None,
 ) -> tuple[list[Any], str]:
     """Build the ``InputMediaUploadedDocument`` attributes for one rich file.
 
@@ -241,14 +242,30 @@ def _document_attributes(
     file being a ``.gif``, not by the mime type: by the time this runs the
     upload is already the converted mp4. *file_name* overrides the name derived
     from that temp file so the article shows the author's own name.
+
+    *path* is what actually gets probed and uploaded — for a converted ``.gif``
+    that is the temp mp4. *log_path* is the identity a warning names; it
+    defaults to *path* but the caller passes the author's original file so a
+    converted gif's probe failure is still traceable back to ``loop.gif``
+    rather than a temp file that is gone by the time anyone reads the log.
     """
     from telethon import utils
     from telethon.tl import types
 
+    if log_path is None:
+        log_path = path
     raw_attributes, mime_type = utils.get_attributes(path)
     attributes = list(raw_attributes)
     if kind == "video":
-        if probe is not None and probe.has_video and probe.width and probe.height:
+        if probe is None:
+            reason = "no_probe"
+        elif not probe.has_video:
+            reason = "no_video_stream"
+        elif not (probe.width and probe.height):
+            reason = "no_dimensions"
+        else:
+            reason = None
+        if reason is None:
             attributes = [
                 attr
                 for attr in attributes
@@ -265,8 +282,8 @@ def _document_attributes(
         else:
             _log.warning(
                 "rich media video metadata unavailable, sending stub attributes",
-                path=path,
-                reason="no_probe" if probe is None else "no_video_stream",
+                path=log_path,
+                reason=reason,
             )
     elif kind == "audio":
         if probe is not None:
@@ -281,7 +298,7 @@ def _document_attributes(
         else:
             _log.warning(
                 "rich media audio metadata unavailable, sending stub attributes",
-                path=path,
+                path=log_path,
                 reason="no_probe",
             )
             if not any(
@@ -514,12 +531,14 @@ class TelethonMessageBackend:
                             probe=probe,
                             animated=is_gif,
                             file_name=f"{source.stem}.mp4" if is_gif else None,
+                            log_path=rich_file.path,
                         )
                         thumb = None
                         if rich_file.kind == "video":
                             thumb = await self._upload_video_thumbnail(
                                 path=upload_path,
                                 duration=probe.duration if probe is not None else 0.0,
+                                log_path=rich_file.path,
                             )
                         media = types.InputMediaUploadedDocument(
                             file=handle,
@@ -563,25 +582,34 @@ class TelethonMessageBackend:
                 )
         return uploaded
 
-    async def _upload_video_thumbnail(self, *, path: str, duration: float) -> Any:
+    async def _upload_video_thumbnail(
+        self, *, path: str, duration: float, log_path: str | None = None
+    ) -> Any:
         """Return an uploaded preview frame for *path*, or ``None``.
 
         Telegram's clients draw an empty rectangle for a video with no
         thumbnail, and the server only generates one for smaller uploads. A
         failure here is never a send failure — the article goes out without a
         preview and the reason is logged.
+
+        *path* is what actually gets probed for a frame — for a converted
+        ``.gif`` that is the temp mp4. *log_path* is the identity a warning
+        names; it defaults to *path* but the caller passes the author's
+        original file so the log stays traceable after the temp file is gone.
         """
+        if log_path is None:
+            log_path = path
         thumb_bytes = await asyncio.to_thread(
             media_probe.extract_thumbnail, path, duration=duration
         )
         if not thumb_bytes:
-            _log.warning("rich media thumbnail could not be generated", path=path)
+            _log.warning("rich media thumbnail could not be generated", path=log_path)
             return None
         try:
             return await self._client.upload_file(thumb_bytes, file_name="thumb.jpg")
         except Exception as exc:  # noqa: BLE001 - a preview is never worth the send
             _log.warning(
-                "rich media thumbnail upload failed", path=path, error=str(exc)
+                "rich media thumbnail upload failed", path=log_path, error=str(exc)
             )
             return None
 

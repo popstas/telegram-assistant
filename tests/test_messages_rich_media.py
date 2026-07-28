@@ -902,9 +902,11 @@ async def test_duplicate_rich_file_ids_are_rejected(
 async def test_a_gif_without_ffmpeg_is_rejected_before_the_operation_row(
     tmp_path: Path, store: OperationStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Without ffmpeg the GIF cannot be converted, and an unconverted GIF does
-    not attach at all — failing here leaves the idempotency key free for the
-    retry after the install."""
+    """Without ffmpeg the GIF cannot be converted, and Telegram only reliably
+    attaches an animated GIF as a transcoded mp4 (a raw ``image/gif`` above an
+    undocumented size threshold fails the send with
+    ``RICH_MESSAGE_VIDEO_INVALID``) — failing here leaves the idempotency key
+    free for the retry after the install."""
     from telegram_assistant.messages import media_probe
 
     monkeypatch.setattr(media_probe, "ffmpeg_available", lambda: False)

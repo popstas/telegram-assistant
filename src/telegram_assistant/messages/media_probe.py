@@ -201,10 +201,16 @@ def convert_gif_to_mp4(path: Path | str) -> Path:
     """Convert *path* to a silent mp4 in a temp file and return its path.
 
     Telegram stores "GIFs" as silent mp4 documents marked
-    ``DocumentAttributeAnimated``; an actual ``image/gif`` upload does not
-    attach to an article at all. ``yuv420p`` needs even dimensions, hence the
-    ``trunc`` scale filter, and ``+faststart`` puts the moov atom first so the
-    clients can start playing without the whole file.
+    ``DocumentAttributeAnimated``. A raw ``image/gif`` upload is transcoded
+    server-side only below an undocumented size threshold — measured live
+    2026-07-29 (Saved Messages, msg 407434-407437): a 98 KB gif came back as
+    ``video/mp4`` with real attributes, while a 21.2 MB gif kept
+    ``mime=image/gif`` and made the article send fail with
+    ``RICH_MESSAGE_VIDEO_INVALID``. The threshold is not worth chasing, so
+    conversion runs unconditionally rather than only above some size. ``yuv420p``
+    needs even dimensions, hence the ``trunc`` scale filter, and ``+faststart``
+    puts the moov atom first so the clients can start playing without the whole
+    file.
 
     The caller owns the returned path and must unlink it.
     """

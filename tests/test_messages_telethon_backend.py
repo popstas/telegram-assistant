@@ -765,7 +765,9 @@ MEDIA_MD = (
 
 
 @pytest.mark.asyncio
-async def test_rich_send_uploads_files_in_markdown_order(tmp_path: Any) -> None:
+async def test_rich_send_uploads_files_in_markdown_order(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
     """Each file is uploaded once, in the markdown's order, and comes back as an
     ``InputRichFile`` keyed by the id the body already names."""
     from telethon.tl.functions.messages import UploadMediaRequest
@@ -776,6 +778,10 @@ async def test_rich_send_uploads_files_in_markdown_order(tmp_path: Any) -> None:
         InputRichFilePhoto,
     )
 
+    from telegram_assistant.messages import media_probe
+
+    _fake_probe(monkeypatch, None)
+    monkeypatch.setattr(media_probe, "extract_thumbnail", lambda path, *, duration: None)
     photo = _rich_file(tmp_path, "shot.png", "shot", "photo")
     video = _rich_file(tmp_path, "clip.mp4", "clip", "video")
     client = _UploadingClient()
@@ -816,10 +822,16 @@ async def test_rich_send_uploads_files_in_markdown_order(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rich_send_video_carries_video_attribute(tmp_path: Any) -> None:
+async def test_rich_send_video_carries_video_attribute(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
     """``tg://video`` only resolves when the upload really is a video document."""
     from telethon.tl.types import DocumentAttributeVideo
 
+    from telegram_assistant.messages import media_probe
+
+    _fake_probe(monkeypatch, None)
+    monkeypatch.setattr(media_probe, "extract_thumbnail", lambda path, *, duration: None)
     video = _rich_file(tmp_path, "clip.mp4", "clip", "video")
     client = _UploadingClient()
     backend = TelethonMessageBackend(client)
@@ -833,12 +845,15 @@ async def test_rich_send_video_carries_video_attribute(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_rich_send_audio_gets_audio_attribute(tmp_path: Any) -> None:
+async def test_rich_send_audio_gets_audio_attribute(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
     """Telethon only infers ``DocumentAttributeAudio`` with a metadata library
     installed; without it an ``.mp3`` would be a plain document and
     ``tg://audio`` would not resolve."""
     from telethon.tl.types import DocumentAttributeAudio
 
+    _fake_probe(monkeypatch, None)
     audio = _rich_file(tmp_path, "voice.mp3", "voice", "audio")
     client = _UploadingClient()
     backend = TelethonMessageBackend(client)
@@ -1034,9 +1049,11 @@ async def test_too_long_caption_is_not_reported_as_a_rights_problem() -> None:
 async def test_a_gif_is_uploaded_as_a_converted_mp4(
     tmp_path: Any, monkeypatch: Any
 ) -> None:
-    """An ``image/gif`` upload does not attach to an article at all. Telegram
-    stores "GIFs" as silent mp4 documents marked ``DocumentAttributeAnimated``,
-    so the file is converted before it is uploaded."""
+    """An ``image/gif`` upload is transcoded server-side only below an
+    undocumented size threshold (a 21.2 MB gif kept ``image/gif`` and failed the
+    send with ``RICH_MESSAGE_VIDEO_INVALID``). Telegram stores "GIFs" as silent
+    mp4 documents marked ``DocumentAttributeAnimated``, so conversion runs
+    unconditionally before the file is uploaded."""
     from telethon.tl.types import DocumentAttributeAnimated, DocumentAttributeFilename
 
     from telegram_assistant.messages import media_probe
@@ -1068,6 +1085,41 @@ async def test_a_gif_is_uploaded_as_a_converted_mp4(
     # The temp file's name must not leak: the article shows the author's name.
     assert names == ["loop.mp4"]
     assert client.uploads == [str(converted)]
+
+
+@pytest.mark.asyncio
+async def test_a_converted_gifs_probe_failure_is_logged_with_the_original_name(
+    tmp_path: Any, monkeypatch: Any, _restore_logging: Any
+) -> None:
+    """For a ``.gif`` the probe and thumbnail run against the temp mp4, but a
+    warning naming that temp path is useless once the ``finally`` block unlinks
+    it — the log must name the author's ``loop.gif`` instead."""
+    from telegram_assistant.messages import media_probe
+
+    converted = tmp_path / "converted.mp4"
+    converted.write_bytes(b"\x00mp4")
+    monkeypatch.setattr(media_probe, "convert_gif_to_mp4", lambda path: converted)
+    _fake_probe(monkeypatch, None)
+    monkeypatch.setattr(media_probe, "extract_thumbnail", lambda path, *, duration: None)
+    gif = _rich_file(tmp_path, "loop.gif", "loop", "video")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    buf = io.StringIO()
+    configure_logging(level="DEBUG", stream=buf, force=True)
+
+    await backend.send_message(
+        chat_id=1,
+        text="",
+        rich_markdown="![](tg://video?id=loop)\n",
+        rich_files=(gif,),
+    )
+
+    lines = [json.loads(line) for line in buf.getvalue().strip().splitlines() if line.strip()]
+    warnings = [r for r in lines if r.get("level") == "warning"]
+    assert warnings, lines
+    assert all("loop.gif" in r.get("path", "") for r in warnings), lines
+    assert not any("converted.mp4" in r.get("path", "") for r in warnings), lines
 
 
 @pytest.mark.asyncio

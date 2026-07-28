@@ -27,6 +27,7 @@
 
 ### Miscellaneous
 
+- Regenerate changelog
 - spike: Prove how an animated GIF must be uploaded to attach
 - Todo
 

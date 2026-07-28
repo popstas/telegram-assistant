@@ -897,6 +897,15 @@ async def send_message(
             store.delete_operation(operation_id)
             raise
         except Exception as exc:
+            # Includes MediaConversionError (ffmpeg present but a .gif fails to
+            # convert — corrupt input or the 120s timeout): deliberately
+            # `failed`, not `needs_review`/dropped, because nothing reached
+            # Telegram and the input itself is what needs fixing before a
+            # retry. That is an intentional asymmetry with the ffmpeg-missing
+            # gate in `_validate_rich_files`, which runs before the operation
+            # row is opened specifically to keep the idempotency key free —
+            # this exception fires after the row exists, so an explicit
+            # `--operation-id` retry replays `previous_attempt_failed` here.
             store.fail_operation(operation_id, str(exc))
             raise
     finally:
