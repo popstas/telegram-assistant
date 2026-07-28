@@ -5,6 +5,7 @@
 
 ### Features
 
+- members: Add Telethon participants-list adapter
 - members: Add read-only list_members domain op
 
 ### Documentation
