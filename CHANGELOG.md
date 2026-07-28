@@ -9,6 +9,7 @@
 
 ### Bug Fixes
 
+- access: Keep a skipped rule's restrictive session-only override
 - access: Skip unresolvable chat rules with a warning
 
 ### Documentation
