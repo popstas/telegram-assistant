@@ -5,6 +5,7 @@
 
 ### Documentation
 
+- rich-markdown: Spec for a shared ffprobe-backed media attribute path
 - access: Implementation plan for skipping unresolvable chat rules
 - access: Spec for skipping unresolvable chat rules with a warning
 
