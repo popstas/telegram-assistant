@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import textwrap
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import pytest
 from typer.testing import CliRunner
@@ -62,8 +62,18 @@ class FakeResolver:
         )
 
 
+class _ResolverLike(Protocol):
+    """What ``_build_access_resolver`` actually needs from a resolver.
+
+    The fakes below deliberately share no base class — they model different
+    failure shapes — so the structural type is the honest annotation here.
+    """
+
+    async def resolve(self, ref: Any) -> ResolvedEntity: ...
+
+
 def _patch_access_resolver(
-    monkeypatch: pytest.MonkeyPatch, resolver: FakeResolver
+    monkeypatch: pytest.MonkeyPatch, resolver: _ResolverLike
 ) -> None:
     def _factory(config_path: Path | None) -> Any:
         config = load_config(config_path)
@@ -330,6 +340,63 @@ def test_check_unresolved_refs_empty_when_policy_is_clean(
     )
     assert result.exit_code == 0, result.stdout
     payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["unresolved_refs"] == []
+
+
+def test_check_unresolved_refs_deduped_across_rules(
+    minimal_config_yaml: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two rules naming the same dead ref describe one broken config line; the
+    # operator should be told about it once, not once per rule.
+    access = textwrap.dedent(
+        """
+        access:
+          rules:
+            - chat: "ghost"
+              permission: write
+            - chats:
+                - "ghost"
+                - "@client"
+              permission: read
+            - chat: "stale"
+              permission: read
+        """
+    ).strip() + "\n"
+    cfg = _write_config(tmp_path, _with_access(minimal_config_yaml, access))
+    _patch_access_resolver(
+        monkeypatch, SelectiveFakeResolver({"@client": 555})
+    )
+
+    result = _run(
+        ["access", "check", "--entity", "@client", "--permission", "read",
+         "--config", str(cfg)]
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["unresolved_refs"] == [
+        {"ref": "ghost", "error": "no entity found for reference 'ghost'"},
+        {"ref": "stale", "error": "no entity found for reference 'stale'"},
+    ]
+
+
+def test_check_allow_all_reports_empty_unresolved_refs(
+    minimal_config_yaml: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No `access:` section ⇒ the allow-all sentinel, whose index is never built.
+    # The field must still be present and empty so a consumer can read it
+    # unconditionally.
+    cfg = _write_config(tmp_path, minimal_config_yaml)
+    _patch_access_resolver(
+        monkeypatch, SelectiveFakeResolver({"@client": 555})
+    )
+
+    result = _run(
+        ["access", "check", "--entity", "@client", "--config", str(cfg)]
+    )
+    assert result.exit_code == 0, result.stdout
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    assert payload["granted"] is True
+    assert payload["matched_rule"] == "allow_all"
     assert payload["unresolved_refs"] == []
 
 

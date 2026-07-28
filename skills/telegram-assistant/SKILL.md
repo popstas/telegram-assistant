@@ -778,7 +778,12 @@ command rather than after `folder_cache_ttl` seconds.
   deletes to messages this server process sent; it can be overridden per
   access rule (chat > folder > `all` > policy default), so a chat like `me`
   may set `delete_only_session_messages: false` while the global default
-  stays `true`.
+  stays `true`. One fail-safe: if any `chat:` rule ref fails to resolve and
+  that rule set `delete_only_session_messages: true` (same for
+  `edit_only_session_messages`), the `true` applies to **every** chat until
+  the config is fixed — the hardened chat can no longer be identified. If a
+  delete/edit is unexpectedly refused, run `access check` and fix the ref it
+  lists under `unresolved_refs`.
 - Temp file: no.
 - Automation: none — DELETE-gated destructive change. Run `--dry-run` first
   (resolves + authorizes + runs the session-limit check without deleting),

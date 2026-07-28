@@ -7177,8 +7177,14 @@ def access_check(
         "granted": granted,
         "granted_permissions": sorted(c.name.lower() for c in caps),
         "matched_rule": matched,
+        # Deduped by ref: two rules naming the same dead ref describe one broken
+        # config line, and the operator should be told about it once.
         "unresolved_refs": [
-            entry.to_dict() for entry in sorted(unresolved, key=lambda e: e.ref)
+            entry.to_dict()
+            for entry in sorted(
+                {entry.ref: entry for entry in unresolved}.values(),
+                key=lambda e: e.ref,
+            )
         ],
     }
     typer.echo(json.dumps(payload, sort_keys=True))
