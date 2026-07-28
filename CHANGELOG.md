@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Documentation
+
+- rich-markdown: Implementation plan for the ffprobe-backed media path
+
 ### Refactor
 
 - cli: Extract rich-send input handling out of `messages send` (#20)
