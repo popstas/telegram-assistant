@@ -603,7 +603,9 @@ command rather than after `folder_cache_ttl` seconds.
   `[[|]]` are not links and ship verbatim. `![[…]]` embeds and anything
   inside code (inline or fenced) are left alone. This runs on every
   surface, not just the CLI — unlike frontmatter stripping and local
-  media, a wikilink is meaningless in Telegram whoever sent it. The
+  media, a wikilink is meaningless in Telegram whoever sent it. Nesting
+  (`[[[[a]]]]`) expands too, up to a bounded depth — an unrealistic note
+  past that ships the remainder verbatim. The
   dry-run reports the count as `rich_markdown_wikilinks`.
 - Paragraph spacing (**on by default**): the server renders neighbouring
   paragraphs tight against each other, so the CLI/HTTP/MCP insert a
