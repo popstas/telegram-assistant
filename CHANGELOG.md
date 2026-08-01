@@ -3,11 +3,38 @@
 
 ## Unreleased
 
+### Features
+
+- rich-markdown: Log every rich-media upload
+- rich-markdown: Reject a GIF up front when ffmpeg is missing
+- rich-markdown: Upload an animated GIF as a converted mp4
+- rich-markdown: Attach a generated thumbnail to rich-message videos
+- rich-markdown: Fill video and audio attributes from the probe
+- rich-markdown: Add thumbnail extraction and GIF-to-mp4 conversion
+- rich-markdown: Read media metadata with ffprobe
+- access: Report skipped chat rules in access check
+
+### Bug Fixes
+
+- rich-markdown: Correct gif-attach docstrings, log converted gif's original name
+- spike: Make spike_rich_gif.py exit 3 when every candidate is rejected
+- access: Keep a skipped rule's restrictive session-only override
+- access: Skip unresolvable chat rules with a warning
+
 ### Documentation
 
-- rich-markdown: Spec for a shared ffprobe-backed media attribute path
-- access: Implementation plan for skipping unresolvable chat rules
-- access: Spec for skipping unresolvable chat rules with a warning
+- rich-markdown: Record the ffprobe-backed media attribute path
+- rich-markdown: Implementation plan for the ffprobe-backed media path
+
+### Miscellaneous
+
+- Regenerate changelog
+- spike: Prove how an animated GIF must be uploaded to attach
+- Todo
+
+### Refactor
+
+- cli: Extract rich-send input handling out of `messages send` (#20)
 
 ## v0.10.0 - 2026-07-28
 

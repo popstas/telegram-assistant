@@ -34,6 +34,7 @@ from telegram_assistant.folders import (
     FolderBackend,
     resolve_folder,
 )
+from telegram_assistant.messages import media_probe
 from telegram_assistant.messages.attachments import (
     DEFAULT_MAX_BASE64_BYTES,
     Base64Attachment,
@@ -297,6 +298,10 @@ def _validate_rich_files(
     the ids are already written into the markdown, so a missing file would send
     an article whose media reference points at nothing. Failing before the
     operation row is opened keeps the idempotency key free for the fixed retry.
+
+    The ``.gif`` check belongs here rather than in the backend for the same
+    reason: the conversion is what makes the file attachable at all, so a box
+    with no ffmpeg must fail before the operation row exists.
     """
 
     if not rich_files:
@@ -330,6 +335,15 @@ def _validate_rich_files(
             raise ValueError(f"rich_files entry is not a file: {rich_file.path}")
         if not os.access(rich_file.path, os.R_OK):
             raise ValueError(f"rich_files entry is not readable: {rich_file.path}")
+        if (
+            os.path.splitext(rich_file.path)[1].lower() == ".gif"
+            and not media_probe.ffmpeg_available()
+        ):
+            raise ValueError(
+                f"rich_files entry needs ffmpeg: {rich_file.path} is a GIF, and "
+                f"Telegram only attaches one to an article as an mp4 — install "
+                f"ffmpeg or convert the file to mp4 yourself"
+            )
 
 
 def _coerce_message_id(raw: Any) -> int:
@@ -883,6 +897,15 @@ async def send_message(
             store.delete_operation(operation_id)
             raise
         except Exception as exc:
+            # Includes MediaConversionError (ffmpeg present but a .gif fails to
+            # convert — corrupt input or the 120s timeout): deliberately
+            # `failed`, not `needs_review`/dropped, because nothing reached
+            # Telegram and the input itself is what needs fixing before a
+            # retry. That is an intentional asymmetry with the ffmpeg-missing
+            # gate in `_validate_rich_files`, which runs before the operation
+            # row is opened specifically to keep the idempotency key free —
+            # this exception fires after the row exists, so an explicit
+            # `--operation-id` retry replays `previous_attempt_failed` here.
             store.fail_operation(operation_id, str(exc))
             raise
     finally:

@@ -13,12 +13,18 @@ imports. Two adapters live here:
 
 from __future__ import annotations
 
+import asyncio
 import re
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from telegram_assistant.messages import media_probe
 from telegram_assistant.messages.service import RecentMessage
+from telegram_assistant.observability.logging import get_logger
 from telegram_assistant.telegram_client.errors import translate_flood_wait
+
+_log = get_logger(__name__)
 
 if TYPE_CHECKING:
     from telegram_assistant.messages.media_download import (
@@ -207,39 +213,110 @@ def _translate_rich_send_error(exc: BaseException, *, chat_id: int) -> BaseExcep
     return translate_flood_wait(exc)
 
 
-def _document_attributes(path: str, kind: str) -> tuple[list[Any], str]:
+def _document_attributes(
+    path: str,
+    kind: str,
+    *,
+    probe: media_probe.MediaProbe | None,
+    animated: bool = False,
+    file_name: str | None = None,
+    log_path: str | None = None,
+) -> tuple[list[Any], str]:
     """Build the ``InputMediaUploadedDocument`` attributes for one rich file.
 
-    Delegates to Telethon's own inference (which derives
-    ``DocumentAttributeVideo`` from a ``video/*`` mime type even without a
-    metadata library) and fills the two gaps it leaves:
+    This is the single place a video/audio/animation attribute is built.
+    Telethon's ``utils.get_attributes()`` is still asked, but only for the
+    filename attribute and the mime type: without a metadata library it returns
+    a stub ``DocumentAttributeVideo(duration=0, w=1, h=1)`` for every mp4 and no
+    ``DocumentAttributeAudio`` at all. Telegram repairs the metadata server-side
+    for smaller uploads only (measured live: fine up to 6.30 MB, still stubbed
+    from 12.72 MB up), and a client that receives 1x1 with no duration draws an
+    empty rectangle.
 
-    * audio — without ``hachoir`` installed no ``DocumentAttributeAudio`` is
-      emitted at all, and the spike proved an ``.mp3`` is only reachable
-      through ``tg://audio`` when it carries one;
-    * ``.gif`` — its mime is ``image/gif``, not ``video/*``, so Telethon emits
-      only a filename attribute even though the reference syntax for it is
-      ``tg://video``. ``DocumentAttributeAnimated`` is the marker Telegram
-      defines for an animation document; the audio gap above is the proven
-      precedent that an unmarked document is not reachable through its scheme.
+    *probe* is supplied by the caller so one ``ffprobe`` run serves both this
+    and the thumbnail. ``None`` means the probe failed: the pre-probe behaviour
+    is kept — the stub for video, ``duration=0`` for audio, which is what makes
+    ``tg://audio`` resolve at all — and a warning names the file.
+
+    *animated* marks the document as an animation. It is driven by the source
+    file being a ``.gif``, not by the mime type: by the time this runs the
+    upload is already the converted mp4. *file_name* overrides the name derived
+    from that temp file so the article shows the author's own name.
+
+    *path* is what actually gets probed and uploaded — for a converted ``.gif``
+    that is the temp mp4. *log_path* is the identity a warning names; it
+    defaults to *path* but the caller passes the author's original file so a
+    converted gif's probe failure is still traceable back to ``loop.gif``
+    rather than a temp file that is gone by the time anyone reads the log.
     """
     from telethon import utils
     from telethon.tl import types
 
-    attributes, mime_type = utils.get_attributes(path)
-    if kind == "audio" and not any(
-        isinstance(attr, types.DocumentAttributeAudio) for attr in attributes
-    ):
-        attributes.append(types.DocumentAttributeAudio(duration=0))
-    if (
-        kind == "video"
-        and mime_type == "image/gif"
-        and not any(
-            isinstance(attr, types.DocumentAttributeAnimated) for attr in attributes
-        )
+    if log_path is None:
+        log_path = path
+    raw_attributes, mime_type = utils.get_attributes(path)
+    attributes = list(raw_attributes)
+    if kind == "video":
+        if probe is None:
+            reason = "no_probe"
+        elif not probe.has_video:
+            reason = "no_video_stream"
+        elif not (probe.width and probe.height):
+            reason = "no_dimensions"
+        else:
+            reason = None
+        if reason is None:
+            attributes = [
+                attr
+                for attr in attributes
+                if not isinstance(attr, types.DocumentAttributeVideo)
+            ]
+            attributes.append(
+                types.DocumentAttributeVideo(
+                    duration=round(probe.duration),
+                    w=probe.width,
+                    h=probe.height,
+                    supports_streaming=True,
+                )
+            )
+        else:
+            _log.warning(
+                "rich media video metadata unavailable, sending stub attributes",
+                path=log_path,
+                reason=reason,
+            )
+    elif kind == "audio":
+        if probe is not None:
+            attributes = [
+                attr
+                for attr in attributes
+                if not isinstance(attr, types.DocumentAttributeAudio)
+            ]
+            attributes.append(
+                types.DocumentAttributeAudio(duration=round(probe.duration))
+            )
+        else:
+            _log.warning(
+                "rich media audio metadata unavailable, sending stub attributes",
+                path=log_path,
+                reason="no_probe",
+            )
+            if not any(
+                isinstance(attr, types.DocumentAttributeAudio) for attr in attributes
+            ):
+                attributes.append(types.DocumentAttributeAudio(duration=0))
+    if animated and not any(
+        isinstance(attr, types.DocumentAttributeAnimated) for attr in attributes
     ):
         attributes.append(types.DocumentAttributeAnimated())
-    return list(attributes), mime_type
+    if file_name is not None:
+        attributes = [
+            attr
+            for attr in attributes
+            if not isinstance(attr, types.DocumentAttributeFilename)
+        ]
+        attributes.append(types.DocumentAttributeFilename(file_name=file_name))
+    return attributes, mime_type
 
 
 def _extract_rich_message_id(result: Any, *, random_id: int | None = None) -> int | None:
@@ -429,24 +506,64 @@ class TelethonMessageBackend:
 
         uploaded: list[Any] = []
         for rich_file in rich_files:
+            source = Path(rich_file.path)
+            is_gif = rich_file.kind == "video" and source.suffix.lower() == ".gif"
+            temp_path: Path | None = None
             try:
-                handle = await self._client.upload_file(rich_file.path)
-                if rich_file.kind == "photo":
-                    media: Any = types.InputMediaUploadedPhoto(file=handle)
-                else:
-                    attributes, mime_type = _document_attributes(
-                        rich_file.path, rich_file.kind
+                if is_gif:
+                    # Outside the RPC try/except below: a conversion failure is
+                    # bad input, not a Telegram rights or FLOOD_WAIT problem.
+                    temp_path = await asyncio.to_thread(
+                        media_probe.convert_gif_to_mp4, source
                     )
-                    media = types.InputMediaUploadedDocument(
-                        file=handle, mime_type=mime_type, attributes=attributes
+                upload_path = str(temp_path) if temp_path is not None else rich_file.path
+                try:
+                    handle = await self._client.upload_file(upload_path)
+                    if rich_file.kind == "photo":
+                        media: Any = types.InputMediaUploadedPhoto(file=handle)
+                    else:
+                        probe = await asyncio.to_thread(
+                            media_probe.probe_media, upload_path
+                        )
+                        attributes, mime_type = _document_attributes(
+                            upload_path,
+                            rich_file.kind,
+                            probe=probe,
+                            animated=is_gif,
+                            file_name=f"{source.stem}.mp4" if is_gif else None,
+                            log_path=rich_file.path,
+                        )
+                        thumb = None
+                        if rich_file.kind == "video":
+                            thumb = await self._upload_video_thumbnail(
+                                path=upload_path,
+                                duration=probe.duration if probe is not None else 0.0,
+                                log_path=rich_file.path,
+                            )
+                        media = types.InputMediaUploadedDocument(
+                            file=handle,
+                            mime_type=mime_type,
+                            attributes=attributes,
+                            thumb=thumb,
+                        )
+                    # uploadMedia binds the upload to the destination peer, which
+                    # is also where a media-rights rejection surfaces first.
+                    result = await self._client(
+                        functions.messages.UploadMediaRequest(peer=peer, media=media)
                     )
-                # uploadMedia binds the upload to the destination peer, which is
-                # also where a media-rights rejection surfaces first.
-                result = await self._client(
-                    functions.messages.UploadMediaRequest(peer=peer, media=media)
-                )
-            except Exception as exc:
-                raise _translate_rich_send_error(exc, chat_id=chat_id) from exc
+                    _log.info(
+                        "rich media uploaded",
+                        path=rich_file.path,
+                        kind=rich_file.kind,
+                        file_id=rich_file.id,
+                        size_bytes=source.stat().st_size if source.exists() else None,
+                        converted=is_gif,
+                    )
+                except Exception as exc:
+                    raise _translate_rich_send_error(exc, chat_id=chat_id) from exc
+            finally:
+                if temp_path is not None:
+                    temp_path.unlink(missing_ok=True)
             if rich_file.kind == "photo":
                 uploaded.append(
                     photo_type(
@@ -464,6 +581,37 @@ class TelethonMessageBackend:
                     )
                 )
         return uploaded
+
+    async def _upload_video_thumbnail(
+        self, *, path: str, duration: float, log_path: str | None = None
+    ) -> Any:
+        """Return an uploaded preview frame for *path*, or ``None``.
+
+        Telegram's clients draw an empty rectangle for a video with no
+        thumbnail, and the server only generates one for smaller uploads. A
+        failure here is never a send failure — the article goes out without a
+        preview and the reason is logged.
+
+        *path* is what actually gets probed for a frame — for a converted
+        ``.gif`` that is the temp mp4. *log_path* is the identity a warning
+        names; it defaults to *path* but the caller passes the author's
+        original file so the log stays traceable after the temp file is gone.
+        """
+        if log_path is None:
+            log_path = path
+        thumb_bytes = await asyncio.to_thread(
+            media_probe.extract_thumbnail, path, duration=duration
+        )
+        if not thumb_bytes:
+            _log.warning("rich media thumbnail could not be generated", path=log_path)
+            return None
+        try:
+            return await self._client.upload_file(thumb_bytes, file_name="thumb.jpg")
+        except Exception as exc:  # noqa: BLE001 - a preview is never worth the send
+            _log.warning(
+                "rich media thumbnail upload failed", path=log_path, error=str(exc)
+            )
+            return None
 
     async def _send_rich_message(
         self,

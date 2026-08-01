@@ -59,6 +59,17 @@ telegram-assistant health    # show current health
 uvicorn telegram_assistant.http_api.app:create_app --factory --port 8085
 ```
 
+`ffmpeg` and `ffprobe` are optional external binaries (not pip dependencies) used only by
+`messages send --rich-markdown` with local media: they fill in video/audio duration and
+dimensions, generate a video preview frame, and convert an animated `.gif` into the mp4
+Telegram needs. Without them videos still send but may render as an empty rectangle in the
+clients, and a `.gif` is rejected with a message telling you to install ffmpeg or convert
+the file yourself. Install with `apt install ffmpeg` (Debian/Ubuntu) or `brew install ffmpeg`.
+The Docker image does **not** include `ffmpeg`/`ffprobe` — it is built to run the API only,
+which never touches local media (that path is CLI-only) — so running `telegram-assistant
+messages send --rich-markdown` with local media *inside the container* hits the no-ffmpeg
+degradation above: a `.gif` is hard-rejected and videos may render as an empty rectangle.
+
 ## Commands
 
 Every CLI subcommand maps 1:1 to an HTTP endpoint (except the admin-only commands `auth`, `operations status`, and `operations retry`). Run any command with `--help` for full flag documentation.
@@ -180,6 +191,8 @@ Folder-level rules also gate the folder listing itself on the remote surfaces: `
 
 `edit_only_session_messages` (default `true`) is the exact mirror for `messages edit`: when active, only messages this server process sent (tracked in an in-memory registry, fresh per CLI run) may be edited. It accepts the same per-rule override with the same specificity resolution (chat > folder > `all` > policy default, restrictive `true` wins). Set it `false` (globally or per rule) to allow editing arbitrary own messages.
 
+One fail-safe: when a `chat:` rule ref cannot be resolved (a stale or ambiguous entry — see `access check`'s `unresolved_refs` below), the rule is skipped, but a `delete_only_session_messages: true` / `edit_only_session_messages: true` it carried is **not** dropped. Skipping a rule normally only narrows capabilities, but these two are restrictions, so losing one would *relax* the policy on the very chat that was hardened. The `true` therefore becomes a global floor applied to every chat until the config is fixed (the hardened chat can no longer be identified); a skipped `false` contributes nothing, since losing a relaxation is already safe. If deletes/edits suddenly refuse messages this process did not send, run `access check` and fix the ref it names.
+
 Both defaults apply **even when `telegram.access` is omitted** (the allow-all mode), and the sent-message registry lives in memory per process — so a one-shot CLI run starts with an empty registry and `messages edit` / `messages delete` there only reach messages that same invocation sent. To edit or delete arbitrary own messages from the CLI, add a `telegram.access` block setting the flag to `false` (globally or on a targeted rule); remember that adding the block also switches the policy to deny-by-default, so include a baseline rule such as `all: true` with the capabilities you need.
 
 `folder_cache_ttl` (seconds, default `300`; `0` disables persistent caching) tunes the folder-membership cache that speeds up access checks when any `folder:` / `folder_id:` rule is present. Without it, every gated operation would re-fetch each folder's chat membership from Telegram; instead the membership map is built once from `InputPeer` ids (no per-chat `get_entity`), keyed by **folder id** (so same-named folders stay separate), and persisted to SQLite. A subsequent call within the TTL reuses the cached map — the big win for the CLI, where each invocation is a fresh process. When a refetch fails, a stale cached map is served (bounded by TTL + the outage window); the cache is cleared automatically on config hot-reload so access-rule edits apply cleanly.
@@ -198,7 +211,7 @@ Config edits are hot-reloaded: a `watchdog` observer on `data/config.yml` re-run
 `access` — inspect and edit the access policy (CLI + skill only; not exposed over MCP):
 
 - `access list` — print the effective policy (allow-all, or the deny-by-default rules and the capabilities each grants).
-- `access check --entity <ref> --permission read|write|delete` — resolve a chat and report the grant verdict (exit `0` granted, `3` denied, `2` unresolved).
+- `access check --entity <ref> --permission read|write|delete` — resolve a chat and report the grant verdict (exit `0` granted, `3` denied, `2` unresolved). The payload's `unresolved_refs` names any `chat:` rule ref that could not be resolved — those rules are skipped with a warning rather than failing the command, so a stale entry shows up here instead of breaking every gated call. Each dead ref is listed once, however many rules name it.
 - `access add` — append one rule (`--entity`/`--folder`/`--all` + `--permission read,write,delete`) to `data/config.yml`; the hot-reload watcher then applies it live. `--dry-run` prints the rule without writing.
 
 `operations` — inspect and retry queued operations:

@@ -899,6 +899,87 @@ async def test_duplicate_rich_file_ids_are_rejected(
         )
 
 
+async def test_a_gif_without_ffmpeg_is_rejected_before_the_operation_row(
+    tmp_path: Path, store: OperationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without ffmpeg the GIF cannot be converted, and Telegram only reliably
+    attaches an animated GIF as a transcoded mp4 (a raw ``image/gif`` above an
+    undocumented size threshold fails the send with
+    ``RICH_MESSAGE_VIDEO_INVALID``) — failing here leaves the idempotency key
+    free for the retry after the install."""
+    from telegram_assistant.messages import media_probe
+
+    monkeypatch.setattr(media_probe, "ffmpeg_available", lambda: False)
+    gif = _touch(tmp_path / "loop.gif")
+    with pytest.raises(ValueError, match="ffmpeg"):
+        await send_message(
+            backend=RecordingBackend(),
+            store=store,
+            request=SendMessageRequest(
+                telegram_chat_id=-100,
+                text="",
+                rich_markdown="![](tg://video?id=loop)\n",
+                rich_files=(RichFile(id="loop", path=str(gif), caption="", kind="video"),),
+                operation_id="rich-files-gif-no-ffmpeg",
+            ),
+        )
+    key = idempotency.message_send_key(
+        telegram_chat_id=-100,
+        telegram_topic_id=None,
+        operation_id="rich-files-gif-no-ffmpeg",
+    )
+    assert store.find_by_idempotency_key(key) is None
+
+
+async def test_a_gif_with_ffmpeg_passes_validation(
+    tmp_path: Path, store: OperationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from telegram_assistant.messages import media_probe
+
+    monkeypatch.setattr(media_probe, "ffmpeg_available", lambda: True)
+    gif = _touch(tmp_path / "loop.gif")
+    backend = RecordingBackend()
+
+    result, _op = await send_message(
+        backend=backend,
+        store=store,
+        request=SendMessageRequest(
+            telegram_chat_id=-100,
+            text="",
+            rich_markdown="![](tg://video?id=loop)\n",
+            rich_files=(RichFile(id="loop", path=str(gif), caption="", kind="video"),),
+            operation_id="rich-files-gif-ok",
+        ),
+    )
+
+    assert result.telegram_message_id is not None
+
+
+async def test_a_non_gif_video_never_asks_about_ffmpeg(
+    tmp_path: Path, store: OperationStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An mp4 sends fine with no ffmpeg at all — only the attributes degrade."""
+    from telegram_assistant.messages import media_probe
+
+    monkeypatch.setattr(media_probe, "ffmpeg_available", lambda: False)
+    clip = _touch(tmp_path / "clip.mp4")
+    backend = RecordingBackend()
+
+    result, _op = await send_message(
+        backend=backend,
+        store=store,
+        request=SendMessageRequest(
+            telegram_chat_id=-100,
+            text="",
+            rich_markdown="![](tg://video?id=clip)\n",
+            rich_files=(RichFile(id="clip", path=str(clip), caption="", kind="video"),),
+            operation_id="rich-files-mp4-no-ffmpeg",
+        ),
+    )
+
+    assert result.telegram_message_id is not None
+
+
 async def test_an_unknown_rich_file_kind_is_rejected(
     tmp_path: Path, store: OperationStore
 ) -> None:
