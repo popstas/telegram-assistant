@@ -53,6 +53,19 @@ def test_dockerfile_default_command_runs_uvicorn_factory() -> None:
     assert "--port" in content and "8085" in content
 
 
+def test_dockerfile_installs_ffmpeg() -> None:
+    """The image must ship ``ffmpeg``/``ffprobe``.
+
+    ``messages send --rich-markdown`` probes local media for duration and
+    dimensions, extracts a video preview frame, and converts an animated
+    ``.gif`` to mp4. Without those binaries large videos render as an empty
+    rectangle in the Telegram clients and a ``.gif`` is rejected outright,
+    so the container would silently behave worse than a host install.
+    """
+    content = _dockerfile()
+    assert "ffmpeg" in content, "Dockerfile must apt-install ffmpeg (it also provides ffprobe)"
+
+
 def test_dockerfile_runs_as_non_root_user() -> None:
     content = _dockerfile()
     assert "USER app" in content
@@ -84,6 +97,13 @@ def test_smoke_script_is_present_and_executable() -> None:
     assert SMOKE_SCRIPT.exists(), "smoke script must exist for manual verification"
     mode = SMOKE_SCRIPT.stat().st_mode
     assert mode & stat.S_IXUSR, "smoke script must be executable"
+
+
+def test_smoke_script_checks_ffmpeg_binaries() -> None:
+    """The structural check above only reads the Dockerfile; the smoke run proves
+    the binaries are actually on PATH inside the built image."""
+    content = SMOKE_SCRIPT.read_text(encoding="utf-8")
+    assert "ffmpeg" in content and "ffprobe" in content
 
 
 @pytest.mark.skipif(

@@ -7,9 +7,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
+# ffmpeg ships both `ffmpeg` and `ffprobe`, the optional external binaries the
+# rich-markdown media path uses (probe video/audio metadata, extract a preview
+# frame, convert an animated .gif to mp4). Without them large videos render as
+# an empty rectangle in the Telegram clients and a .gif is rejected outright.
+# It is the bulk of the image (~625 MB of the ~1 GB total, measured against
+# the same build without it) — that is the price of the media path working
+# the same inside the container as outside.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         ca-certificates \
+        ffmpeg \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
