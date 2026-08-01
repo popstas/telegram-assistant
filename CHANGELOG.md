@@ -5,6 +5,8 @@
 
 ### Features
 
+- rich-markdown: Expand wikilinks on every surface
+- rich-markdown: Expand Obsidian wikilinks to plain text
 - rich-markdown: Log every rich-media upload
 - rich-markdown: Reject a GIF up front when ffmpeg is missing
 - rich-markdown: Upload an animated GIF as a converted mp4
@@ -16,6 +18,7 @@
 
 ### Bug Fixes
 
+- rich-markdown: Fixpoint-expand nested wikilinks, name the pass in grew_by
 - rich-markdown: Correct gif-attach docstrings, log converted gif's original name
 - spike: Make spike_rich_gif.py exit 3 when every candidate is rejected
 - access: Keep a skipped rule's restrictive session-only override
@@ -23,6 +26,10 @@
 
 ### Documentation
 
+- rich-markdown: Report and document wikilink expansion
+- plan: Implementation plan for Obsidian wikilink stripping
+- spec: Design Obsidian wikilink stripping for rich markdown
+- readme: Note the Docker image ships without ffmpeg
 - rich-markdown: Record the ffprobe-backed media attribute path
 - rich-markdown: Implementation plan for the ffprobe-backed media path
 

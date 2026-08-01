@@ -575,10 +575,11 @@ command rather than after `folder_cache_ttl` seconds.
   send time, and any reply target. For a rich send it echoes the article
   as markers only — `rich_markdown: true`, `rich_markdown_chars`
   (post-normalization), `rich_markdown_blocks`, `rich_markdown_media`,
-  `rich_markdown_file`, `spaced_paragraphs` (the effective decision),
-  `spaced` (what the pass actually did), `line_breaks`, `media_grouping`,
-  `rich_markdown_groups` and `rich_files` — never the body; show the
-  human those, plus the file path they can re-read.
+  `rich_markdown_wikilinks`, `rich_markdown_file`, `spaced_paragraphs`
+  (the effective decision), `spaced` (what the pass actually did),
+  `line_breaks`, `media_grouping`, `rich_markdown_groups` and
+  `rich_files` — never the body; show the human those, plus the file
+  path they can re-read.
 - Rich markdown (`--rich-markdown`): use it when the human asks for a
   post/article/статья with formatting Telegram's plain text cannot carry
   — headings, tables, quotes, long-form (>4096 chars, up to 32 768). The
@@ -593,6 +594,19 @@ command rather than after `folder_cache_ttl` seconds.
   `--text`/`--file`/`--file-url`/`--mass`. If a rich send fails, do
   **not** silently retry it as a plain `--text` message — report the
   error and ask.
+- Wikilinks (**always on, no flag**): Obsidian `[[target]]` /
+  `[[target|alias]]` links are expanded to plain text before any other
+  pass runs — the alias wins when present, otherwise the target reads
+  as Obsidian renders it (a leading `#` drops, every other `#` becomes
+  ` > `). Only the first `|` splits target from alias, so further pipes
+  stay in the alias; an empty half falls back to the other; `[[]]`/
+  `[[|]]` are not links and ship verbatim. `![[…]]` embeds and anything
+  inside code (inline or fenced) are left alone. This runs on every
+  surface, not just the CLI — unlike frontmatter stripping and local
+  media, a wikilink is meaningless in Telegram whoever sent it. Nesting
+  (`[[[[a]]]]`) expands too, up to a bounded depth — an unrealistic note
+  past that ships the remainder verbatim. The
+  dry-run reports the count as `rich_markdown_wikilinks`.
 - Paragraph spacing (**on by default**): the server renders neighbouring
   paragraphs tight against each other, so the CLI/HTTP/MCP insert a
   U+00A0-only spacer paragraph between two paragraphs and before every
@@ -601,7 +615,8 @@ command rather than after `folder_cache_ttl` seconds.
   e.g. because they hand-tuned the spacing. It switches off the spacer
   pass only — media grouping and local-media rewriting are independent,
   so mention `--media-group <i>=none` if they want the source truly
-  byte-for-byte. The flag is an error
+  byte-for-byte, and note wikilinks are always expanded regardless (no
+  knob) — a `[[…]]`-bearing article can never go byte-for-byte. The flag is an error
   (exit 2 / 422) without `--rich-markdown`. The default also comes from
   `telegram.defaults.rich_markdown_spaced_paragraphs`. Spacers count
   toward both the character and the block limit; if spacing would push
@@ -1494,11 +1509,12 @@ Request: «Опубликуй в чате Клиент / проект стать
 
 4. Show the resolved chat id and the article markers from the dry-run
    JSON (`rich_markdown: true`, `rich_markdown_chars`,
-   `rich_markdown_blocks`, `rich_markdown_media`, `rich_markdown_file`,
-   `spaced_paragraphs`, plus `rich_files` when the article carries local
-   media) — the body is deliberately not echoed, so quote the file path
-   and, if the human wants to review the text, show the file contents
-   yourself. Relay any `warnings` verbatim.
+   `rich_markdown_blocks`, `rich_markdown_media`, `rich_markdown_wikilinks`,
+   `rich_markdown_file`, `spaced_paragraphs`, `spaced`, `line_breaks`,
+   `media_grouping`, `rich_markdown_groups`, plus `rich_files` when the
+   article carries local media) — the body is deliberately not echoed, so
+   quote the file path and, if the human wants to review the text, show
+   the file contents yourself. Relay any `warnings` verbatim.
 5. If the dry-run reports a non-empty `rich_markdown_groups`, ask about
    the grouping **before** asking for the send confirmation. One
    `AskUserQuestion` call: «В статье N групп подряд идущих медиа, все

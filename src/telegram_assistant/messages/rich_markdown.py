@@ -56,6 +56,23 @@ MAX_RICH_MEDIA = 50
 #: ``RecursionError`` on caller input.
 MAX_BLOCK_NESTING = 64
 
+#: How many times :func:`strip_wikilinks` re-scans a document looking for a
+#: still-nested ``[[…]]`` (see :func:`_strip_once`). Real Obsidian notes nest
+#: wikilinks one, maybe two, levels deep — a link inside an alias inside
+#: another alias is already exotic. Each extra pass is a full document
+#: rescan (``scan_blocks`` + a line-by-line regex sweep) on the event loop,
+#: *ahead* of the WRITE gate, and unlike a single scan's cost — bounded by
+#: :data:`~telegram_assistant.messages.service.MAX_RICH_MARKDOWN_CHARS` —
+#: an uncapped loop's *pass count* is not: a pathological run of nested
+#: brackets (``"["*16000 + "a" + "]"*16000``) resolves exactly one bracket
+#: pair per pass, so an uncapped loop turns one 32k-character request into
+#: ~16 000 rescans of it. This cap bounds total pre-auth work to a small
+#: constant multiple of one scan instead, the same trade-off
+#: :func:`_scan_nested` makes when it stops at :data:`MAX_BLOCK_NESTING`: a
+#: leftover past the cap ships with literal ``[[``/``]]`` still in it,
+#: exactly like a degenerate ``[[]]``.
+MAX_WIKILINK_PASSES = 8
+
 #: HTML container tags the dialect defines; their contents are scanned as
 #: nested blocks so grouping can tell author-written groups from runs it may
 #: wrap itself.
@@ -167,6 +184,12 @@ _MEDIA_OBSIDIAN_INLINE_RE = re.compile(_MEDIA_OBSIDIAN_PATTERN)
 #: ``` `![](shot.png)` ``` and means the text, not a file to upload.
 _CODE_SPAN_RE = re.compile(r"(?P<ticks>`+)(?P<body>.+?)(?P=ticks)")
 
+#: An Obsidian wikilink: ``[[target]]`` or ``[[target|alias]]``. The negative
+#: lookbehind is what keeps ``![[file.png]]`` out — that is a media embed, owned
+#: by :func:`scan_media`, and expanding it here would strip the file reference
+#: down to prose before anything could upload it.
+_WIKILINK_RE = re.compile(r"(?<!!)\[\[(?P<body>[^\[\]]*)\]\]")
+
 #: A CommonMark backslash escape: a backslash before ASCII punctuation. A
 #: backslash before anything else is a literal backslash, which is what keeps a
 #: Windows-style ``C:\Users\me\a.png`` target intact.
@@ -276,6 +299,10 @@ class RichMarkdownNormalization:
     grouped: bool = False
     spacers_added: bool = False
     lines_split: bool = False
+    #: How many Obsidian wikilinks :func:`strip_wikilinks` expanded. Unlike the
+    #: flags above this is a count, because it is what a surface reports to the
+    #: operator — there is no knob to explain, only a number.
+    wikilinks: int = 0
 
 
 class MediaResolutionError(ValueError):
@@ -442,6 +469,146 @@ def _is_frontmatter_body(lines: list[str]) -> bool:
         or _FRONTMATTER_COMMENT_RE.match(line)
         for line in body[1:]
     )
+
+
+def _expand_wikilink(body: str) -> str | None:
+    """Return the text a wikilink's body should become, or ``None`` to keep it.
+
+    One rule, no special cases: the alias wins when there is one, otherwise the
+    target reads as Obsidian renders it — ``#`` becomes ``>`` and a leading
+    ``#`` (a link into the current note) simply drops. Block references
+    (``note#^blk``) fall out of that unchanged, which is why they need no
+    branch of their own.
+    """
+
+    target, _, alias = body.partition("|")
+    alias = alias.strip()
+    if alias:
+        return alias
+    target = target.strip()
+    if target.startswith("#"):
+        target = target[1:]
+    if not target:
+        # Neither half carries text, so this is not a link. Returning None
+        # ships it verbatim: silently deleting characters the author typed is
+        # worse than leaving a curiosity in the article.
+        return None
+    return target.replace("#", " > ")
+
+
+def _strip_line_wikilinks(line: str) -> tuple[str, int]:
+    """Expand every wikilink on one line, leaving inline code spans alone."""
+
+    code_spans = [match.span() for match in _CODE_SPAN_RE.finditer(line)]
+    out: list[str] = []
+    cursor = 0
+    count = 0
+    for match in _WIKILINK_RE.finditer(line):
+        start, end = match.span()
+        # Containment, not overlap — the rule iter_line_media_refs uses. A span
+        # that merely overlaps the link (a backtick inside the alias) must not
+        # shield it, or the raw brackets ship.
+        if any(span_start <= start and end <= span_end for span_start, span_end in code_spans):
+            continue
+        text = _expand_wikilink(match.group("body"))
+        if text is None:
+            continue
+        out.append(line[cursor:start])
+        out.append(text)
+        cursor = end
+        count += 1
+    if not count:
+        return line, 0
+    out.append(line[cursor:])
+    return "".join(out), count
+
+
+def _code_line_indices(blocks: tuple[Block, ...] | list[Block]) -> set[int]:
+    """Document line indices covered by a code block, nesting included."""
+
+    found: set[int] = set()
+    for block in blocks:
+        if block.kind == "code":
+            found.update(range(block.start, block.end))
+        elif block.children:
+            found.update(_code_line_indices(block.children))
+    return found
+
+
+def _strip_once(markdown: str) -> tuple[str, int]:
+    """Expand every top-level Obsidian ``[[wikilink]]`` once; report how many.
+
+    A link whose target or alias itself contains ``[[…]]`` — the body pattern
+    excludes brackets, so it cannot match a link spanning another one — is
+    only resolved one level at a time: the innermost pair expands and the
+    outer pair's own ``[[``/``]]`` survive this single call. :func:`strip_wikilinks`
+    is the public entry point and loops this to a fixpoint.
+
+    Code is opaque: fenced blocks via :func:`scan_blocks`, inline spans via
+    :data:`_CODE_SPAN_RE`. An article documenting this dialect writes
+    ``[[Note]]`` inside backticks and means the characters.
+
+    Returns ``(markdown, 0)`` by identity when nothing changed, which is what
+    keeps CRLF and the trailing newline intact for a byte-for-byte send.
+    """
+
+    if "[[" not in markdown:
+        return markdown, 0
+
+    code_lines = _code_line_indices(scan_blocks(markdown))
+    lines = split_lines(markdown)
+    out: list[str] = []
+    total = 0
+    for index, line in enumerate(lines):
+        if index in code_lines or "[[" not in line:
+            out.append(line)
+            continue
+        rewritten, count = _strip_line_wikilinks(line)
+        out.append(rewritten)
+        total += count
+    if not total:
+        return markdown, 0
+    text = "\n".join(out)
+    return (text + "\n" if markdown.endswith(("\n", "\r")) else text), total
+
+
+def strip_wikilinks(markdown: str) -> tuple[str, int]:
+    """Expand Obsidian ``[[wikilinks]]`` to plain text; report how many.
+
+    Telegram has no wikilink syntax, so an unexpanded link reaches the reader
+    as literal brackets around the vault's canonical note name — not the word
+    the author wrote. Unlike :func:`strip_yaml_frontmatter` and
+    :func:`scan_media`, which answer "this is a file from a vault" and are
+    therefore CLI-only, a wikilink is meaningless in Telegram no matter which
+    surface submitted it, so this runs for all three.
+
+    A link can nest inside its own target or alias (``[[[[a]]]]``,
+    ``[[a|[[b]]]]``) — Obsidian itself renders these as the innermost link's
+    text — and :func:`_strip_once`'s body pattern deliberately excludes
+    brackets, so one call only resolves the innermost pair. A literal ``[[``
+    reaching a Telegram reader is always a defect, so this loops
+    :func:`_strip_once` up to :data:`MAX_WIKILINK_PASSES` times rather than
+    settling for "mostly expanded": each iteration strictly removes at least
+    one ``[[``/``]]`` pair. The reported count is the sum across every
+    iteration, matching the number of ``[[`` the source contained — up to
+    the cap. Nesting past :data:`MAX_WIKILINK_PASSES` levels deep (not a
+    real note; see the constant's own comment) stops there and ships the
+    remaining ``[[``/``]]`` verbatim, the same trade-off
+    :func:`_scan_nested` makes past :data:`MAX_BLOCK_NESTING`.
+
+    Returns ``(markdown, 0)`` by identity when nothing changed, which is what
+    keeps CRLF and the trailing newline intact for a byte-for-byte send.
+    """
+
+    text, total = _strip_once(markdown)
+    passes = 1
+    while total and "[[" in text and passes < MAX_WIKILINK_PASSES:
+        text, again = _strip_once(text)
+        passes += 1
+        if not again:
+            break
+        total += again
+    return text, total
 
 
 def split_lines(markdown: str) -> list[str]:
@@ -691,6 +858,11 @@ def normalize_rich_markdown(
     decides.
     """
 
+    # First, and before scan_blocks: this pass edits *inside* lines, so every
+    # later pass — and the block count the 500-block rollback weighs — must see
+    # the text that will actually be sent. It also settles a table cell whose
+    # wikilink pipe would otherwise split it.
+    markdown, wikilinks = strip_wikilinks(markdown)
     blocks = scan_blocks(markdown)
     warnings: list[str] = []
 
@@ -757,6 +929,7 @@ def normalize_rich_markdown(
         grouped=grouped is not markdown,
         spacers_added=spacers_added,
         lines_split=unspaced is not grouped,
+        wikilinks=wikilinks,
     )
 
 

@@ -185,6 +185,43 @@ def test_cli_no_spaced_paragraphs_sends_byte_for_byte(
     assert backend.sent[0]["rich_markdown"] == TWO_PARAGRAPHS
 
 
+def test_cli_no_spaced_paragraphs_still_expands_wikilinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Byte-for-byte via ``--no-spaced-paragraphs`` still expands wikilinks —
+    there is no knob for that pass. Same proof as the HTTP/MCP surfaces
+    (``test_http_rich_send_expands_wikilinks``,
+    ``test_mcp_send_rich_markdown_expands_wikilinks``), pinned here for the
+    CLI's own ``send_message`` wiring."""
+    config_file, md_file, backend = _cli_setup(
+        tmp_path,
+        monkeypatch,
+        config_spaced=True,
+        markdown="Отдал [[Денис Баталин|Дэну]].\n",
+    )
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--no-spaced-paragraphs",
+            "--operation-id",
+            "cli-flag-off-wikilink",
+            "--config",
+            str(config_file),
+        ]
+    )
+
+    assert result.exit_code == 0, _cli_output(result)
+    sent = backend.sent[0]["rich_markdown"]
+    assert sent == "Отдал Дэну.\n"
+    assert "[[" not in sent
+
+
 def test_cli_spaced_paragraphs_overrides_config_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -329,6 +366,58 @@ def test_cli_dry_run_plain_send_has_no_spacing_markers(
     assert resolved["spaced_paragraphs"] is None
     assert resolved["rich_markdown_blocks"] is None
     assert resolved["rich_markdown_media"] is None
+
+
+def test_cli_dry_run_reports_expanded_wikilinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file, md_file, backend = _cli_setup(
+        tmp_path, monkeypatch, markdown="Отдал [[Денис Баталин|Дэну]].\n"
+    )
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ]
+    )
+
+    assert result.exit_code == 0, _cli_output(result)
+    resolved = json.loads(result.stdout.strip().splitlines()[-1])["resolved"]
+    assert resolved["rich_markdown_wikilinks"] == 1
+    assert backend.sent == []
+
+
+def test_cli_dry_run_plain_send_has_no_wikilink_marker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The marker shape must never depend on the mode."""
+    config_file, _md_file, _backend = _cli_setup(tmp_path, monkeypatch)
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--text",
+            "hello",
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ]
+    )
+
+    assert result.exit_code == 0, _cli_output(result)
+    resolved = json.loads(result.stdout.strip().splitlines()[-1])["resolved"]
+    assert resolved["rich_markdown_wikilinks"] is None
 
 
 def test_cli_dry_run_reports_block_limit_warnings(

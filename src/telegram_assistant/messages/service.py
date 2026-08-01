@@ -733,13 +733,17 @@ async def send_message(
             )
         if not request.rich_markdown.strip():
             raise ValueError("rich_markdown must be non-empty")
-        # Bound the *source* before normalising it. Both passes only ever grow
-        # the text, so a source already over the limit can never come back
-        # under it — and normalisation is a full line-by-line scan of caller
-        # input that runs on the event loop, before the WRITE gate. Without
-        # this, any token holder could hand a multi-megabyte string to
-        # HTTP/MCP (neither bounds the field) and block the loop for seconds
-        # on a send it was never authorized to make.
+        # Bound the *source* before normalising it. This protects the event
+        # loop ahead of the WRITE gate, and it is deliberately conservative
+        # rather than exact: grouping, spacing and splitting only ever grow
+        # the text, but wikilink expansion can shrink it, so a source that is
+        # over the limit only because of `[[…]]` brackets stripping would
+        # later remove is still rejected — normalisation as a whole is a full
+        # line-by-line scan of caller input that runs on the event loop,
+        # before the WRITE gate. Without this, any token holder could hand a
+        # multi-megabyte string to HTTP/MCP (neither bounds the field) and
+        # block the loop for seconds on a send it was never authorized to
+        # make.
         if len(request.rich_markdown) > MAX_RICH_MARKDOWN_CHARS:
             raise ValueError(
                 f"rich_markdown exceeds {MAX_RICH_MARKDOWN_CHARS} characters "
@@ -767,6 +771,7 @@ async def send_message(
             grew_by = [
                 name
                 for name, applied in (
+                    ("wikilink expansion", normalization.wikilinks > 0),
                     ("paragraph spacing", normalization.spacers_added),
                     ("line splitting", normalization.lines_split),
                     ("media grouping", normalization.grouped),
