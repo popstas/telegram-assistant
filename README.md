@@ -65,10 +65,9 @@ dimensions, generate a video preview frame, and convert an animated `.gif` into 
 Telegram needs. Without them videos still send but may render as an empty rectangle in the
 clients, and a `.gif` is rejected with a message telling you to install ffmpeg or convert
 the file yourself. Install with `apt install ffmpeg` (Debian/Ubuntu) or `brew install ffmpeg`.
-The Docker image does **not** include `ffmpeg`/`ffprobe` — it is built to run the API only,
-which never touches local media (that path is CLI-only) — so running `telegram-assistant
-messages send --rich-markdown` with local media *inside the container* hits the no-ffmpeg
-degradation above: a `.gif` is hard-rejected and videos may render as an empty rectangle.
+The Docker image **does** include them, so `telegram-assistant messages send --rich-markdown`
+with local media behaves the same inside the container as outside — at the cost of image
+size: `ffmpeg` and its dependencies are about 625 MB of the ~1 GB image.
 
 ## Commands
 
@@ -484,7 +483,7 @@ docker compose run --rm -it telegram-assistant \
 
 The Telethon session is written to `/data` and persists across container restarts.
 
-A self-contained smoke script lives at `scripts/docker-smoke.sh`. It builds the image, starts a throwaway container with a temporary `data/config.yml`, polls `GET /health` until it returns `200`, and tears everything down.
+A self-contained smoke script lives at `scripts/docker-smoke.sh`. It builds the image, starts a throwaway container with a temporary `data/config.yml`, polls `GET /health` until it returns `200`, checks `ffmpeg`/`ffprobe` are on PATH inside the image, and tears everything down.
 
 ```bash
 bash scripts/docker-smoke.sh

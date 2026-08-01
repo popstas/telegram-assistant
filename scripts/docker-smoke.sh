@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build the telegram-assistant container, start it with a throwaway
-# data/ volume, and verify GET /health returns 200.
+# data/ volume, verify GET /health returns 200, and verify ffmpeg/ffprobe
+# are on PATH inside the image (the rich-markdown media path needs them).
 #
 # Usage: scripts/docker-smoke.sh
 #
@@ -86,3 +87,13 @@ fi
 echo ">>> /health OK"
 curl -s "http://127.0.0.1:${HOST_PORT}/health"
 echo
+
+echo ">>> checking ffmpeg/ffprobe are available in the image"
+for binary in ffmpeg ffprobe; do
+    if ! docker exec "${CONTAINER_NAME}" "${binary}" -version >/dev/null 2>&1; then
+        echo "smoke test failed: ${binary} is missing inside the container" >&2
+        exit 1
+    fi
+done
+docker exec "${CONTAINER_NAME}" ffmpeg -version | head -n 1
+docker exec "${CONTAINER_NAME}" ffprobe -version | head -n 1
