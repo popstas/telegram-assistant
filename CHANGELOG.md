@@ -18,6 +18,7 @@
 
 ### Bug Fixes
 
+- rich-markdown: Fixpoint-expand nested wikilinks, name the pass in grew_by
 - rich-markdown: Correct gif-attach docstrings, log converted gif's original name
 - spike: Make spike_rich_gif.py exit 3 when every candidate is rejected
 - access: Keep a skipped rule's restrictive session-only override

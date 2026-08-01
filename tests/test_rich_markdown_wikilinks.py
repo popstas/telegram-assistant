@@ -7,7 +7,7 @@ author wrote.
 
 import pytest
 
-from telegram_assistant.messages.rich_markdown import strip_wikilinks
+from telegram_assistant.messages.rich_markdown import MAX_WIKILINK_PASSES, strip_wikilinks
 
 
 @pytest.mark.parametrize(
@@ -138,3 +138,29 @@ def test_nested_wikilinks_expand_to_a_fixpoint(source: str, expected: str) -> No
     assert text == expected
     assert "[[" not in text
     assert count == source.count("[[")
+
+
+def test_nesting_past_the_cap_stops_and_ships_the_remainder_verbatim() -> None:
+    """Structural proof of the ``MAX_WIKILINK_PASSES`` bound (no wall clock):
+    an unrealistically deep chain of nested links resolves exactly one level
+    per pass (verified by the three-input fixpoint tests above), so a depth
+    well past the cap must stop after exactly ``MAX_WIKILINK_PASSES`` passes
+    and leave ``[[``/``]]`` behind — the same trade-off ``_scan_nested`` makes
+    past ``MAX_BLOCK_NESTING``. This is what keeps the call bounded: a real
+    fixpoint loop over this input would need one pass per nesting level.
+    """
+    depth = MAX_WIKILINK_PASSES * 3
+    source = "[[" * depth + "a" + "]]" * depth
+
+    text, count = strip_wikilinks(source)
+
+    # Each pass unwraps exactly one level (4 chars: the removed "[[" + "]]"),
+    # so the number of passes actually run is recoverable from the length
+    # delta — and it must be capped, not `depth`.
+    levels_resolved = (len(source) - len(text)) // 4
+    assert levels_resolved == MAX_WIKILINK_PASSES
+    assert count == MAX_WIKILINK_PASSES
+    assert "[[" in text
+    assert text == "[[" * (depth - MAX_WIKILINK_PASSES) + "a" + "]]" * (
+        depth - MAX_WIKILINK_PASSES
+    )

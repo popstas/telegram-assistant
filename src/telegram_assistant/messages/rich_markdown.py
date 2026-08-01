@@ -56,6 +56,23 @@ MAX_RICH_MEDIA = 50
 #: ``RecursionError`` on caller input.
 MAX_BLOCK_NESTING = 64
 
+#: How many times :func:`strip_wikilinks` re-scans a document looking for a
+#: still-nested ``[[…]]`` (see :func:`_strip_once`). Real Obsidian notes nest
+#: wikilinks one, maybe two, levels deep — a link inside an alias inside
+#: another alias is already exotic. Each extra pass is a full document
+#: rescan (``scan_blocks`` + a line-by-line regex sweep) on the event loop,
+#: *ahead* of the WRITE gate, and unlike a single scan's cost — bounded by
+#: :data:`~telegram_assistant.messages.service.MAX_RICH_MARKDOWN_CHARS` —
+#: an uncapped loop's *pass count* is not: a pathological run of nested
+#: brackets (``"["*16000 + "a" + "]"*16000``) resolves exactly one bracket
+#: pair per pass, so an uncapped loop turns one 32k-character request into
+#: ~16 000 rescans of it. This cap bounds total pre-auth work to a small
+#: constant multiple of one scan instead, the same trade-off
+#: :func:`_scan_nested` makes when it stops at :data:`MAX_BLOCK_NESTING`: a
+#: leftover past the cap ships with literal ``[[``/``]]`` still in it,
+#: exactly like a degenerate ``[[]]``.
+MAX_WIKILINK_PASSES = 8
+
 #: HTML container tags the dialect defines; their contents are scanned as
 #: nested blocks so grouping can tell author-written groups from runs it may
 #: wrap itself.
@@ -570,19 +587,24 @@ def strip_wikilinks(markdown: str) -> tuple[str, int]:
     text — and :func:`_strip_once`'s body pattern deliberately excludes
     brackets, so one call only resolves the innermost pair. A literal ``[[``
     reaching a Telegram reader is always a defect, so this loops
-    :func:`_strip_once` to a fixpoint rather than settling for "mostly
-    expanded": each iteration strictly removes at least one ``[[``/``]]``
-    pair, so the loop is bounded by the source's own bracket count. The
-    reported count is the sum across every iteration, matching the number of
-    ``[[`` the source contained.
+    :func:`_strip_once` up to :data:`MAX_WIKILINK_PASSES` times rather than
+    settling for "mostly expanded": each iteration strictly removes at least
+    one ``[[``/``]]`` pair. The reported count is the sum across every
+    iteration, matching the number of ``[[`` the source contained — up to
+    the cap. Nesting past :data:`MAX_WIKILINK_PASSES` levels deep (not a
+    real note; see the constant's own comment) stops there and ships the
+    remaining ``[[``/``]]`` verbatim, the same trade-off
+    :func:`_scan_nested` makes past :data:`MAX_BLOCK_NESTING`.
 
     Returns ``(markdown, 0)`` by identity when nothing changed, which is what
     keeps CRLF and the trailing newline intact for a byte-for-byte send.
     """
 
     text, total = _strip_once(markdown)
-    while total and "[[" in text:
+    passes = 1
+    while total and "[[" in text and passes < MAX_WIKILINK_PASSES:
         text, again = _strip_once(text)
+        passes += 1
         if not again:
             break
         total += again
