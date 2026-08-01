@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Build
+
+- docker: Install ffmpeg in the image (#24)
+
 ### Miscellaneous
 
 - Regenerate changelog
