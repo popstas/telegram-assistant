@@ -282,6 +282,10 @@ class RichMarkdownNormalization:
     grouped: bool = False
     spacers_added: bool = False
     lines_split: bool = False
+    #: How many Obsidian wikilinks :func:`strip_wikilinks` expanded. Unlike the
+    #: flags above this is a count, because it is what a surface reports to the
+    #: operator — there is no knob to explain, only a number.
+    wikilinks: int = 0
 
 
 class MediaResolutionError(ValueError):
@@ -799,6 +803,11 @@ def normalize_rich_markdown(
     decides.
     """
 
+    # First, and before scan_blocks: this pass edits *inside* lines, so every
+    # later pass — and the block count the 500-block rollback weighs — must see
+    # the text that will actually be sent. It also settles a table cell whose
+    # wikilink pipe would otherwise split it.
+    markdown, wikilinks = strip_wikilinks(markdown)
     blocks = scan_blocks(markdown)
     warnings: list[str] = []
 
@@ -865,6 +874,7 @@ def normalize_rich_markdown(
         grouped=grouped is not markdown,
         spacers_added=spacers_added,
         lines_split=unspaced is not grouped,
+        wikilinks=wikilinks,
     )
 
 

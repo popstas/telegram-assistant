@@ -715,6 +715,32 @@ def test_mcp_send_rich_markdown_reaches_backend(
     assert backend.sent[0]["text"] == ""
 
 
+def test_mcp_send_rich_markdown_expands_wikilinks(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """Same proof for the MCP tool surface — expansion is surface-independent."""
+    backend = FakeRichMessageBackend()
+    with _client(minimal_config_yaml, tmp_path, message_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {
+                "telegram_chat_id": -100123,
+                "rich_markdown": "Отдал [[Денис Баталин|Дэну]].\n",
+                "operation_id": "mcp-rich-wikilink",
+            },
+        )
+
+    assert result["isError"] is False, result
+    sent = backend.sent[0]["rich_markdown"]
+    assert "Отдал Дэну." in sent
+    assert "[[" not in sent
+
+
 def test_mcp_send_rich_markdown_never_resolves_a_local_media_path(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:
