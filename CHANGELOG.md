@@ -23,6 +23,7 @@
 
 ### Documentation
 
+- plan: Implementation plan for Obsidian wikilink stripping
 - spec: Design Obsidian wikilink stripping for rich markdown
 - readme: Note the Docker image ships without ffmpeg
 - rich-markdown: Record the ffprobe-backed media attribute path
