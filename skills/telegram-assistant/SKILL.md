@@ -575,10 +575,11 @@ command rather than after `folder_cache_ttl` seconds.
   send time, and any reply target. For a rich send it echoes the article
   as markers only — `rich_markdown: true`, `rich_markdown_chars`
   (post-normalization), `rich_markdown_blocks`, `rich_markdown_media`,
-  `rich_markdown_file`, `spaced_paragraphs` (the effective decision),
-  `spaced` (what the pass actually did), `line_breaks`, `media_grouping`,
-  `rich_markdown_groups` and `rich_files` — never the body; show the
-  human those, plus the file path they can re-read.
+  `rich_markdown_wikilinks`, `rich_markdown_file`, `spaced_paragraphs`
+  (the effective decision), `spaced` (what the pass actually did),
+  `line_breaks`, `media_grouping`, `rich_markdown_groups` and
+  `rich_files` — never the body; show the human those, plus the file
+  path they can re-read.
 - Rich markdown (`--rich-markdown`): use it when the human asks for a
   post/article/статья with formatting Telegram's plain text cannot carry
   — headings, tables, quotes, long-form (>4096 chars, up to 32 768). The
@@ -593,6 +594,17 @@ command rather than after `folder_cache_ttl` seconds.
   `--text`/`--file`/`--file-url`/`--mass`. If a rich send fails, do
   **not** silently retry it as a plain `--text` message — report the
   error and ask.
+- Wikilinks (**always on, no flag**): Obsidian `[[target]]` /
+  `[[target|alias]]` links are expanded to plain text before any other
+  pass runs — the alias wins when present, otherwise the target reads
+  as Obsidian renders it (a leading `#` drops, every other `#` becomes
+  ` > `). Only the first `|` splits target from alias, so further pipes
+  stay in the alias; an empty half falls back to the other; `[[]]`/
+  `[[|]]` are not links and ship verbatim. `![[…]]` embeds and anything
+  inside code (inline or fenced) are left alone. This runs on every
+  surface, not just the CLI — unlike frontmatter stripping and local
+  media, a wikilink is meaningless in Telegram whoever sent it. The
+  dry-run reports the count as `rich_markdown_wikilinks`.
 - Paragraph spacing (**on by default**): the server renders neighbouring
   paragraphs tight against each other, so the CLI/HTTP/MCP insert a
   U+00A0-only spacer paragraph between two paragraphs and before every

@@ -286,6 +286,9 @@ def rich_dry_run_markers(
         "rich_markdown_media": (
             normalization.media if normalization is not None else None
         ),
+        "rich_markdown_wikilinks": (
+            normalization.wikilinks if normalization is not None else None
+        ),
         "rich_markdown_file": (str(rich_markdown) if is_rich else None),
         # Local media the real send would upload. The files are listed,
         # never read — a dry run touches no bytes and no network.

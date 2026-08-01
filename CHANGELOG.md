@@ -5,6 +5,7 @@
 
 ### Features
 
+- rich-markdown: Expand wikilinks on every surface
 - rich-markdown: Expand Obsidian wikilinks to plain text
 - rich-markdown: Log every rich-media upload
 - rich-markdown: Reject a GIF up front when ffmpeg is missing
