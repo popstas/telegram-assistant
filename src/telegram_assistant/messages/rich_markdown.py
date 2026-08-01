@@ -167,6 +167,12 @@ _MEDIA_OBSIDIAN_INLINE_RE = re.compile(_MEDIA_OBSIDIAN_PATTERN)
 #: ``` `![](shot.png)` ``` and means the text, not a file to upload.
 _CODE_SPAN_RE = re.compile(r"(?P<ticks>`+)(?P<body>.+?)(?P=ticks)")
 
+#: An Obsidian wikilink: ``[[target]]`` or ``[[target|alias]]``. The negative
+#: lookbehind is what keeps ``![[file.png]]`` out — that is a media embed, owned
+#: by :func:`scan_media`, and expanding it here would strip the file reference
+#: down to prose before anything could upload it.
+_WIKILINK_RE = re.compile(r"(?<!!)\[\[(?P<body>[^\[\]]*)\]\]")
+
 #: A CommonMark backslash escape: a backslash before ASCII punctuation. A
 #: backslash before anything else is a literal backslash, which is what keeps a
 #: Windows-style ``C:\Users\me\a.png`` target intact.
@@ -442,6 +448,108 @@ def _is_frontmatter_body(lines: list[str]) -> bool:
         or _FRONTMATTER_COMMENT_RE.match(line)
         for line in body[1:]
     )
+
+
+def _expand_wikilink(body: str) -> str | None:
+    """Return the text a wikilink's body should become, or ``None`` to keep it.
+
+    One rule, no special cases: the alias wins when there is one, otherwise the
+    target reads as Obsidian renders it — ``#`` becomes ``>`` and a leading
+    ``#`` (a link into the current note) simply drops. Block references
+    (``note#^blk``) fall out of that unchanged, which is why they need no
+    branch of their own.
+    """
+
+    target, _, alias = body.partition("|")
+    alias = alias.strip()
+    if alias:
+        return alias
+    target = target.strip()
+    if target.startswith("#"):
+        target = target[1:]
+    if not target:
+        # Neither half carries text, so this is not a link. Returning None
+        # ships it verbatim: silently deleting characters the author typed is
+        # worse than leaving a curiosity in the article.
+        return None
+    return target.replace("#", " > ")
+
+
+def _strip_line_wikilinks(line: str) -> tuple[str, int]:
+    """Expand every wikilink on one line, leaving inline code spans alone."""
+
+    code_spans = [match.span() for match in _CODE_SPAN_RE.finditer(line)]
+    out: list[str] = []
+    cursor = 0
+    count = 0
+    for match in _WIKILINK_RE.finditer(line):
+        start, end = match.span()
+        # Containment, not overlap — the rule iter_line_media_refs uses. A span
+        # that merely overlaps the link (a backtick inside the alias) must not
+        # shield it, or the raw brackets ship.
+        if any(span_start <= start and end <= span_end for span_start, span_end in code_spans):
+            continue
+        text = _expand_wikilink(match.group("body"))
+        if text is None:
+            continue
+        out.append(line[cursor:start])
+        out.append(text)
+        cursor = end
+        count += 1
+    if not count:
+        return line, 0
+    out.append(line[cursor:])
+    return "".join(out), count
+
+
+def _code_line_indices(blocks: tuple[Block, ...] | list[Block]) -> set[int]:
+    """Document line indices covered by a code block, nesting included."""
+
+    found: set[int] = set()
+    for block in blocks:
+        if block.kind == "code":
+            found.update(range(block.start, block.end))
+        elif block.children:
+            found.update(_code_line_indices(block.children))
+    return found
+
+
+def strip_wikilinks(markdown: str) -> tuple[str, int]:
+    """Expand Obsidian ``[[wikilinks]]`` to plain text; report how many.
+
+    Telegram has no wikilink syntax, so an unexpanded link reaches the reader
+    as literal brackets around the vault's canonical note name — not the word
+    the author wrote. Unlike :func:`strip_yaml_frontmatter` and
+    :func:`scan_media`, which answer "this is a file from a vault" and are
+    therefore CLI-only, a wikilink is meaningless in Telegram no matter which
+    surface submitted it, so this runs for all three.
+
+    Code is opaque: fenced blocks via :func:`scan_blocks`, inline spans via
+    :data:`_CODE_SPAN_RE`. An article documenting this dialect writes
+    ``[[Note]]`` inside backticks and means the characters.
+
+    Returns ``(markdown, 0)`` by identity when nothing changed, which is what
+    keeps CRLF and the trailing newline intact for a byte-for-byte send.
+    """
+
+    if "[[" not in markdown:
+        return markdown, 0
+
+    code_lines = _code_line_indices(scan_blocks(markdown))
+    lines = split_lines(markdown)
+    out: list[str] = []
+    total = 0
+    for index, line in enumerate(lines):
+        if index in code_lines or "[[" not in line:
+            out.append(line)
+            continue
+        rewritten, count = _strip_line_wikilinks(line)
+        out.append(rewritten)
+        total += count
+    if not total:
+        return markdown, 0
+    text = "\n".join(out)
+    return (text + "\n" if markdown.endswith(("\n", "\r")) else text), total
 
 
 def split_lines(markdown: str) -> list[str]:
