@@ -25,6 +25,7 @@
 
 ### Documentation
 
+- rich-markdown: Report and document wikilink expansion
 - plan: Implementation plan for Obsidian wikilink stripping
 - spec: Design Obsidian wikilink stripping for rich markdown
 - readme: Note the Docker image ships without ffmpeg

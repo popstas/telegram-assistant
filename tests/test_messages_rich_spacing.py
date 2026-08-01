@@ -198,6 +198,42 @@ async def test_send_message_oversize_without_spacing_omits_spacing_note(
     assert backend.sent == []
 
 
+async def test_send_message_length_check_names_wikilink_expansion(
+    store: OperationStore,
+) -> None:
+    """Wikilink expansion can grow the source: three-or-more ``#`` in a target
+    turns each into ``" > "`` (+2 chars net) once the surrounding ``[[``/``]]``
+    (-4 chars) is removed. A source under the limit whose expansion pushes it
+    over must name the pass that grew it — not the passes that never ran."""
+    # Each unit is net +2 chars after expansion ("[[a#b#c#d]] " -> "a > b > c > d ").
+    unit = "[[a#b#c#d]] "
+    count = (MAX_RICH_MARKDOWN_CHARS // len(unit)) - 1
+    markdown = unit * count
+    assert len(markdown) <= MAX_RICH_MARKDOWN_CHARS
+    backend = RecordingBackend()
+
+    with pytest.raises(ValueError) as excinfo:
+        await send_message(
+            backend=backend,
+            store=store,
+            request=SendMessageRequest(
+                telegram_chat_id=-100,
+                text="",
+                rich_markdown=markdown,
+                spaced_paragraphs=False,
+                line_breaks=False,
+                media_grouping="none",
+                operation_id="wikilink-too-long",
+            ),
+        )
+
+    message = str(excinfo.value)
+    assert str(MAX_RICH_MARKDOWN_CHARS) in message
+    assert "after wikilink expansion" in message
+    assert "paragraph spacing" not in message
+    assert backend.sent == []
+
+
 async def test_send_message_block_limit_fallback_warns_and_still_sends(
     store: OperationStore,
 ) -> None:

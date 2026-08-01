@@ -613,7 +613,8 @@ command rather than after `folder_cache_ttl` seconds.
   e.g. because they hand-tuned the spacing. It switches off the spacer
   pass only — media grouping and local-media rewriting are independent,
   so mention `--media-group <i>=none` if they want the source truly
-  byte-for-byte. The flag is an error
+  byte-for-byte, and note wikilinks are always expanded regardless (no
+  knob) — a `[[…]]`-bearing article can never go byte-for-byte. The flag is an error
   (exit 2 / 422) without `--rich-markdown`. The default also comes from
   `telegram.defaults.rich_markdown_spaced_paragraphs`. Spacers count
   toward both the character and the block limit; if spacing would push
@@ -1506,11 +1507,12 @@ Request: «Опубликуй в чате Клиент / проект стать
 
 4. Show the resolved chat id and the article markers from the dry-run
    JSON (`rich_markdown: true`, `rich_markdown_chars`,
-   `rich_markdown_blocks`, `rich_markdown_media`, `rich_markdown_file`,
-   `spaced_paragraphs`, plus `rich_files` when the article carries local
-   media) — the body is deliberately not echoed, so quote the file path
-   and, if the human wants to review the text, show the file contents
-   yourself. Relay any `warnings` verbatim.
+   `rich_markdown_blocks`, `rich_markdown_media`, `rich_markdown_wikilinks`,
+   `rich_markdown_file`, `spaced_paragraphs`, `spaced`, `line_breaks`,
+   `media_grouping`, `rich_markdown_groups`, plus `rich_files` when the
+   article carries local media) — the body is deliberately not echoed, so
+   quote the file path and, if the human wants to review the text, show
+   the file contents yourself. Relay any `warnings` verbatim.
 5. If the dry-run reports a non-empty `rich_markdown_groups`, ask about
    the grouping **before** asking for the send confirmation. One
    `AskUserQuestion` call: «В статье N групп подряд идущих медиа, все

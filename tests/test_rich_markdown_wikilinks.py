@@ -116,3 +116,25 @@ def test_is_idempotent() -> None:
     assert first == 1
     assert second == 0
     assert twice is once
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        # A wikilink nested inside another link's target.
+        ("[[ [[a]] ]]", "a"),
+        # A wikilink nested inside another link's alias.
+        ("[[a|[[b]]]]", "b"),
+        # A wikilink whose target is itself bracketed twice over.
+        ("[[[[a]]]]", "a"),
+    ],
+)
+def test_nested_wikilinks_expand_to_a_fixpoint(source: str, expected: str) -> None:
+    """One pass only resolves the innermost link, leaving ``[[``/``]]``
+    behind — literal double brackets in a Telegram article are exactly the
+    defect this pass exists to eliminate, so a single call must expand all
+    the way through."""
+    text, count = strip_wikilinks(source)
+    assert text == expected
+    assert "[[" not in text
+    assert count == source.count("[[")
