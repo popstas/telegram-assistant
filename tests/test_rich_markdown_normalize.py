@@ -325,3 +325,25 @@ def test_media_over_the_limit_only_warns() -> None:
 def test_media_exactly_at_the_limit_does_not_warn() -> None:
     source = "\n\n".join(f"![](https://x/{n}.jpg)" for n in range(MAX_RICH_MEDIA))
     assert normalize_rich_markdown(source).warnings == ()
+
+
+def test_normalize_expands_wikilinks_and_counts_them() -> None:
+    result = normalize_rich_markdown("Отдал [[Денис Баталин|Дэну]].\n")
+    assert "[[" not in result.markdown
+    assert "Дэну" in result.markdown
+    assert result.wikilinks == 1
+
+
+def test_normalize_reports_zero_wikilinks_when_there_are_none() -> None:
+    assert normalize_rich_markdown("Просто текст.\n").wikilinks == 0
+
+
+def test_wikilinks_are_expanded_before_blocks_are_counted() -> None:
+    """The pass edits inside lines, so blocks must be counted after it.
+
+    A wikilink's own pipe splits a table cell; expanding it first is what makes
+    the reported block structure the one Telegram actually receives.
+    """
+    source = "| a | b |\n| --- | --- |\n| [[Станислав Попов|Стас]] | да |\n"
+    result = normalize_rich_markdown(source)
+    assert "| Стас | да |" in result.markdown

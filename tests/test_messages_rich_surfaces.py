@@ -153,6 +153,25 @@ def test_http_rich_send_passes_markdown_to_backend() -> None:
     assert backend.sent[0]["text"] == ""
 
 
+def test_http_rich_send_expands_wikilinks() -> None:
+    """The pass is not CLI-only: an agent relaying note text has the same defect."""
+    backend = RecordingMessageBackend()
+    client = _client(backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "rich_markdown": "Спросил у [[Станислав Попов|Стаса]].\n",
+            "operation_id": "rich-http-wikilink",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    sent = backend.sent[0]["rich_markdown"]
+    assert "Спросил у Стаса." in sent
+    assert "[[" not in sent
+
+
 def test_http_rich_send_allows_topic_reply_and_schedule() -> None:
     backend = RecordingMessageBackend()
     client = _client(backend)
