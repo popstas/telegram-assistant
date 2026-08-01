@@ -81,12 +81,19 @@ not.
   the other passes promise.
 - **Idempotent.** No `[[` survives the pass, so re-running it is a no-op —
   unlike `_split_paragraph_lines`, which deliberately gives up idempotency.
-- **Shrinks, never grows.** The `MAX_RICH_MARKDOWN_CHARS` pre-check that runs
-  *before* normalisation is unaffected and stays where it is: it guards the
-  event loop ahead of the WRITE gate, and that reason is independent of which
-  direction a pass moves the length. A 33k-character source dense with
-  wikilinks would be rejected before the pass could bring it under the limit;
-  that is accepted, not an oversight.
+- **Usually shrinks, but can grow.** Removing `[[`/`]]`/an alias pipe is -4
+  or more, but each `#` in a bare target becomes `" > "` (+2 net per `#`), so
+  a target with three or more `#` grows the source overall. The
+  `MAX_RICH_MARKDOWN_CHARS` pre-check that runs *before* normalisation is
+  unaffected and stays where it is: it guards the event loop ahead of the
+  WRITE gate, and that reason is independent of which direction a pass moves
+  the length — it is deliberately conservative rather than exact. A
+  33k-character source dense with wikilinks would be rejected before the pass
+  could bring it under the limit; that is accepted, not an oversight. The
+  post-normalisation over-limit check names `"wikilink expansion"` in
+  `grew_by` alongside the other passes, so growth caused by this pass is
+  never blamed on — or hidden behind — paragraph spacing/line splitting/media
+  grouping.
 
 ## Reporting
 

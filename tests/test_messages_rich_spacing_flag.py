@@ -185,6 +185,43 @@ def test_cli_no_spaced_paragraphs_sends_byte_for_byte(
     assert backend.sent[0]["rich_markdown"] == TWO_PARAGRAPHS
 
 
+def test_cli_no_spaced_paragraphs_still_expands_wikilinks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Byte-for-byte via ``--no-spaced-paragraphs`` still expands wikilinks —
+    there is no knob for that pass. Same proof as the HTTP/MCP surfaces
+    (``test_http_rich_send_expands_wikilinks``,
+    ``test_mcp_send_rich_markdown_expands_wikilinks``), pinned here for the
+    CLI's own ``send_message`` wiring."""
+    config_file, md_file, backend = _cli_setup(
+        tmp_path,
+        monkeypatch,
+        config_spaced=True,
+        markdown="Отдал [[Денис Баталин|Дэну]].\n",
+    )
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--no-spaced-paragraphs",
+            "--operation-id",
+            "cli-flag-off-wikilink",
+            "--config",
+            str(config_file),
+        ]
+    )
+
+    assert result.exit_code == 0, _cli_output(result)
+    sent = backend.sent[0]["rich_markdown"]
+    assert sent == "Отдал Дэну.\n"
+    assert "[[" not in sent
+
+
 def test_cli_spaced_paragraphs_overrides_config_off(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

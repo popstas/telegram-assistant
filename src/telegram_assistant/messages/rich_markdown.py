@@ -518,15 +518,14 @@ def _code_line_indices(blocks: tuple[Block, ...] | list[Block]) -> set[int]:
     return found
 
 
-def strip_wikilinks(markdown: str) -> tuple[str, int]:
-    """Expand Obsidian ``[[wikilinks]]`` to plain text; report how many.
+def _strip_once(markdown: str) -> tuple[str, int]:
+    """Expand every top-level Obsidian ``[[wikilink]]`` once; report how many.
 
-    Telegram has no wikilink syntax, so an unexpanded link reaches the reader
-    as literal brackets around the vault's canonical note name — not the word
-    the author wrote. Unlike :func:`strip_yaml_frontmatter` and
-    :func:`scan_media`, which answer "this is a file from a vault" and are
-    therefore CLI-only, a wikilink is meaningless in Telegram no matter which
-    surface submitted it, so this runs for all three.
+    A link whose target or alias itself contains ``[[…]]`` — the body pattern
+    excludes brackets, so it cannot match a link spanning another one — is
+    only resolved one level at a time: the innermost pair expands and the
+    outer pair's own ``[[``/``]]`` survive this single call. :func:`strip_wikilinks`
+    is the public entry point and loops this to a fixpoint.
 
     Code is opaque: fenced blocks via :func:`scan_blocks`, inline spans via
     :data:`_CODE_SPAN_RE`. An article documenting this dialect writes
@@ -554,6 +553,40 @@ def strip_wikilinks(markdown: str) -> tuple[str, int]:
         return markdown, 0
     text = "\n".join(out)
     return (text + "\n" if markdown.endswith(("\n", "\r")) else text), total
+
+
+def strip_wikilinks(markdown: str) -> tuple[str, int]:
+    """Expand Obsidian ``[[wikilinks]]`` to plain text; report how many.
+
+    Telegram has no wikilink syntax, so an unexpanded link reaches the reader
+    as literal brackets around the vault's canonical note name — not the word
+    the author wrote. Unlike :func:`strip_yaml_frontmatter` and
+    :func:`scan_media`, which answer "this is a file from a vault" and are
+    therefore CLI-only, a wikilink is meaningless in Telegram no matter which
+    surface submitted it, so this runs for all three.
+
+    A link can nest inside its own target or alias (``[[[[a]]]]``,
+    ``[[a|[[b]]]]``) — Obsidian itself renders these as the innermost link's
+    text — and :func:`_strip_once`'s body pattern deliberately excludes
+    brackets, so one call only resolves the innermost pair. A literal ``[[``
+    reaching a Telegram reader is always a defect, so this loops
+    :func:`_strip_once` to a fixpoint rather than settling for "mostly
+    expanded": each iteration strictly removes at least one ``[[``/``]]``
+    pair, so the loop is bounded by the source's own bracket count. The
+    reported count is the sum across every iteration, matching the number of
+    ``[[`` the source contained.
+
+    Returns ``(markdown, 0)`` by identity when nothing changed, which is what
+    keeps CRLF and the trailing newline intact for a byte-for-byte send.
+    """
+
+    text, total = _strip_once(markdown)
+    while total and "[[" in text:
+        text, again = _strip_once(text)
+        if not again:
+            break
+        total += again
+    return text, total
 
 
 def split_lines(markdown: str) -> list[str]:
