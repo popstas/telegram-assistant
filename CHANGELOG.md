@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## v0.11.2 - 2026-08-03
 
 ### Bug Fixes
 
