@@ -73,6 +73,22 @@ MAX_BLOCK_NESTING = 64
 #: exactly like a degenerate ``[[]]``.
 MAX_WIKILINK_PASSES = 8
 
+#: Characters Telegram's own markdown parser HTML-escapes inside a link
+#: destination, turning a working URL into a broken one. Proven live
+#: 2026-08-02 (Saved Messages, ``scripts/spike_rich_link_escaping.py``, read
+#: back through ``messages.getRichMessage``): ``&`` is stored as ``&amp;`` and
+#: ``'`` as ``&#39;``, so ``?action=view&handbook=235`` reaches the target
+#: server as a parameter named ``amp;handbook``. Everything else a query
+#: string plausibly carries — ``+``, ``%20``, ``#``, ``~``, ``|``, ``_``,
+#: ``*``, non-ASCII — survives untouched. No spelling of the link escapes it:
+#: ``&amp;`` in the source comes back double-escaped (``&amp;amp;``), ``\&``
+#: as ``&#092;&amp;``, and an autolink or an inline ``<a href>`` is escaped
+#: exactly like a plain markdown link. A **bare** URL in the text is the one
+#: form that survives, because the parser stores no link entity for it at all
+#: and the clients autodetect it — which is what :func:`unwrap_unsafe_links`
+#: rewrites to.
+UNSAFE_LINK_URL_CHARS = ("&", "'")
+
 #: HTML container tags the dialect defines; their contents are scanned as
 #: nested blocks so grouping can tell author-written groups from runs it may
 #: wrap itself.
@@ -190,6 +206,22 @@ _CODE_SPAN_RE = re.compile(r"(?P<ticks>`+)(?P<body>.+?)(?P=ticks)")
 #: down to prose before anything could upload it.
 _WIKILINK_RE = re.compile(r"(?<!!)\[\[(?P<body>[^\[\]]*)\]\]")
 
+#: An inline markdown link, ``[text](destination "title")``. The destination
+#: half is :data:`_MEDIA_MD_PATTERN`'s verbatim — the two dialects are the same
+#: one, so they cannot drift — and the leading ``(?<!!)`` is what keeps media
+#: embeds out: ``![alt](a.png)`` belongs to :func:`scan_media`, and demoting it
+#: to text would strip the file reference before anything could upload it.
+_LINK_MD_RE = re.compile(
+    r"""(?<!!)\[(?P<text>[^\[\]]*)\]\(\s*
+        (?:<(?P<angle>[^>]*)>
+          |(?P<plain>(?:[^()\s\\]|\\.|\((?:[^()\s\\]|\\.)*\))+))
+        (?:\s+(?:"(?P<dquote>(?:[^"\\]|\\.)*)"
+              |'(?P<squote>(?:[^'\\]|\\.)*)'
+              |\((?P<pquote>(?:[^()\\]|\\.)*)\)))?
+        \s*\)""",
+    re.VERBOSE,
+)
+
 #: A CommonMark backslash escape: a backslash before ASCII punctuation. A
 #: backslash before anything else is a literal backslash, which is what keeps a
 #: Windows-style ``C:\Users\me\a.png`` target intact.
@@ -303,6 +335,9 @@ class RichMarkdownNormalization:
     #: flags above this is a count, because it is what a surface reports to the
     #: operator — there is no knob to explain, only a number.
     wikilinks: int = 0
+    #: How many links :func:`unwrap_unsafe_links` demoted to a bare URL. A count
+    #: for the same reason ``wikilinks`` is one.
+    unwrapped_links: int = 0
 
 
 class MediaResolutionError(ValueError):
@@ -521,6 +556,108 @@ def _strip_line_wikilinks(line: str) -> tuple[str, int]:
         return line, 0
     out.append(line[cursor:])
     return "".join(out), count
+
+
+def _unwrap_link(text: str, url: str) -> str:
+    """Return the plain-text form of one link: its text, then the bare URL.
+
+    The anchor text is kept because it is usually the only thing that names
+    what the link points at (``[269 - AWRA](…)`` in a list of handbook
+    entries), and dropping it would leave a column of indistinguishable URLs.
+    A link whose text *is* the URL, or has no text at all, collapses to the
+    URL alone rather than repeating it.
+
+    A title (``[a](url "tip")``) is dropped: Telegram renders it nowhere, so
+    carrying it into the text would show the reader a tooltip that never
+    existed.
+    """
+
+    text = text.strip()
+    if not text or text == url:
+        return url
+    return f"{text}: {url}"
+
+
+def _unwrap_line_links(line: str) -> tuple[str, int]:
+    """Demote every unsafe-URL link on one line, leaving inline code spans alone."""
+
+    code_spans = [match.span() for match in _CODE_SPAN_RE.finditer(line)]
+    out: list[str] = []
+    cursor = 0
+    count = 0
+    for match in _LINK_MD_RE.finditer(line):
+        start, end = match.span()
+        # Containment, not overlap — the rule _strip_line_wikilinks and
+        # iter_line_media_refs both use. A backtick inside the anchor text
+        # merely overlaps the link and must not shield it, or the broken URL
+        # ships.
+        if any(span_start <= start and end <= span_end for span_start, span_end in code_spans):
+            continue
+        url = match.group("angle")
+        if url is None:
+            url = match.group("plain") or ""
+        if not any(char in url for char in UNSAFE_LINK_URL_CHARS):
+            continue
+        out.append(line[cursor:start])
+        out.append(_unwrap_link(match.group("text"), url))
+        cursor = end
+        count += 1
+    if not count:
+        return line, 0
+    out.append(line[cursor:])
+    return "".join(out), count
+
+
+def unwrap_unsafe_links(markdown: str) -> tuple[str, int]:
+    """Demote links whose URL Telegram would mangle to text + bare URL; report how many.
+
+    Telegram's server-side markdown parser HTML-escapes
+    :data:`UNSAFE_LINK_URL_CHARS` inside a link destination, so an ordinary
+    query-string link arrives pointing at ``?action=view&amp;handbook=235`` —
+    a URL the target server reads as a parameter called ``amp;handbook``. No
+    spelling of the link avoids it (see :data:`UNSAFE_LINK_URL_CHARS`); only a
+    bare URL in the text survives, because the parser stores no link entity for
+    it and the clients autodetect it instead.
+
+    So ``[269 - AWRA](https://x/?a=1&k=2)`` becomes
+    ``269 - AWRA: https://x/?a=1&k=2``. Links whose URL carries none of those
+    characters are left as markdown links — they work, and they read better.
+    Like :func:`strip_wikilinks` this has **no knob**: a link that opens the
+    wrong page is always a defect, and it is one on every surface, since the
+    parser is Telegram's rather than the vault's.
+
+    The rewrite can only shrink the text (``[`` ``]`` ``(`` ``)`` become
+    ``: ``, and a title is dropped), so unlike grouping/spacing/splitting it
+    can never push an article over
+    :data:`~telegram_assistant.messages.service.MAX_RICH_MARKDOWN_CHARS`.
+
+    Media embeds are untouched — ``![alt](a.png)`` is a file for
+    :func:`scan_media`, not a link — and so is anything inside a fenced code
+    block or an inline code span, for the reason an article documenting this
+    dialect needs: it writes the markdown and means the characters.
+
+    Returns ``(markdown, 0)`` by identity when nothing changed, which is what
+    keeps CRLF and the trailing newline intact for a byte-for-byte send.
+    """
+
+    if "](" not in markdown or not any(char in markdown for char in UNSAFE_LINK_URL_CHARS):
+        return markdown, 0
+
+    code_lines = _code_line_indices(scan_blocks(markdown))
+    lines = split_lines(markdown)
+    out: list[str] = []
+    total = 0
+    for index, line in enumerate(lines):
+        if index in code_lines or "](" not in line:
+            out.append(line)
+            continue
+        rewritten, count = _unwrap_line_links(line)
+        out.append(rewritten)
+        total += count
+    if not total:
+        return markdown, 0
+    text = "\n".join(out)
+    return (text + "\n" if markdown.endswith(("\n", "\r")) else text), total
 
 
 def _code_line_indices(blocks: tuple[Block, ...] | list[Block]) -> set[int]:
@@ -863,6 +1000,10 @@ def normalize_rich_markdown(
     # the text that will actually be sent. It also settles a table cell whose
     # wikilink pipe would otherwise split it.
     markdown, wikilinks = strip_wikilinks(markdown)
+    # Second, for the same reason and on the same footing: another in-line
+    # rewrite whose output every later pass must see. It runs *after* wikilink
+    # expansion because that pass can put a URL where a `[[…]]` stood.
+    markdown, unwrapped_links = unwrap_unsafe_links(markdown)
     blocks = scan_blocks(markdown)
     warnings: list[str] = []
 
@@ -930,6 +1071,7 @@ def normalize_rich_markdown(
         spacers_added=spacers_added,
         lines_split=unspaced is not grouped,
         wikilinks=wikilinks,
+        unwrapped_links=unwrapped_links,
     )
 
 

@@ -741,6 +741,32 @@ def test_mcp_send_rich_markdown_expands_wikilinks(
     assert "[[" not in sent
 
 
+def test_mcp_send_rich_markdown_demotes_links_telegram_would_mangle(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """Same proof for the MCP tool surface — the mangling is Telegram's, not the vault's."""
+    backend = FakeRichMessageBackend()
+    with _client(minimal_config_yaml, tmp_path, message_backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_messages_send",
+            {
+                "telegram_chat_id": -100123,
+                "rich_markdown": "[269 - AWRA](https://example.com/?action=view&key=269)\n",
+                "operation_id": "mcp-rich-link",
+            },
+        )
+
+    assert result["isError"] is False, result
+    sent = backend.sent[0]["rich_markdown"]
+    assert "269 - AWRA: https://example.com/?action=view&key=269" in sent
+    assert "](" not in sent
+
+
 def test_mcp_send_rich_markdown_never_resolves_a_local_media_path(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:

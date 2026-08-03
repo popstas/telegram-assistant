@@ -172,6 +172,25 @@ def test_http_rich_send_expands_wikilinks() -> None:
     assert "[[" not in sent
 
 
+def test_http_rich_send_demotes_links_telegram_would_mangle() -> None:
+    """Also not CLI-only: the parser that breaks the URL is Telegram's."""
+    backend = RecordingMessageBackend()
+    client = _client(backend)
+    resp = client.post(
+        "/telegram/messages",
+        json={
+            "telegram_chat_id": -100,
+            "rich_markdown": "[269 - AWRA](https://example.com/?action=view&key=269)\n",
+            "operation_id": "rich-http-link",
+        },
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    sent = backend.sent[0]["rich_markdown"]
+    assert "269 - AWRA: https://example.com/?action=view&key=269" in sent
+    assert "](" not in sent
+
+
 def test_http_rich_send_allows_topic_reply_and_schedule() -> None:
     backend = RecordingMessageBackend()
     client = _client(backend)
