@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+
+- rich-markdown: Demote links whose URL Telegram would mangle (#25)
+
 ### Miscellaneous
 
 - Regenerate changelog
