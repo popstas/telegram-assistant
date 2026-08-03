@@ -395,6 +395,35 @@ def test_cli_dry_run_reports_expanded_wikilinks(
     assert backend.sent == []
 
 
+def test_cli_dry_run_reports_unwrapped_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_file, md_file, backend = _cli_setup(
+        tmp_path,
+        monkeypatch,
+        markdown="[269 - AWRA](https://example.com/?action=view&key=269)\n",
+    )
+
+    result = _run_cli(
+        [
+            "messages",
+            "send",
+            "--chat-id",
+            "-100",
+            "--rich-markdown",
+            str(md_file),
+            "--dry-run",
+            "--config",
+            str(config_file),
+        ]
+    )
+
+    assert result.exit_code == 0, _cli_output(result)
+    resolved = json.loads(result.stdout.strip().splitlines()[-1])["resolved"]
+    assert resolved["rich_markdown_unwrapped_links"] == 1
+    assert backend.sent == []
+
+
 def test_cli_dry_run_plain_send_has_no_wikilink_marker(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -418,6 +447,7 @@ def test_cli_dry_run_plain_send_has_no_wikilink_marker(
     assert result.exit_code == 0, _cli_output(result)
     resolved = json.loads(result.stdout.strip().splitlines()[-1])["resolved"]
     assert resolved["rich_markdown_wikilinks"] is None
+    assert resolved["rich_markdown_unwrapped_links"] is None
 
 
 def test_cli_dry_run_reports_block_limit_warnings(

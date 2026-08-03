@@ -575,7 +575,8 @@ command rather than after `folder_cache_ttl` seconds.
   send time, and any reply target. For a rich send it echoes the article
   as markers only — `rich_markdown: true`, `rich_markdown_chars`
   (post-normalization), `rich_markdown_blocks`, `rich_markdown_media`,
-  `rich_markdown_wikilinks`, `rich_markdown_file`, `spaced_paragraphs`
+  `rich_markdown_wikilinks`, `rich_markdown_unwrapped_links`,
+  `rich_markdown_file`, `spaced_paragraphs`
   (the effective decision), `spaced` (what the pass actually did),
   `line_breaks`, `media_grouping`, `rich_markdown_groups` and
   `rich_files` — never the body; show the human those, plus the file
@@ -607,6 +608,18 @@ command rather than after `folder_cache_ttl` seconds.
   (`[[[[a]]]]`) expands too, up to a bounded depth — an unrealistic note
   past that ships the remainder verbatim. The
   dry-run reports the count as `rich_markdown_wikilinks`.
+- Links with `&` in the URL (**always on, no flag**): Telegram's own
+  parser HTML-escapes `&` (→ `&amp;`) and `'` (→ `&#39;`) inside a link
+  destination, so `[Справочник](https://…/?action=view&handbook=235)`
+  would arrive pointing at `…&amp;handbook=235` — a broken link. No
+  spelling of the link avoids it, and a bare URL in the text is the one
+  form that survives, so such links are rewritten to `text: url`
+  (`[269 - AWRA](https://…&key=269)` → `269 - AWRA: https://…&key=269`).
+  Links whose URL has none of those characters stay markdown links;
+  `![…](…)` media and anything inside code are never touched. Runs on
+  every surface. The dry-run reports the count as
+  `rich_markdown_unwrapped_links`. If the human asks why a link in their
+  note lost its title, this is why — say so and do not "fix" it back.
 - Paragraph spacing (**on by default**): the server renders neighbouring
   paragraphs tight against each other, so the CLI/HTTP/MCP insert a
   U+00A0-only spacer paragraph between two paragraphs and before every
@@ -615,8 +628,9 @@ command rather than after `folder_cache_ttl` seconds.
   e.g. because they hand-tuned the spacing. It switches off the spacer
   pass only — media grouping and local-media rewriting are independent,
   so mention `--media-group <i>=none` if they want the source truly
-  byte-for-byte, and note wikilinks are always expanded regardless (no
-  knob) — a `[[…]]`-bearing article can never go byte-for-byte. The flag is an error
+  byte-for-byte, and note wikilinks are always expanded and links with `&`/`'` in the URL
+  always demoted regardless (no knob) — an article carrying either can
+  never go byte-for-byte. The flag is an error
   (exit 2 / 422) without `--rich-markdown`. The default also comes from
   `telegram.defaults.rich_markdown_spaced_paragraphs`. Spacers count
   toward both the character and the block limit; if spacing would push
@@ -1512,6 +1526,7 @@ Request: «Опубликуй в чате Клиент / проект стать
 4. Show the resolved chat id and the article markers from the dry-run
    JSON (`rich_markdown: true`, `rich_markdown_chars`,
    `rich_markdown_blocks`, `rich_markdown_media`, `rich_markdown_wikilinks`,
+`rich_markdown_unwrapped_links`,
    `rich_markdown_file`, `spaced_paragraphs`, `spaced`, `line_breaks`,
    `media_grouping`, `rich_markdown_groups`, plus `rich_files` when the
    article carries local media) — the body is deliberately not echoed, so
