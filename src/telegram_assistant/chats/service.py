@@ -48,8 +48,15 @@ class ChatInfo:
     ttl_period: int | None = None
     pinned_message_id: int | None = None
     archived: bool = False
+    #: Notifications suppressed *right now* — i.e. ``muted_until`` is in the
+    #: future. An expired mute, and the ``mute_until = 0`` Telegram writes for
+    #: an unmute, both report ``False`` with ``muted_until`` ``None``.
     muted: bool = False
     muted_until: datetime | None = None
+    #: The separate ``silent`` notify flag: the notification's *sound* is off,
+    #: which is not the same thing as the chat being muted — hence its own
+    #: field rather than being folded into ``muted``.
+    silent: bool = False
     has_scheduled: bool = False
 
     # --- trust / restrictions (all kinds) ---

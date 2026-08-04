@@ -10,6 +10,7 @@ is a flag on ``Channel``, not on ``ChannelFull``, which is why
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from telegram_assistant.chats.service import ChatInfo
@@ -149,13 +150,20 @@ def _serialize(raw: Any) -> dict[str, Any] | None:
 def _shallow_for(result: Any, full: Any, bucket: str) -> Any:
     """The shallow object matching ``full.id`` in ``result.<bucket>``.
 
-    Telegram returns the peer alongside its Full object; match by id and fall
-    back to the only entry when it returned just one.
+    Telegram returns the peer alongside its Full object; match by id, and fall
+    back to the only entry **when the bucket holds exactly one** — there the
+    fallback cannot pick the wrong chat. With two or more entries there is no
+    safe guess: ``GetFullChannel`` on a channel with a linked discussion group
+    returns both in ``result.chats``, so taking ``items[0]`` on an id mismatch
+    would map the *linked group's* title, flags and banned-rights defaults onto
+    the chat that was asked about. ``None`` (every shallow field reported as
+    ``None``/``False``) is the honest answer to "the peer Telegram sent back
+    does not match the Full object it sent with it".
     """
     items = list(getattr(result, bucket, None) or [])
     target_id = int(getattr(full, "id", 0) or 0)
     match = next((i for i in items if int(getattr(i, "id", 0) or 0) == target_id), None)
-    if match is None and items:
+    if match is None and len(items) == 1:
         return items[0]
     return match
 
@@ -172,22 +180,45 @@ def _raw_payload(entity: Any, full: Any, raw: bool) -> dict[str, Any] | None:
     return {"entity": _serialize(entity), "full": _serialize(full)}
 
 
-def _is_muted(settings: Any) -> bool:
-    """A chat is muted when ``silent`` is set or ``mute_until`` is populated."""
-    if settings is None:
-        return False
-    if getattr(settings, "silent", False):
-        return True
-    return getattr(settings, "mute_until", None) is not None
-
-
-def _mute_fields(full: Any) -> tuple[bool, Any]:
-    """``(muted, muted_until)`` read off ``full.notify_settings``, once.
+def _mute_fields(full: Any) -> tuple[bool, Any, bool]:
+    """``(muted, muted_until, silent)`` read off ``full.notify_settings``, once.
 
     Shared by all three branches for the same reason as :func:`_raw_payload`.
+
+    ``muted`` answers "are this chat's notifications suppressed **right now**",
+    which is true only while ``mute_until`` lies in the future. Three shapes
+    make the naive "``mute_until`` is populated" test wrong:
+
+    * **unmuted.** Telegram spells an unmute as ``mute_until = 0``, and that is
+      what this project itself writes (``notifications/telethon_backend.py``
+      sends ``InputPeerNotifySettings(mute_until=0)``). Telethon 1.44's
+      ``BinaryReader.tgread_date`` no longer special-cases 0 — it returns
+      ``_EPOCH + timedelta(seconds=0)``, i.e. a perfectly non-``None``
+      ``1970-01-01T00:00:00+00:00`` — so ``notifications unmute`` followed by
+      ``chats inspect`` reported ``muted: true`` with an epoch ``muted_until``.
+    * **an expired temporary mute.** The timestamp stays on the settings after
+      it passes; only its position relative to now says anything.
+    * **``silent``.** Per the TL schema that flag mutes the notification's
+      *sound*, not the chat, so it gets its own field rather than being folded
+      into ``muted``.
+
+    ``muted_until`` is reported only when it is that future timestamp, so the
+    payload never carries an epoch or a stale date as if it meant something.
+
+    ``mute_until`` off the wire is always a timezone-aware UTC ``datetime``
+    (``tgread_date`` builds it from a tz-aware epoch) or ``None`` — hence the
+    tz-aware "now", and hence no branch for a bare ``int``: that shape is not
+    reachable from a deserialized response.
     """
     settings = getattr(full, "notify_settings", None)
-    return _is_muted(settings), getattr(settings, "mute_until", None)
+    if settings is None:
+        return False, None, False
+
+    silent = bool(getattr(settings, "silent", False))
+    mute_until = getattr(settings, "mute_until", None)
+    if mute_until is None or mute_until <= datetime.now(UTC):
+        return False, None, silent
+    return True, mute_until, silent
 
 
 class TelethonChatInspectBackend:
@@ -200,7 +231,15 @@ class TelethonChatInspectBackend:
         try:
             peer = await self._client.get_input_entity(chat_id)
         except Exception as exc:
-            raise translate_flood_wait(exc) from exc
+            # Same shape as the two GetFull* branches below: re-raise the
+            # original untouched when there is nothing to translate.
+            # ``translate_flood_wait`` returns the *same object* then, so an
+            # unconditional ``raise translated from exc`` would set
+            # ``exc.__cause__ is exc``.
+            translated = translate_flood_wait(exc)
+            if translated is not exc:
+                raise translated from exc
+            raise
 
         kind = type(peer).__name__
         if kind == "InputPeerChannel":
@@ -237,7 +276,7 @@ class TelethonChatInspectBackend:
         full = getattr(result, "full_chat", None)
         entity = _shallow_for(result, full, "chats")
         broadcast = bool(getattr(entity, "broadcast", False))
-        muted, muted_until = _mute_fields(full)
+        muted, muted_until, silent = _mute_fields(full)
 
         return ChatInfo(
             chat_id=int(getattr(full, "id", 0) or getattr(peer, "channel_id", 0)),
@@ -252,6 +291,7 @@ class TelethonChatInspectBackend:
             archived=getattr(full, "folder_id", None) == 1,
             muted=muted,
             muted_until=muted_until,
+            silent=silent,
             has_scheduled=bool(getattr(full, "has_scheduled", False)),
             restricted=bool(getattr(entity, "restricted", False)),
             restriction_reason=_restriction_reasons(
@@ -324,7 +364,7 @@ class TelethonChatInspectBackend:
 
         full = getattr(result, "full_chat", None)
         entity = _shallow_for(result, full, "chats")
-        muted, muted_until = _mute_fields(full)
+        muted, muted_until, silent = _mute_fields(full)
 
         return ChatInfo(
             chat_id=int(getattr(full, "id", 0) or getattr(peer, "chat_id", 0)),
@@ -337,6 +377,7 @@ class TelethonChatInspectBackend:
             archived=getattr(full, "folder_id", None) == 1,
             muted=muted,
             muted_until=muted_until,
+            silent=silent,
             has_scheduled=bool(getattr(full, "has_scheduled", False)),
             is_creator=bool(getattr(entity, "creator", False)),
             left=bool(getattr(entity, "left", False)),
@@ -363,14 +404,20 @@ class TelethonChatInspectBackend:
         try:
             result = await self._client(functions.users.GetFullUserRequest(id=peer))
         except Exception as exc:
-            raise translate_flood_wait(exc) from exc
+            # As above: re-raise the original untouched rather than
+            # ``raise exc from exc``. There is no forbidden-peer branch here —
+            # a user's Full fetch has no ChannelPrivateError analogue.
+            translated = translate_flood_wait(exc)
+            if translated is not exc:
+                raise translated from exc
+            raise
 
         full = getattr(result, "full_user", None)
         entity = _shallow_for(result, full, "users")
         first = getattr(entity, "first_name", None)
         last = getattr(entity, "last_name", None)
         title = " ".join(part for part in (first, last) if part) or None
-        muted, muted_until = _mute_fields(full)
+        muted, muted_until, silent = _mute_fields(full)
 
         return ChatInfo(
             chat_id=int(getattr(full, "id", 0) or getattr(peer, "user_id", 0)),
@@ -384,6 +431,7 @@ class TelethonChatInspectBackend:
             archived=getattr(full, "folder_id", None) == 1,
             muted=muted,
             muted_until=muted_until,
+            silent=silent,
             has_scheduled=bool(getattr(full, "has_scheduled", False)),
             restricted=bool(getattr(entity, "restricted", False)),
             restriction_reason=_restriction_reasons(

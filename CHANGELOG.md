@@ -11,6 +11,7 @@
 
 ### Bug Fixes
 
+- chats: Redact access_hash recursively from --raw payloads
 - chats: Forbidden peers raise ValueError; dedupe raw/mute mapping
 
 ### Documentation

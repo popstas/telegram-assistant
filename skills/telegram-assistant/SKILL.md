@@ -546,7 +546,7 @@ command rather than after `folder_cache_ttl` seconds.
   fields that do not apply are `null`. Always present: `chat_id` (bare id, no
   `-100`), `kind` (`user`/`bot`/`basic_group`/`supergroup`/`channel`), `title`,
   `username`, `about`, `ttl_period` (auto-delete, seconds; `null` = off),
-  `pinned_message_id`, `archived`, `muted`/`muted_until`, `restricted` +
+  `pinned_message_id`, `archived`, `muted`/`muted_until`/`silent`, `restricted` +
   `restriction_reason`, `is_creator`, `left`, `invite_link`,
   `my_admin_rights`, `default_banned_rights`. Groups and channels add
   `is_forum`, `topics_layout`, `participants_count`, `admins_count`,
@@ -555,6 +555,13 @@ command rather than after `folder_cache_ttl` seconds.
   `noforwards`, `available_reactions` and friends. Private chats add
   `first_name`/`last_name`, `phone`, `is_bot`, `is_premium`, `is_contact`,
   `blocked`, `common_chats_count`, `birthday`, `last_seen_status`.
+- Notifications are three fields, not one. `muted` is true only while the
+  chat's notifications are suppressed **right now** — an expired mute, and the
+  unmuted state Telegram spells as an epoch timestamp, both report `false` with
+  `muted_until` `null`. `muted_until` is the future expiry when there is one,
+  `null` otherwise (never a past date). `silent` is a separate Telegram flag —
+  the notification's *sound* is off — so a chat can be `silent: true` and
+  `muted: false`. Do not report a chat as muted on `silent` alone.
 - `--raw`: adds a `raw` key holding `{"entity": …, "full": …}` — the two
   serialized Telegram objects behind the curated fields, minus `access_hash`.
   Use it only when the human asks for a field the curated set does not name;

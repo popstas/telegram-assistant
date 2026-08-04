@@ -7,11 +7,25 @@ peer dispatch keys on, mirroring tests/test_members_list_backend.py.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from telegram_assistant.chats.service import CHAT_KINDS
 from telegram_assistant.chats.telethon_backend import TelethonChatInspectBackend
+
+#: A mute that has not expired. Fixed offsets rather than a frozen clock: the
+#: backend compares ``mute_until`` against the real ``datetime.now(UTC)``, and
+#: a decade of slack keeps that comparison unambiguous without a time-travel
+#: dependency.
+_FUTURE = datetime.now(UTC) + timedelta(days=3650)
+#: A mute that has already expired -- Telegram leaves the stale timestamp on
+#: the settings, so only its position relative to now says anything.
+_PAST = datetime.now(UTC) - timedelta(days=3650)
+#: What ``notifications unmute`` writes: ``InputPeerNotifySettings(mute_until=0)``
+#: comes back through telethon 1.44's ``tgread_date`` as a non-``None``
+#: ``1970-01-01T00:00:00+00:00``, not as ``None``.
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 # --- fake telethon-shaped objects -----------------------------------------
 
@@ -42,7 +56,14 @@ class Rights:
 
 
 class NotifySettings:
-    def __init__(self, mute_until=None, silent=False) -> None:
+    """Stand-in for PeerNotifySettings.
+
+    Both flags default to ``None``, not ``False``: telethon leaves an unset
+    optional flag as ``None``, and the backend must read that as "not silent"
+    rather than tripping over it.
+    """
+
+    def __init__(self, mute_until=None, silent=None) -> None:
         self.mute_until = mute_until
         self.silent = silent
 
@@ -336,7 +357,7 @@ async def test_supergroup_mapping() -> None:
         slowmode_seconds=30,
         available_reactions=ChatReactionsSome([ReactionEmoji("👍")]),
         exported_invite=InviteExported("https://t.me/+abc"),
-        notify_settings=NotifySettings(mute_until=created, silent=True),
+        notify_settings=NotifySettings(mute_until=_FUTURE, silent=True),
     )
     client = FakeClient(
         peer=InputPeerChannel(5), result=FullChannelResult(full, [channel])
@@ -347,6 +368,7 @@ async def test_supergroup_mapping() -> None:
 
     assert info.chat_id == 5
     assert info.kind == "supergroup"
+    assert info.kind in CHAT_KINDS
     assert info.title == "Team"
     assert info.username == "teamchat"
     assert info.usernames == ("alt",)
@@ -355,7 +377,8 @@ async def test_supergroup_mapping() -> None:
     assert info.pinned_message_id == 41
     assert info.archived is True
     assert info.muted is True
-    assert info.muted_until == created
+    assert info.muted_until == _FUTURE
+    assert info.silent is True
     assert info.created_at == created
     assert info.is_forum is True
     assert info.topics_layout == "tabs"
@@ -384,6 +407,7 @@ async def test_broadcast_channel_kind_and_layout_default() -> None:
     info = await backend.inspect_chat(chat_id=6, raw=False)
 
     assert info.kind == "channel"
+    assert info.kind in CHAT_KINDS
     assert info.broadcast is True
     assert info.is_forum is False
     assert info.topics_layout is None
@@ -419,6 +443,96 @@ async def test_restriction_reason_is_mapped() -> None:
     assert info.restriction_reason == (
         {"platform": "all", "reason": "terms", "text": "violated ToS"},
     )
+
+
+# --- notification settings ---------------------------------------------------
+#
+# ``muted`` answers "are notifications suppressed *right now*", which is true
+# only while ``mute_until`` is in the future. Three states make the naive
+# "``mute_until`` is populated" test report a muted chat that is not muted, and
+# the epoch one is not hypothetical: ``notifications unmute`` in this very
+# project sends ``InputPeerNotifySettings(mute_until=0)``, and telethon 1.44's
+# ``BinaryReader.tgread_date`` no longer special-cases 0 -- it returns
+# ``_EPOCH + timedelta(seconds=0)``, a non-``None`` 1970 datetime. ``silent``
+# is a separate TL flag (the notification's *sound*), so it gets its own field.
+
+
+def _channel_with_notify_settings(settings) -> TelethonChatInspectBackend:
+    channel = Channel(20)
+    full = ChannelFull(20, notify_settings=settings)
+    return TelethonChatInspectBackend(
+        FakeClient(peer=InputPeerChannel(20), result=FullChannelResult(full, [channel]))
+    )
+
+
+@pytest.mark.asyncio
+async def test_future_mute_until_reports_muted() -> None:
+    backend = _channel_with_notify_settings(NotifySettings(mute_until=_FUTURE))
+
+    info = await backend.inspect_chat(chat_id=20, raw=False)
+
+    assert info.muted is True
+    assert info.muted_until == _FUTURE
+    assert info.silent is False
+
+
+@pytest.mark.asyncio
+async def test_expired_mute_until_reports_unmuted_and_drops_the_stale_date() -> None:
+    backend = _channel_with_notify_settings(NotifySettings(mute_until=_PAST))
+
+    info = await backend.inspect_chat(chat_id=20, raw=False)
+
+    assert info.muted is False
+    # Not ``_PAST``: a timestamp that has already passed says nothing, and
+    # reporting it invites a reader to treat it as a live mute window.
+    assert info.muted_until is None
+    assert info.silent is False
+
+
+@pytest.mark.asyncio
+async def test_epoch_mute_until_is_the_unmuted_state() -> None:
+    """``notifications unmute`` writes ``mute_until=0``; that is *not* a mute."""
+    backend = _channel_with_notify_settings(NotifySettings(mute_until=_EPOCH))
+
+    info = await backend.inspect_chat(chat_id=20, raw=False)
+
+    assert info.muted is False
+    assert info.muted_until is None
+    assert info.silent is False
+
+
+@pytest.mark.asyncio
+async def test_silent_alone_is_reported_separately_and_is_not_a_mute() -> None:
+    backend = _channel_with_notify_settings(NotifySettings(mute_until=None, silent=True))
+
+    info = await backend.inspect_chat(chat_id=20, raw=False)
+
+    assert info.muted is False
+    assert info.muted_until is None
+    assert info.silent is True
+
+
+@pytest.mark.asyncio
+async def test_absent_notify_settings_reports_all_three_false() -> None:
+    backend = _channel_with_notify_settings(None)
+
+    info = await backend.inspect_chat(chat_id=20, raw=False)
+
+    assert info.muted is False
+    assert info.muted_until is None
+    assert info.silent is False
+
+
+@pytest.mark.asyncio
+async def test_untouched_notify_settings_report_all_three_false() -> None:
+    """The never-configured chat: flags unset, no ``mute_until`` at all."""
+    backend = _channel_with_notify_settings(NotifySettings())
+
+    info = await backend.inspect_chat(chat_id=20, raw=False)
+
+    assert info.muted is False
+    assert info.muted_until is None
+    assert info.silent is False
 
 
 # --- forbidden peers ---------------------------------------------------------
@@ -493,6 +607,7 @@ async def test_basic_group_mapping() -> None:
     info = await backend.inspect_chat(chat_id=9, raw=False)
 
     assert info.kind == "basic_group"
+    assert info.kind in CHAT_KINDS
     assert info.title == "Old"
     assert info.participants_count == 4
     assert info.deactivated is True
@@ -531,6 +646,7 @@ async def test_user_mapping() -> None:
     info = await backend.inspect_chat(chat_id=11, raw=False)
 
     assert info.kind == "user"
+    assert info.kind in CHAT_KINDS
     assert info.title == "Ann Lee"
     assert info.first_name == "Ann"
     assert info.last_name == "Lee"
@@ -553,6 +669,7 @@ async def test_bot_kind() -> None:
     info = await backend.inspect_chat(chat_id=12, raw=False)
 
     assert info.kind == "bot"
+    assert info.kind in CHAT_KINDS
     assert info.is_bot is True
 
 
@@ -703,3 +820,97 @@ def test_redact_guards_against_a_reference_cycle() -> None:
 
     assert "access_hash" not in result
     assert result["self"] is None
+
+
+# --- CHAT_KINDS -------------------------------------------------------------
+#
+# The constant is the documented answer to "which strings can `kind` take". It
+# is only worth exporting if something checks it, so this pins it to the
+# backend's own dispatch in both directions: every branch's string must be in
+# the set (a new kind spelled only in the backend fails here), and every member
+# of the set must be produced by some branch (a member with no branch behind it
+# fails too). The individual mapping tests additionally assert membership at
+# their own call site.
+
+
+@pytest.mark.asyncio
+async def test_chat_kinds_is_exactly_what_the_backend_branches_produce() -> None:
+    cases = [
+        # megagroup supergroup, broadcast channel, legacy basic group
+        (InputPeerChannel(30), FullChannelResult(ChannelFull(30), [Channel(30)])),
+        (
+            InputPeerChannel(31),
+            FullChannelResult(ChannelFull(31), [Channel(31, broadcast=True)]),
+        ),
+        (InputPeerChat(32), FullChannelResult(ChatFull(32), [Chat(32)])),
+        (InputPeerUser(33), FullUserResult(UserFull(33), [User(33)])),
+        (InputPeerUser(34), FullUserResult(UserFull(34), [User(34, bot=True)])),
+    ]
+
+    produced = set()
+    for peer, result in cases:
+        backend = TelethonChatInspectBackend(FakeClient(peer=peer, result=result))
+        # The fake client ignores the reference and answers with `peer`; the
+        # id only ever reaches an error message on this path.
+        info = await backend.inspect_chat(chat_id=0, raw=False)
+        produced.add(info.kind)
+
+    assert produced == set(CHAT_KINDS)
+
+
+# --- _shallow_for: the peer bucket does not match the Full object -----------
+
+
+@pytest.mark.asyncio
+async def test_shallow_falls_back_to_the_only_entry_on_an_id_mismatch() -> None:
+    """One entry in the bucket: the fallback cannot pick the wrong chat."""
+    channel = Channel(999, title="Renumbered")
+    client = FakeClient(
+        peer=InputPeerChannel(40), result=FullChannelResult(ChannelFull(40), [channel])
+    )
+    backend = TelethonChatInspectBackend(client)
+
+    info = await backend.inspect_chat(chat_id=40, raw=False)
+
+    assert info.title == "Renumbered"
+
+
+@pytest.mark.asyncio
+async def test_shallow_refuses_to_guess_when_the_bucket_holds_several() -> None:
+    """A channel's ``result.chats`` also carries its linked discussion group.
+
+    On an id mismatch, taking ``items[0]`` would map that *other* chat's title
+    and flags onto the chat that was asked about, silently. Reporting the
+    shallow half as absent is the honest answer.
+    """
+    linked = Channel(41, title="Discussion", megagroup=True)
+    other = Channel(42, title="Unrelated", broadcast=True)
+    client = FakeClient(
+        peer=InputPeerChannel(40),
+        result=FullChannelResult(ChannelFull(40), [linked, other]),
+    )
+    backend = TelethonChatInspectBackend(client)
+
+    info = await backend.inspect_chat(chat_id=40, raw=False)
+
+    assert info.chat_id == 40
+    assert info.title is None
+    assert info.megagroup is False
+    assert info.broadcast is False
+
+
+@pytest.mark.asyncio
+async def test_shallow_matches_by_id_when_the_bucket_holds_several() -> None:
+    """The normal case: the requested chat is found among its neighbours."""
+    wanted = Channel(40, title="Announcements", broadcast=True)
+    linked = Channel(41, title="Discussion", megagroup=True)
+    client = FakeClient(
+        peer=InputPeerChannel(40),
+        result=FullChannelResult(ChannelFull(40), [linked, wanted]),
+    )
+    backend = TelethonChatInspectBackend(client)
+
+    info = await backend.inspect_chat(chat_id=40, raw=False)
+
+    assert info.title == "Announcements"
+    assert info.kind == "channel"

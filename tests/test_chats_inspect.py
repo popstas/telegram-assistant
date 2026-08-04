@@ -89,6 +89,11 @@ def test_to_dict_omits_raw_when_absent() -> None:
     # never depends on what was inspected.
     assert payload["admins_count"] is None
     assert payload["ttl_period"] is None
+    # The notification settings are three fields, not two: `silent` (sound off)
+    # is a separate Telegram flag from `muted` (notifications suppressed now).
+    assert payload["muted"] is False
+    assert payload["muted_until"] is None
+    assert payload["silent"] is False
 
 
 def test_to_dict_includes_raw_when_present() -> None:
