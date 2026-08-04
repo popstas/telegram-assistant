@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Features
+
+- chats: Add read-only chat-inspect domain op
+
 ### Documentation
 
 - Implementation plan for `chats inspect`
