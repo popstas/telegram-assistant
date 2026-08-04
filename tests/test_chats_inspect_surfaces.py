@@ -293,6 +293,101 @@ def test_http_chats_inspect_reports_an_ambiguous_entity_as_409() -> None:
     assert backend.calls == []
 
 
+def test_http_chats_inspect_reports_an_ambiguous_chat_name_as_409() -> None:
+    """Two chats sharing a title inside the same folder is a *different* 409
+    source from an ambiguous ``entity`` — a different exception
+    (``AmbiguousChatNameError``, raised inside ``resolve_chat_in_folder``,
+    ``folders/service.py``), caught by a different handler
+    (``_translate_folder_error``, not ``translate_entity_error``), and a
+    different response-body shape (``error: "ambiguous_chat_name"`` plus
+    ``chat_name``/``folder_name``/``matches`` — not ``ambiguous_entity`` plus
+    ``entity``/``matches``). A test that only checked the status code would
+    not catch the two being collapsed into one.
+    """
+    backend = FakeInspectBackend()
+    dup_folder = FakeFolderBackend(
+        [
+            FolderSnapshot(
+                folder_id=2,
+                folder_name="Planfix clients",
+                chats=[
+                    FolderChat(chat_id=CHAT_ID, title="Client chat"),
+                    FolderChat(chat_id=CHAT_ID + 1, title="Client chat"),
+                ],
+            )
+        ]
+    )
+    client = _http_client(
+        access_block=_READ_ACCESS, backend=backend, folder_backend=dup_folder
+    )
+
+    resp = client.get(
+        "/telegram/chats/inspect",
+        params={"chat_name": "Client chat", "folder_name": "Planfix clients"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "ambiguous_chat_name"
+    assert detail["chat_name"] == "Client chat"
+    assert detail["folder_name"] == "Planfix clients"
+    assert sorted(detail["matches"]) == sorted([CHAT_ID, CHAT_ID + 1])
+    assert backend.calls == []
+
+
+def test_http_chats_inspect_reports_a_folder_id_mismatch_as_409() -> None:
+    """A third, still-distinguishable 409 shape: the folder matched by name
+    exists, but its numeric id disagrees with the caller's ``folder_id``
+    (``FolderIdMismatchError``, plain-string body) — neither the
+    ``ambiguous_entity`` nor the ``ambiguous_chat_name`` dict shape.
+    """
+    backend = FakeInspectBackend()
+    client = _http_client(
+        access_block=_READ_ACCESS,
+        backend=backend,
+        folder_backend=_folder_backend(),  # folder_id=2
+    )
+
+    resp = client.get(
+        "/telegram/chats/inspect",
+        params={
+            "chat_name": "Client chat",
+            "folder_name": "Planfix clients",
+            "folder_id": 999,
+        },
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 409, resp.text
+    detail = resp.json()["detail"]
+    assert isinstance(detail, str)
+    assert backend.calls == []
+
+
+def test_http_chats_inspect_reports_a_missing_folder_as_404() -> None:
+    """The folder itself not existing (``FolderNotFoundError``) is a distinct
+    404 source from the chat not being found *inside* an existing folder
+    (``ChatNotFoundError``, covered by
+    ``test_http_chats_inspect_reports_a_missing_chat_name_as_404``).
+    """
+    backend = FakeInspectBackend()
+    client = _http_client(
+        access_block=_READ_ACCESS,
+        backend=backend,
+        folder_backend=_folder_backend(),  # only has "Planfix clients"
+    )
+
+    resp = client.get(
+        "/telegram/chats/inspect",
+        params={"chat_name": "Client chat", "folder_name": "Nonexistent folder"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 404, resp.text
+    assert backend.calls == []
+
+
 def test_http_chats_inspect_requires_exactly_one_ref() -> None:
     backend = FakeInspectBackend()
     client = _http_client(access_block=_READ_ACCESS, backend=backend)
@@ -383,6 +478,41 @@ def test_http_chats_inspect_503_without_backend() -> None:
     )
 
     assert resp.status_code == 503, resp.text
+
+
+def test_http_chats_inspect_503_without_resolver_for_entity() -> None:
+    """A distinct 503 source from the chat-inspect backend's own: the
+    inspect backend is wired (so ``_chat_inspect_backend_or_503`` passes),
+    but no entity resolver is — so resolution itself 503s before the
+    inspect backend is ever called.
+    """
+    backend = FakeInspectBackend()
+    client = _http_client(access_block=_READ_ACCESS, backend=backend)
+
+    resp = client.get(
+        "/telegram/chats/inspect", params={"entity": "@clientchat"}, headers=AUTH
+    )
+
+    assert resp.status_code == 503, resp.text
+    assert backend.calls == []
+
+
+def test_http_chats_inspect_503_without_folder_backend_for_chat_name() -> None:
+    """Same shape as the resolver case, for the ``chat_name`` branch: the
+    inspect backend is wired, but no folder backend is, so ``chat_name``
+    resolution 503s before the inspect backend is ever called.
+    """
+    backend = FakeInspectBackend()
+    client = _http_client(access_block=_READ_ACCESS, backend=backend)
+
+    resp = client.get(
+        "/telegram/chats/inspect",
+        params={"chat_name": "Client chat", "folder_name": "Planfix clients"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 503, resp.text
+    assert backend.calls == []
 
 
 def test_http_chats_inspect_rejects_an_uninspectable_peer_with_400() -> None:

@@ -29,6 +29,10 @@
 
 - Regenerate changelog
 
+### Testing
+
+- http: Cover chats-inspect 409 ambiguous-entity mapping
+
 ## v0.11.2 - 2026-08-03
 
 ### Bug Fixes
