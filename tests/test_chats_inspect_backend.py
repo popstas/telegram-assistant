@@ -378,6 +378,59 @@ async def test_restriction_reason_is_mapped() -> None:
     )
 
 
+# --- forbidden peers ---------------------------------------------------------
+#
+# The peer resolves (get_input_entity succeeds, telethon normalizes a
+# ChannelForbidden/ChatForbidden into an ordinary InputPeerChannel/InputPeerChat
+# before returning it — see telethon.utils.get_input_peer), but the Full fetch
+# itself is refused because we were kicked/banned or never had access. Per the
+# plan's error table this must surface as ValueError naming the chat, so the
+# CLI maps it to exit 2 rather than the unmapped exit 1 a bare RPCError would
+# get.
+
+
+class RaisingClient:
+    """A fake client whose ``__call__`` raises instead of returning a result."""
+
+    def __init__(self, *, peer, exc: BaseException) -> None:
+        self._peer = peer
+        self._exc = exc
+
+    async def get_input_entity(self, ref):
+        return self._peer
+
+    async def __call__(self, request):
+        raise self._exc
+
+
+@pytest.mark.asyncio
+async def test_forbidden_channel_raises_value_error_naming_chat() -> None:
+    from telethon.errors import ChannelPrivateError
+
+    exc = ChannelPrivateError(request=object())
+    client = RaisingClient(peer=InputPeerChannel(13), exc=exc)
+    backend = TelethonChatInspectBackend(client)
+
+    with pytest.raises(ValueError, match="13") as excinfo:
+        await backend.inspect_chat(chat_id=13, raw=False)
+
+    assert excinfo.value.__cause__ is exc
+
+
+@pytest.mark.asyncio
+async def test_forbidden_basic_group_raises_value_error_naming_chat() -> None:
+    from telethon.errors import ChatForbiddenError
+
+    exc = ChatForbiddenError(request=object())
+    client = RaisingClient(peer=InputPeerChat(14), exc=exc)
+    backend = TelethonChatInspectBackend(client)
+
+    with pytest.raises(ValueError, match="14") as excinfo:
+        await backend.inspect_chat(chat_id=14, raw=False)
+
+    assert excinfo.value.__cause__ is exc
+
+
 # --- legacy basic group -----------------------------------------------------
 
 

@@ -110,6 +110,36 @@ def _shallow_for(result: Any, full: Any, bucket: str) -> Any:
     return match
 
 
+def _raw_payload(entity: Any, full: Any, raw: bool) -> dict[str, Any] | None:
+    """The ``raw`` field's value: both serialized halves, or ``None`` when unrequested.
+
+    Shared by all three ``_inspect_*`` branches so the ``access_hash`` redaction
+    in :func:`_serialize` is applied from exactly one call site rather than
+    three copies that could drift.
+    """
+    if not raw:
+        return None
+    return {"entity": _serialize(entity), "full": _serialize(full)}
+
+
+def _is_muted(settings: Any) -> bool:
+    """A chat is muted when ``silent`` is set or ``mute_until`` is populated."""
+    if settings is None:
+        return False
+    if getattr(settings, "silent", False):
+        return True
+    return getattr(settings, "mute_until", None) is not None
+
+
+def _mute_fields(full: Any) -> tuple[bool, Any]:
+    """``(muted, muted_until)`` read off ``full.notify_settings``, once.
+
+    Shared by all three branches for the same reason as :func:`_raw_payload`.
+    """
+    settings = getattr(full, "notify_settings", None)
+    return _is_muted(settings), getattr(settings, "mute_until", None)
+
+
 class TelethonChatInspectBackend:
     """Adapter from the Telethon ``TelegramClient`` to ``ChatInspectBackend``."""
 
@@ -124,16 +154,17 @@ class TelethonChatInspectBackend:
 
         kind = type(peer).__name__
         if kind == "InputPeerChannel":
-            return await self._inspect_channel(peer, raw=raw)
+            return await self._inspect_channel(peer, chat_id=chat_id, raw=raw)
         if kind == "InputPeerChat":
-            return await self._inspect_basic_group(peer, raw=raw)
+            return await self._inspect_basic_group(peer, chat_id=chat_id, raw=raw)
         if kind in {"InputPeerUser", "InputPeerSelf"}:
             return await self._inspect_user(peer, raw=raw)
         raise ValueError(f"chat {chat_id} cannot be inspected (resolved to {kind})")
 
     # --- per-kind branches --------------------------------------------------
 
-    async def _inspect_channel(self, peer: Any, *, raw: bool) -> ChatInfo:
+    async def _inspect_channel(self, peer: Any, *, chat_id: int, raw: bool) -> ChatInfo:
+        from telethon.errors import ChannelPrivateError
         from telethon.tl import functions
 
         try:
@@ -141,11 +172,22 @@ class TelethonChatInspectBackend:
                 functions.channels.GetFullChannelRequest(channel=peer)
             )
         except Exception as exc:
-            raise translate_flood_wait(exc) from exc
+            translated = translate_flood_wait(exc)
+            if translated is not exc:
+                raise translated from exc
+            # The peer resolved (get_input_entity succeeded) but Telegram
+            # refuses the Full fetch — we were kicked/banned or it is private
+            # and we never joined. That is a caller-input-shaped failure, not
+            # an internal error, so it maps to ValueError -> CLI exit 2 rather
+            # than the unmapped exit 1 a bare RPCError would get.
+            if isinstance(exc, ChannelPrivateError):
+                raise ValueError(f"chat {chat_id} is private or inaccessible") from exc
+            raise
 
         full = getattr(result, "full_chat", None)
         entity = _shallow_for(result, full, "chats")
         broadcast = bool(getattr(entity, "broadcast", False))
+        muted, muted_until = _mute_fields(full)
 
         return ChatInfo(
             chat_id=int(getattr(full, "id", 0) or getattr(peer, "channel_id", 0)),
@@ -158,10 +200,8 @@ class TelethonChatInspectBackend:
             ttl_period=getattr(full, "ttl_period", None),
             pinned_message_id=getattr(full, "pinned_msg_id", None),
             archived=getattr(full, "folder_id", None) == 1,
-            muted=_is_muted(getattr(full, "notify_settings", None)),
-            muted_until=getattr(
-                getattr(full, "notify_settings", None), "mute_until", None
-            ),
+            muted=muted,
+            muted_until=muted_until,
             has_scheduled=bool(getattr(full, "has_scheduled", False)),
             restricted=bool(getattr(entity, "restricted", False)),
             restriction_reason=_restriction_reasons(
@@ -210,14 +250,11 @@ class TelethonChatInspectBackend:
             available_reactions=_reactions(getattr(full, "available_reactions", None)),
             reactions_limit=getattr(full, "reactions_limit", None),
             call_active=bool(getattr(entity, "call_active", False)),
-            raw=(
-                {"entity": _serialize(entity), "full": _serialize(full)}
-                if raw
-                else None
-            ),
+            raw=_raw_payload(entity, full, raw),
         )
 
-    async def _inspect_basic_group(self, peer: Any, *, raw: bool) -> ChatInfo:
+    async def _inspect_basic_group(self, peer: Any, *, chat_id: int, raw: bool) -> ChatInfo:
+        from telethon.errors import ChatForbiddenError
         from telethon.tl import functions
 
         try:
@@ -225,10 +262,19 @@ class TelethonChatInspectBackend:
                 functions.messages.GetFullChatRequest(chat_id=peer.chat_id)
             )
         except Exception as exc:
-            raise translate_flood_wait(exc) from exc
+            translated = translate_flood_wait(exc)
+            if translated is not exc:
+                raise translated from exc
+            # Same shape as the channel branch above: the peer resolved but
+            # Telegram refuses the Full fetch for this legacy basic group
+            # (we were removed from it) -> ValueError -> CLI exit 2.
+            if isinstance(exc, ChatForbiddenError):
+                raise ValueError(f"chat {chat_id} is forbidden") from exc
+            raise
 
         full = getattr(result, "full_chat", None)
         entity = _shallow_for(result, full, "chats")
+        muted, muted_until = _mute_fields(full)
 
         return ChatInfo(
             chat_id=int(getattr(full, "id", 0) or getattr(peer, "chat_id", 0)),
@@ -239,10 +285,8 @@ class TelethonChatInspectBackend:
             ttl_period=getattr(full, "ttl_period", None),
             pinned_message_id=getattr(full, "pinned_msg_id", None),
             archived=getattr(full, "folder_id", None) == 1,
-            muted=_is_muted(getattr(full, "notify_settings", None)),
-            muted_until=getattr(
-                getattr(full, "notify_settings", None), "mute_until", None
-            ),
+            muted=muted,
+            muted_until=muted_until,
             has_scheduled=bool(getattr(full, "has_scheduled", False)),
             is_creator=bool(getattr(entity, "creator", False)),
             left=bool(getattr(entity, "left", False)),
@@ -260,11 +304,7 @@ class TelethonChatInspectBackend:
             available_reactions=_reactions(getattr(full, "available_reactions", None)),
             reactions_limit=getattr(full, "reactions_limit", None),
             call_active=bool(getattr(entity, "call_active", False)),
-            raw=(
-                {"entity": _serialize(entity), "full": _serialize(full)}
-                if raw
-                else None
-            ),
+            raw=_raw_payload(entity, full, raw),
         )
 
     async def _inspect_user(self, peer: Any, *, raw: bool) -> ChatInfo:
@@ -280,6 +320,7 @@ class TelethonChatInspectBackend:
         first = getattr(entity, "first_name", None)
         last = getattr(entity, "last_name", None)
         title = " ".join(part for part in (first, last) if part) or None
+        muted, muted_until = _mute_fields(full)
 
         return ChatInfo(
             chat_id=int(getattr(full, "id", 0) or getattr(peer, "user_id", 0)),
@@ -291,10 +332,8 @@ class TelethonChatInspectBackend:
             ttl_period=getattr(full, "ttl_period", None),
             pinned_message_id=getattr(full, "pinned_msg_id", None),
             archived=getattr(full, "folder_id", None) == 1,
-            muted=_is_muted(getattr(full, "notify_settings", None)),
-            muted_until=getattr(
-                getattr(full, "notify_settings", None), "mute_until", None
-            ),
+            muted=muted,
+            muted_until=muted_until,
             has_scheduled=bool(getattr(full, "has_scheduled", False)),
             restricted=bool(getattr(entity, "restricted", False)),
             restriction_reason=_restriction_reasons(
@@ -320,21 +359,8 @@ class TelethonChatInspectBackend:
                 if getattr(entity, "status", None) is not None
                 else None
             ),
-            raw=(
-                {"entity": _serialize(entity), "full": _serialize(full)}
-                if raw
-                else None
-            ),
+            raw=_raw_payload(entity, full, raw),
         )
-
-
-def _is_muted(settings: Any) -> bool:
-    """A chat is muted when ``silent`` is set or ``mute_until`` is populated."""
-    if settings is None:
-        return False
-    if getattr(settings, "silent", False):
-        return True
-    return getattr(settings, "mute_until", None) is not None
 
 
 __all__ = ["TelethonChatInspectBackend"]

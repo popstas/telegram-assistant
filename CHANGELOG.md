@@ -5,6 +5,7 @@
 
 ### Features
 
+- chats: Map channel/basic-group/user metadata in the Telethon adapter
 - chats: Add read-only chat-inspect domain op
 
 ### Documentation
