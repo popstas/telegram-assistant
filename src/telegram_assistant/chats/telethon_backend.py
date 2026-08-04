@@ -83,7 +83,57 @@ def _peer_id(raw: Any) -> int | None:
     return None
 
 
+def _redact(value: Any, *, _seen: frozenset[int] = frozenset()) -> Any:
+    """Recursively strip ``_REDACTED_RAW_KEYS`` from a serialized value.
+
+    Telethon's own ``to_dict()`` already recurses into nested TLObjects (its
+    generated ``ChannelFull.to_dict()``, for instance, calls
+    ``self.chat_photo.to_dict()`` itself), so an ``access_hash`` on a nested
+    ``Photo`` reaches this function buried inside an already-plain ``dict`` —
+    a *top-level-only* key filter never sees it, which is exactly how it
+    leaked into ``--raw`` live (``raw.full.chat_photo.access_hash``,
+    ``raw.full.profile_photo.access_hash``). This walks every shape
+    ``to_dict()``/``vars()`` output can carry at any depth:
+
+    * a ``dict`` — drop redacted keys, recurse into what is left;
+    * a ``list``/``tuple`` — recurse into each item (Telegram returns these
+      for e.g. ``usernames``, ``restriction_reason``, ``bot_info``);
+    * an object that still carries its own ``to_dict()`` — reachable from the
+      ``vars()`` fallback path in :func:`_serialize`, whose *nested*
+      attributes may still be live objects even when the top-level one has no
+      ``to_dict()`` of its own (a test fake is the concrete case; a mixed
+      fake/real object graph is also possible).
+
+    Anything else — ``str``, ``int``, ``bool``, ``bytes``, ``datetime``,
+    ``None`` — is a leaf and is returned unchanged: none of those can carry a
+    nested ``access_hash``, and neither ``bytes`` nor ``str`` are treated as a
+    sequence of sub-values to recurse into.
+
+    ``_seen`` (object ids already entered through the ``to_dict()`` branch)
+    guards a reference cycle — an object whose own ``to_dict()`` yields itself
+    or an ancestor — without imposing a depth cap: a legitimately deep,
+    acyclic payload is walked in full rather than silently truncated.
+    """
+    if isinstance(value, dict):
+        return {
+            key: _redact(item, _seen=_seen)
+            for key, item in value.items()
+            if key not in _REDACTED_RAW_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact(item, _seen=_seen) for item in value]
+    to_dict = getattr(value, "to_dict", None)
+    if to_dict is not None:
+        obj_id = id(value)
+        if obj_id in _seen:
+            return None
+        return _redact(to_dict(), _seen=_seen | {obj_id})
+    return value
+
+
 def _serialize(raw: Any) -> dict[str, Any] | None:
+    """Serialize *raw* for the ``raw`` payload with ``access_hash`` stripped
+    at every depth, not just the top level — see :func:`_redact`."""
     if raw is None:
         return None
     to_dict = getattr(raw, "to_dict", None)
@@ -93,7 +143,7 @@ def _serialize(raw: Any) -> dict[str, Any] | None:
         payload = {
             k: v for k, v in vars(raw).items() if not k.startswith("_")
         }
-    return {k: v for k, v in payload.items() if k not in _REDACTED_RAW_KEYS}
+    return _redact(payload)
 
 
 def _shallow_for(result: Any, full: Any, bucket: str) -> Any:

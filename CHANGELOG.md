@@ -15,6 +15,7 @@
 
 ### Documentation
 
+- Fix chats inspect README placement, add missing error strings
 - Document chats inspect in the skill, README and CLAUDE.md
 - Implementation plan for `chats inspect`
 - Design for read-only `chats inspect`
