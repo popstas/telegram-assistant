@@ -568,7 +568,9 @@ command rather than after `folder_cache_ttl` seconds.
 - Typical errors: `exactly one of --chat-id, --chat-name, or --entity must be
   supplied` (exit 2), `chat <id> cannot be inspected (resolved to ...)` (exit 2
   — the reference resolved to something with no metadata to read),
-  `access denied ...` (exit 3), entity not-found / ambiguous (exit 2).
+  `chat <id> is private or inaccessible` (exit 2), `chat <id> is forbidden`
+  (exit 2 — we were removed from it), `access denied ...` (exit 3), entity
+  not-found / ambiguous (exit 2).
 
 #### `messages` / `send`
 
