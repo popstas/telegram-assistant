@@ -5,6 +5,7 @@
 
 ### Documentation
 
+- Implementation plan for `chats inspect`
 - Design for read-only `chats inspect`
 
 ### Miscellaneous
