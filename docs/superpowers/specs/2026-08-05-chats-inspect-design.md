@@ -200,12 +200,39 @@ branch.
    `README.md`.
 4. Live read-only check across the four peer kinds.
 
-**Phase 2 — remaining surfaces** (after the phase-1 output has been reviewed)
+**Phase 2 — remaining surfaces** (decided 2026-08-05, after the phase-1 output
+was reviewed)
 
-- HTTP `GET /telegram/chats/inspect?entity=…&raw=…`, following
-  `GET /telegram/members/list`, served through a
+- HTTP `GET /telegram/chats/inspect`, served through a
   `chat_inspect_backend_factory` on `app.state` that returns `None` (→ 503)
   until the Telethon client is connected.
 - MCP tool `telegram_chats_inspect`, plus `EXPECTED_TOOL_NAMES` in
   `tests/test_mcp_mount.py` and the tool catalog in `README.md`.
 - `tests/test_chats_inspect_surfaces.py`.
+
+Four decisions settle the places where `members list` is a poor model:
+
+- **Chat reference:** the remote surfaces take the *same* set the CLI does —
+  `entity`, `chat_id`, or `chat_name` with `folder_name` / `folder_id` —
+  rather than `members list`'s narrower `chat_id`/`entity` pair. `messages
+  edit` and `messages pin` already resolve a name over HTTP, so the precedent
+  exists, and a surface that cannot address what its own CLI sibling can is a
+  gap nobody would defend later.
+- **`raw` is CLI-only.** The remote surfaces still *accept* the parameter and
+  reject it with 400 / a tool error naming the reason, rather than ignoring it
+  — a silently dropped `raw=true` would look like an empty raw payload. The
+  curated set is designed to be enough; `raw` carries considerably more (a
+  legacy group's whole member roster via `ChatFull.participants`, a user's
+  `business_location`, `stories` and `personal_channel_id`), and the project
+  already keeps local-only capabilities off the remote surfaces for this
+  reason — `scan_media` resolves server-side paths for the CLI alone, and
+  `messages download --out` is unconfined only there.
+- **`FloodWaitError` is mapped**, not left to fall through as `members list`
+  leaves it: HTTP answers **502** with `Retry-After` and a body carrying
+  `retry_after_seconds`, MCP reports `needs_review` with the same field. The
+  adapter already translates flood-waits at four call sites, so an unmapped
+  one would surface as Starlette's empty 500 and tell the caller nothing about
+  waiting. This reuses the mapping `messages pin`/`unpin` established.
+- **`raw` never reaches the domain call** from a remote surface: the routes
+  pass `raw=False` after the rejection above, so there is no path where a
+  remote caller's flag reaches `_serialize`.
