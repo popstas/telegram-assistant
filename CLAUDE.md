@@ -17,7 +17,7 @@ All runtime state â€” `config.yml`, Telethon session, SQLite DB, bearer token â€
 ## Common commands
 
 - Run the API: `uvicorn telegram_assistant.http_api.app:create_app --factory --port 8085`
-- Run the CLI: `telegram-assistant <resource> <action> [options]` (e.g. `health`, `auth`, `groups create`, `topics bulk-create`, `members bulk-add`, `members list`, `messages send`, `messages forward`, `notifications mute`, `folders inspect`, `operations status`)
+- Run the CLI: `telegram-assistant <resource> <action> [options]` (e.g. `health`, `auth`, `groups create`, `topics bulk-create`, `members bulk-add`, `members list`, `chats inspect`, `messages send`, `messages forward`, `notifications mute`, `folders inspect`, `operations status`)
 - Manual MCP smoke: enable `mcp:` in `data/config.yml`, run the API, then use `npx @modelcontextprotocol/inspector` against `http://localhost:8085/mcp` (requires Node.js/npm; see `docs/mcp-inspector-e2e.md`)
 - Tests: `pytest` (asyncio mode auto). Single test: `pytest tests/test_groups.py::test_name` or filter with `-k pattern`
 - Lint: `ruff check src tests` (line-length 100, py312, ignores E501)

@@ -69,8 +69,8 @@ telegram-assistant health
 Commands fall into three buckets:
 
 1. **Read-only** — `health`, `folders inspect`, `operations status`,
-   `groups get-layout`, `members list`. Run them immediately, no
-   confirmation, no `--dry-run`.
+   `groups get-layout`, `members list`, `chats inspect`. Run them
+   immediately, no confirmation, no `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `groups rename`, `topics create`, `topics close`, `topics open`,
    `topics rename`,
@@ -220,6 +220,7 @@ agent stops and asks for clarification — it does not invent a new path.
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `members` | `list` | Read-only: list a chat's participants (`--query`, `--filter all\|admins\|bots`, `--limit`, default 200), or check one user's membership with `--user` (READ-gated, never writes). | `telegram-assistant members list ...` |
+| `chats` | `inspect` | Read-only: report one chat's metadata — auto-delete TTL, description, member counts, slow mode, restrictions, our own rights (READ-gated, no `--dry-run`). `--raw` adds the serialized entity/Full objects. | `telegram-assistant chats inspect ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. `--rich-markdown <file.md>` sends a Telegram rich message (article) instead of plain text, with paragraph spacing, line splitting and `<tg-collage>` grouping on by default (`--no-spaced-paragraphs`, `--no-line-breaks`, `--media-group`) and local media resolved from the article's directory (`--rich-file`, `--vault-dir`). | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
@@ -530,6 +531,44 @@ command rather than after `folder_cache_ttl` seconds.
   and the agent asks again before adding `--force`.
 - Typical errors: `refusing to remove without --yes (or use --dry-run
   to preview)`, protected-account refusals, `BulkMemberRemoveNeedsReview`.
+
+#### `chats` / `inspect`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`), optional
+  `--raw`.
+- Required flags: exactly one chat reference.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: read-only — run immediately when the human asks «какой статус
+  автоудаления у чата X», «что за чат X», «сколько участников в X», «почему в X
+  не отправляется». No `--dry-run` (there is none), no confirmation.
+- Payload: one flat JSON object with the same keys for every chat kind —
+  fields that do not apply are `null`. Always present: `chat_id` (bare id, no
+  `-100`), `kind` (`user`/`bot`/`basic_group`/`supergroup`/`channel`), `title`,
+  `username`, `about`, `ttl_period` (auto-delete, seconds; `null` = off),
+  `pinned_message_id`, `archived`, `muted`/`muted_until`, `restricted` +
+  `restriction_reason`, `is_creator`, `left`, `invite_link`,
+  `my_admin_rights`, `default_banned_rights`. Groups and channels add
+  `is_forum`, `topics_layout`, `participants_count`, `admins_count`,
+  `kicked_count`, `banned_count`, `online_count`, `slowmode_seconds`,
+  `linked_chat_id`, `hidden_prehistory`, `antispam`, `join_to_send`,
+  `noforwards`, `available_reactions` and friends. Private chats add
+  `first_name`/`last_name`, `phone`, `is_bot`, `is_premium`, `is_contact`,
+  `blocked`, `common_chats_count`, `birthday`, `last_seen_status`.
+- `--raw`: adds a `raw` key holding `{"entity": …, "full": …}` — the two
+  serialized Telegram objects behind the curated fields, minus `access_hash`.
+  Use it only when the human asks for a field the curated set does not name;
+  it is large and its shape moves with the Telegram layer.
+- Note it does **not** write anything: there is no way to *change* the TTL,
+  the description or the archive state through this CLI. If the human asks to
+  set auto-delete, say so plainly rather than reaching for another command.
+- Confirmation: not required (read-only). Still READ-gated by the
+  `telegram.access` policy — a chat with no `read` grant exits 3 with
+  `access denied`; surface that and stop.
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity must be
+  supplied` (exit 2), `chat <id> cannot be inspected (resolved to ...)` (exit 2
+  — the reference resolved to something with no metadata to read),
+  `access denied ...` (exit 3), entity not-found / ambiguous (exit 2).
 
 #### `messages` / `send`
 
@@ -1428,6 +1467,24 @@ Request: «Кто состоит в чате Клиент / проект?» / «
 6. Typical errors: `exactly one of --chat-id, --chat-name, or --entity
    must be supplied` and `unknown filter '...'` (exit 2); a chat with no
    READ grant exits 3.
+
+### `chats inspect`
+
+Request: «Какой статус автоудаления у чата 2305069221?»
+
+1. Resource/action: `chats` / `inspect`. Read-only — run it immediately, no
+   `--dry-run`, no confirmation.
+2. Run:
+
+   ```bash
+   telegram-assistant chats inspect --entity 2305069221
+   ```
+
+3. Read `ttl_period` from the payload: `null` means auto-delete is off,
+   otherwise it is the window in seconds (86400 = 1 day, 604800 = 1 week).
+   Report the other fields only if the human asked for them — the payload is
+   wide by design.
+4. If the human then asks to *change* it, stop: this command only reads.
 
 ### `messages send` — targeted
 
