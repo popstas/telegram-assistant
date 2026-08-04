@@ -18,7 +18,11 @@ from fastapi.testclient import TestClient
 
 from telegram_assistant.chats import ChatInfo
 from telegram_assistant.config import load_config_from_text
-from telegram_assistant.entities import EntityNotFoundError, ResolvedEntity
+from telegram_assistant.entities import (
+    AmbiguousEntityError,
+    EntityNotFoundError,
+    ResolvedEntity,
+)
 from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.http_api import create_app
 from telegram_assistant.persistence import OperationStore
@@ -259,6 +263,33 @@ def test_http_chats_inspect_reports_a_missing_chat_name_as_404() -> None:
     )
 
     assert resp.status_code == 404, resp.text
+    assert backend.calls == []
+
+
+def test_http_chats_inspect_reports_an_ambiguous_entity_as_409() -> None:
+    """An ``entity`` matching several dialogs (e.g. a duplicate title) is 409.
+
+    A dedicated resolver stand-in rather than ``FakeResolver`` (whose mapping
+    only ever answers "found" or "not found") — mirrors the resolver
+    ``test_http_groups_rename.py::test_http_rename_entity_ambiguous_409`` uses
+    for the same shared ``resolve_entity_chat_id`` → ``AmbiguousEntityError``
+    → 409 path.
+    """
+    backend = FakeInspectBackend()
+
+    class _AmbiguousResolver:
+        async def resolve(self, ref: object) -> ResolvedEntity:
+            raise AmbiguousEntityError(ref=str(ref), matches=[111, 222])
+
+    client = _http_client(
+        access_block=_READ_ACCESS, backend=backend, resolver=_AmbiguousResolver()
+    )
+
+    resp = client.get(
+        "/telegram/chats/inspect", params={"entity": "Client chat"}, headers=AUTH
+    )
+
+    assert resp.status_code == 409, resp.text
     assert backend.calls == []
 
 

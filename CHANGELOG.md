@@ -5,6 +5,7 @@
 
 ### Features
 
+- http: Serve chats inspect at GET /telegram/chats/inspect
 - cli: Add chats inspect
 - chats: Map channel/basic-group/user metadata in the Telethon adapter
 - chats: Add read-only chat-inspect domain op
