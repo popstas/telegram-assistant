@@ -8,6 +8,10 @@
 - chats: Map channel/basic-group/user metadata in the Telethon adapter
 - chats: Add read-only chat-inspect domain op
 
+### Bug Fixes
+
+- chats: Forbidden peers raise ValueError; dedupe raw/mute mapping
+
 ### Documentation
 
 - Implementation plan for `chats inspect`

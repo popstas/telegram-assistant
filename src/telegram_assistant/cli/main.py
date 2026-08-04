@@ -3402,6 +3402,162 @@ def members_list(
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
 
 
+# --- chats ------------------------------------------------------------------
+
+chats_app = typer.Typer(
+    help="Read chat metadata.", no_args_is_help=True
+)
+app.add_typer(chats_app, name="chats")
+
+
+def _build_chat_inspect_backends(config_path: Path | None):
+    """Open the Telethon-backed chat-inspect + folder backends + resolver.
+
+    Mirrors :func:`_build_member_list_backends`: the read backend, the folder
+    backend (for ``--chat-name`` and folder access rules) and a shared entity
+    resolver so ``--entity`` works. Tests monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.chats.telethon_backend import (
+            TelethonChatInspectBackend,
+        )
+        from telegram_assistant.entities import TelethonEntityResolver
+        from telegram_assistant.folders import TelethonFolderBackend
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonChatInspectBackend(client),
+            TelethonFolderBackend(client),
+            TelethonEntityResolver(client),
+        )
+
+    return config, manager, _open
+
+
+@chats_app.command("inspect")
+def chats_inspect(
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id to read.",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, t.me/invite link, "
+        "phone, or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    raw: bool = typer.Option(
+        False,
+        "--raw",
+        help="Also include the serialized entity and Full objects under 'raw'.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Read one chat's metadata: TTL, description, counts, rights (READ-gated)."""
+    from telegram_assistant.chats import inspect_chat
+    from telegram_assistant.folders import FolderError, resolve_chat_in_folder
+
+    refs = sum([chat_id is not None, chat_name is not None, entity is not None])
+    if refs != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    config, manager, open_backends = _build_chat_inspect_backends(config_path)
+
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _run() -> dict[str, object]:
+        try:
+            chat_backend, folder_backend, resolver = await open_backends()
+            if entity is not None:
+                resolved_chat_id = (await resolver.resolve(entity)).chat_id
+            elif chat_id is not None:
+                resolved_chat_id = chat_id
+            else:
+                resolved = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=resolved_folder_name or "",
+                    chat_name=chat_name or "",
+                    folder_id=effective_folder_id,
+                )
+                resolved_chat_id = resolved.chat_id
+
+            authorizer = _cli_authorizer(
+                config, resolver=resolver, folder_backend=folder_backend
+            )
+            info = await inspect_chat(
+                backend=chat_backend,
+                chat_id=resolved_chat_id,
+                raw=raw,
+                authorizer=authorizer,
+            )
+            return info.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except ValueError as exc:
+        # Bad caller input / an uninspectable peer — exit 2 like the rest of the
+        # domain rejections. AccessDenied/EntityError are RuntimeErrors, so they
+        # fall through to the mapping below.
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        typer.echo(f"chats inspect failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
 # --- messages ---------------------------------------------------------------
 
 messages_app = typer.Typer(help="Send messages and service commands.", no_args_is_help=True)
