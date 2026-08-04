@@ -17,6 +17,7 @@
 
 ### Documentation
 
+- Implementation plan for chats inspect phase 2 (HTTP + MCP)
 - Record phase-2 surface decisions in the chats inspect spec
 - Fix chats inspect README placement, add missing error strings
 - Document chats inspect in the skill, README and CLAUDE.md
