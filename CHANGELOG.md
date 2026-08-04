@@ -3,6 +3,10 @@
 
 ## Unreleased
 
+### Documentation
+
+- Design for read-only `chats inspect`
+
 ### Miscellaneous
 
 - Regenerate changelog
