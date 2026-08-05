@@ -5,6 +5,7 @@
 
 ### Features
 
+- config: Add ttl pacing knobs and a dedicated ttl gate key
 - chats: Add the Telethon set-ttl adapter, tolerating unparseable responses
 - chats: Add the set-ttl domain op with a no-op short-circuit
 - mcp: Add telegram_chats_inspect tool

@@ -3405,7 +3405,7 @@ def members_list(
 # --- chats ------------------------------------------------------------------
 
 chats_app = typer.Typer(
-    help="Read chat metadata.", no_args_is_help=True
+    help="Read chat metadata and set the auto-delete period.", no_args_is_help=True
 )
 app.add_typer(chats_app, name="chats")
 
@@ -3440,6 +3440,63 @@ def _build_chat_inspect_backends(config_path: Path | None):
         )
 
     return config, manager, _open
+
+
+def _build_chat_ttl_backends(config_path: Path | None):
+    """Open the Telethon-backed chat-TTL + folder backends + resolver.
+
+    Same shape as :func:`_build_chat_inspect_backends`, with the write adapter
+    in place of the read one. Tests monkeypatch this to inject fakes.
+    """
+    config = _load_config_or_exit(config_path)
+    manager = TelethonSessionManager(config.telegram)
+
+    async def _open():
+        from telegram_assistant.chats.telethon_backend import TelethonChatTtlBackend
+        from telegram_assistant.entities import TelethonEntityResolver
+        from telegram_assistant.folders import TelethonFolderBackend
+
+        client = await manager.get_client()
+        if not await client.is_user_authorized():
+            raise RuntimeError(
+                "Telethon session is not authorized; run "
+                "`telegram-assistant auth` first."
+            )
+        return (
+            TelethonChatTtlBackend(client),
+            TelethonFolderBackend(client),
+            TelethonEntityResolver(client),
+        )
+
+    return config, manager, _open
+
+
+def _cli_ttl_pacer(config):
+    """Build the auto-delete pacer for a CLI invocation.
+
+    Mirrors :func:`_cli_pin_pacer` but on the TTL gate row and with the far
+    higher wait ceiling this method needs: FLOOD_WAITs on SetHistoryTTL run into
+    the hundreds of seconds, and the operator's choice was to sit through them.
+    """
+    from telegram_assistant.messages import Pacer
+
+    interval = float(getattr(config.telegram, "ttl_min_interval_seconds", 0.0))
+    max_wait = float(getattr(config.telegram, "ttl_max_flood_wait_seconds", 3600.0))
+    retries = int(getattr(config.telegram, "ttl_max_flood_wait_retries", 5))
+    gate = None
+    if interval > 0:
+        from telegram_assistant.persistence.rate_gate import RateGateStore
+
+        try:
+            gate = RateGateStore(default_database_path(config))
+        except Exception:
+            gate = None
+    return Pacer(
+        gate,
+        min_interval_seconds=interval,
+        max_flood_wait_seconds=max_wait,
+        max_flood_wait_retries=retries,
+    )
 
 
 @chats_app.command("inspect")
@@ -3554,6 +3611,173 @@ def chats_inspect(
         _raise_for_access_or_entity_error(exc)
         typer.echo(f"chats inspect failed: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+    typer.echo(json.dumps(payload, sort_keys=True, default=str))
+
+
+@chats_app.command("set-ttl")
+def chats_set_ttl(
+    ttl: str = typer.Option(
+        ...,
+        "--ttl",
+        help="New auto-delete period: 'off' (or 0), or <integer><unit> with "
+        "unit s/m/h/d/w (e.g. 1d, 24h, 93d). A bare integer is seconds.",
+    ),
+    chat_id: int | None = typer.Option(
+        None,
+        "--chat-id",
+        help="Numeric Telegram chat id to change.",
+    ),
+    chat_name: str | None = typer.Option(
+        None,
+        "--chat-name",
+        help="Chat title (resolved within --folder-name).",
+    ),
+    entity: str | None = typer.Option(
+        None,
+        "--entity",
+        help="Flexible entity reference (numeric id, @username, t.me/invite link, "
+        "phone, or exact title) resolved via the shared resolver.",
+    ),
+    folder_name: str | None = typer.Option(
+        None,
+        "--folder-name",
+        help="Folder used for --chat-name lookup "
+        "(defaults to telegram.default_chat_folder.folder_name).",
+    ),
+    folder_id: int | None = typer.Option(
+        None,
+        "--folder-id",
+        help="Optional folder id cross-check.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Resolve the chat and report the change without writing.",
+    ),
+    config_path: Path | None = typer.Option(  # noqa: B008
+        None,
+        "--config",
+        "-c",
+        help="Path to config.yml (defaults: ./data/config.yml, then ~/.config/telegram-assistant/config.yml).",
+        exists=False,
+    ),
+) -> None:
+    """Set one chat's auto-delete period (WRITE-gated).
+
+    Setting the period a chat already has writes nothing: Telegram posts a
+    member-visible service message on every successful change, including a
+    no-op one.
+    """
+    from telegram_assistant.chats import SetTtlRequest, parse_ttl, set_chat_ttl
+    from telegram_assistant.folders import FolderError, resolve_chat_in_folder
+
+    refs = sum([chat_id is not None, chat_name is not None, entity is not None])
+    if refs != 1:
+        typer.echo(
+            "exactly one of --chat-id, --chat-name, or --entity must be supplied",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    try:
+        period = parse_ttl(ttl)
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+    config, manager, open_backends = _build_chat_ttl_backends(config_path)
+
+    if chat_name is not None:
+        resolved_folder_name, default_fid, _ = _resolve_folder_name(
+            folder_name, config_path
+        )
+        effective_folder_id = folder_id if folder_id is not None else default_fid
+    else:
+        resolved_folder_name = folder_name
+        effective_folder_id = folder_id
+
+    async def _run() -> dict[str, object]:
+        try:
+            ttl_backend, folder_backend, resolver = await open_backends()
+            if entity is not None:
+                resolved_chat_id = (await resolver.resolve(entity)).chat_id
+                resolved_name = entity
+            elif chat_id is not None:
+                resolved_chat_id = chat_id
+                resolved_name = None
+            else:
+                resolved = await resolve_chat_in_folder(
+                    folder_backend,
+                    folder_name=resolved_folder_name or "",
+                    chat_name=chat_name or "",
+                    folder_id=effective_folder_id,
+                )
+                resolved_chat_id = resolved.chat_id
+                resolved_name = chat_name
+
+            authorizer = _cli_authorizer(
+                config, resolver=resolver, folder_backend=folder_backend
+            )
+            result = await set_chat_ttl(
+                backend=ttl_backend,
+                request=SetTtlRequest(
+                    telegram_chat_id=resolved_chat_id,
+                    period=period,
+                    chat_name=resolved_name,
+                ),
+                authorizer=authorizer,
+                pacer=_cli_ttl_pacer(config),
+                dry_run=dry_run,
+            )
+            return result.to_dict()
+        finally:
+            try:
+                await manager.disconnect()
+            except Exception:
+                pass
+
+    try:
+        payload = asyncio.run(_run())
+    except FolderError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except ValueError as exc:
+        # Bad input, an uninspectable peer, or a read-back that disagreed with
+        # the request — all caller-facing, so exit 2 rather than the internal
+        # exit 1. AccessDenied/EntityError are RuntimeErrors and fall through.
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        _raise_for_access_or_entity_error(exc)
+        _raise_for_flood_wait(exc, "chats set-ttl")
+        typer.echo(f"chats set-ttl failed: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if dry_run:
+        target = payload["chat_id"]
+        scope = "off" if period == 0 else f"{period}s"
+        changed = bool(payload["changed"])
+        action = f"set auto-delete of chat {target} to {scope}"
+        envelope = {
+            "status": "dry_run",
+            "dry_run": True,
+            "command": "chats.set-ttl",
+            "would": action if changed else f"leave chat {target} unchanged",
+            "resolved": payload,
+            "planned_actions": [action] if changed else [],
+            "warnings": (
+                []
+                if changed
+                else [
+                    f"chat {target} already has this auto-delete period; "
+                    "no write would be issued (Telegram posts a visible service "
+                    "message on every successful change)"
+                ]
+            ),
+        }
+        typer.echo(json.dumps(envelope, sort_keys=True, default=str))
+        return
 
     typer.echo(json.dumps(payload, sort_keys=True, default=str))
 
