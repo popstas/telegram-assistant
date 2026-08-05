@@ -144,18 +144,25 @@ async def inspect_chat_for_request(
         raw=raw,
     )
     backend = _chat_inspect_backend_or_503(request)
-    resolved_chat_id = await _resolve_chat_id_generic(
-        telegram_chat_id=chat_id,
-        chat_name=chat_name,
-        entity=entity,
-        folder_name=folder_name,
-        folder_id=folder_id,
-        request=request,
-    )
-    authorizer = build_authorizer(
-        request, folder_backend=_folder_backend_optional(request)
-    )
     try:
+        # The annotation covers *reference resolution* too, not just the domain
+        # call: the ``entity`` probe (``get_entity`` plus the exact-title
+        # ``iter_dialogs`` scan) and the ``chat_name`` branch's
+        # ``list_folders()`` are classic FLOOD_WAIT sources, and their adapters
+        # raise the same bare ``FloodWaitError`` carrying only ``.seconds``.
+        # Annotating only the ``inspect_chat`` call left half the surface
+        # answering 502 with no ``Retry-After``/``retry_after_seconds`` at all.
+        resolved_chat_id = await _resolve_chat_id_generic(
+            telegram_chat_id=chat_id,
+            chat_name=chat_name,
+            entity=entity,
+            folder_name=folder_name,
+            folder_id=folder_id,
+            request=request,
+        )
+        authorizer = build_authorizer(
+            request, folder_backend=_folder_backend_optional(request)
+        )
         info = await inspect_chat(
             backend=backend,
             chat_id=resolved_chat_id,

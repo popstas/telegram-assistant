@@ -569,7 +569,12 @@ command rather than after `folder_cache_ttl` seconds.
 - Other surfaces: the same op is served by HTTP `GET /telegram/chats/inspect`
   and by the MCP tool `telegram_chats_inspect`, taking the same chat references
   (`chat_id` / `chat_name` + `folder_name`/`folder_id` / `entity`) and returning
-  the same payload. `raw` is **CLI-only** there — both surfaces *reject*
+  the same **fields** — every key of the CLI payload, with the same meanings.
+  Only the datetime *rendering* differs: the CLI prints Python's own repr
+  (`"2026-01-02 03:04:05+00:00"`), the JSON surfaces ISO-8601
+  (`"2026-01-02T03:04:05Z"`), for `created_at`, `muted_until` and
+  `slowmode_next_send_date`. Parse them, do not string-compare across
+  surfaces. `raw` is **CLI-only** there — both surfaces *reject*
   `raw=true` (HTTP `400`, MCP a tool error) rather than ignoring it, so a
   serialized dump can only be produced locally. This skill still uses the CLI;
   mention the remote surfaces only if the human is asking about them.

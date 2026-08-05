@@ -95,11 +95,34 @@ class FakeResolver:
 class FakeFolderBackend:
     """Just enough of ``FolderBackend`` for ``resolve_chat_in_folder``."""
 
-    def __init__(self, snapshots: list[FolderSnapshot] | None = None) -> None:
+    def __init__(
+        self, snapshots: list[FolderSnapshot] | None = None, *, error: Exception | None = None
+    ) -> None:
         self._snapshots = [] if snapshots is None else snapshots
+        self._error = error
 
     async def list_folders(self) -> list[FolderSnapshot]:
+        if self._error is not None:
+            raise self._error
         return list(self._snapshots)
+
+
+class FloodResolver:
+    """A resolver that throttles — the ``entity`` branch's FLOOD_WAIT source.
+
+    The adapter (``entities/telethon_backend.py``) raises the bare
+    ``worker.queue.FloodWaitError``: it carries ``.seconds`` and nothing else,
+    which is exactly why ``_annotate_retry_after`` has to run over the
+    resolution too and not only over the domain call.
+    """
+
+    async def resolve(self, ref: object) -> ResolvedEntity:
+        raise FloodWaitError(30.0)
+
+
+class AmbiguousResolver:
+    async def resolve(self, ref: object) -> ResolvedEntity:
+        raise AmbiguousEntityError(ref=str(ref), matches=[111, 222])
 
 
 def _folder_backend() -> FakeFolderBackend:
@@ -109,6 +132,22 @@ def _folder_backend() -> FakeFolderBackend:
                 folder_id=2,
                 folder_name="Planfix clients",
                 chats=[FolderChat(chat_id=CHAT_ID, title="Client chat")],
+            )
+        ]
+    )
+
+
+def _duplicate_title_folder_backend() -> FakeFolderBackend:
+    """One folder holding two chats with the same title → ``AmbiguousChatNameError``."""
+    return FakeFolderBackend(
+        [
+            FolderSnapshot(
+                folder_id=2,
+                folder_name="Planfix clients",
+                chats=[
+                    FolderChat(chat_id=CHAT_ID, title="Client chat"),
+                    FolderChat(chat_id=CHAT_ID + 1, title="Client chat"),
+                ],
             )
         ]
     )
@@ -155,14 +194,22 @@ def _http_client(
     backend: FakeInspectBackend | None = None,
     resolver: FakeResolver | None = None,
     folder_backend: FakeFolderBackend | None = None,
-    has_factory: bool = True,
+    backend_returns_none: bool = False,
 ) -> TestClient:
+    """Build the app.
+
+    ``backend_returns_none`` installs a chat-inspect factory that answers
+    ``None`` — the *second* 503 stage in ``_chat_inspect_backend_or_503``
+    (the production "Telethon client not connected yet" case). The first
+    stage, a missing factory attribute, is unreachable through ``create_app``,
+    which always sets it.
+    """
     config = load_config_from_text(_config_with_access(access_block))
     app = create_app(
         config,
         session_manager=None,
         chat_inspect_backend_factory=(
-            (lambda _r: backend) if has_factory else (lambda _r: None)
+            (lambda _r: None) if backend_returns_none else (lambda _r: backend)
         ),
         folder_backend_factory=(
             (lambda _r: folder_backend)
@@ -287,13 +334,8 @@ def test_http_chats_inspect_reports_an_ambiguous_entity_as_409() -> None:
     → 409 path.
     """
     backend = FakeInspectBackend()
-
-    class _AmbiguousResolver:
-        async def resolve(self, ref: object) -> ResolvedEntity:
-            raise AmbiguousEntityError(ref=str(ref), matches=[111, 222])
-
     client = _http_client(
-        access_block=_READ_ACCESS, backend=backend, resolver=_AmbiguousResolver()
+        access_block=_READ_ACCESS, backend=backend, resolver=AmbiguousResolver()
     )
 
     resp = client.get(
@@ -316,20 +358,10 @@ def test_http_chats_inspect_reports_an_ambiguous_chat_name_as_409() -> None:
     not catch the two being collapsed into one.
     """
     backend = FakeInspectBackend()
-    dup_folder = FakeFolderBackend(
-        [
-            FolderSnapshot(
-                folder_id=2,
-                folder_name="Planfix clients",
-                chats=[
-                    FolderChat(chat_id=CHAT_ID, title="Client chat"),
-                    FolderChat(chat_id=CHAT_ID + 1, title="Client chat"),
-                ],
-            )
-        ]
-    )
     client = _http_client(
-        access_block=_READ_ACCESS, backend=backend, folder_backend=dup_folder
+        access_block=_READ_ACCESS,
+        backend=backend,
+        folder_backend=_duplicate_title_folder_backend(),
     )
 
     resp = client.get(
@@ -482,7 +514,7 @@ def test_http_chats_inspect_denied_without_read() -> None:
 
 
 def test_http_chats_inspect_503_without_backend() -> None:
-    client = _http_client(access_block=_READ_ACCESS, has_factory=False)
+    client = _http_client(access_block=_READ_ACCESS, backend_returns_none=True)
 
     resp = client.get(
         "/telegram/chats/inspect", params={"chat_id": CHAT_ID}, headers=AUTH
@@ -554,6 +586,83 @@ def test_http_chats_inspect_maps_flood_wait_to_502_with_retry_after() -> None:
     assert detail["retry_after_seconds"] == 30.0
     assert detail["retry_at"] > 0
     assert resp.headers["Retry-After"] == "30"
+
+
+def test_http_chats_inspect_flood_wait_while_resolving_an_entity_keeps_retry_after() -> None:
+    """A throttle during *resolution* answers exactly like one during the read.
+
+    ``resolve_entity_chat_id`` runs before the domain call, and its adapter's
+    ``get_entity`` probe / exact-title dialog scan are classic FLOOD_WAIT
+    sources. The documented contract (README, SKILL.md) is one 502 shape for
+    the whole route — ``retry_after_seconds`` in the body and the standard
+    ``Retry-After`` header — so the annotation has to cover the reference
+    branches too, not only ``inspect_chat``.
+    """
+    backend = FakeInspectBackend()
+    client = _http_client(
+        access_block=_READ_ACCESS, backend=backend, resolver=FloodResolver()
+    )
+
+    resp = client.get(
+        "/telegram/chats/inspect", params={"entity": "@clientchat"}, headers=AUTH
+    )
+
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "needs_review"
+    assert detail["retry_after_seconds"] == 30.0
+    assert detail["retry_at"] > 0
+    assert resp.headers["Retry-After"] == "30"
+    assert backend.calls == []
+
+
+def test_http_chats_inspect_flood_wait_while_resolving_a_chat_name_keeps_retry_after() -> None:
+    """The ``chat_name`` half of the same contract: ``list_folders()`` throttles."""
+    backend = FakeInspectBackend()
+    client = _http_client(
+        access_block=_READ_ACCESS,
+        backend=backend,
+        folder_backend=FakeFolderBackend(error=FloodWaitError(30.0)),
+    )
+
+    resp = client.get(
+        "/telegram/chats/inspect",
+        params={"chat_name": "Client chat", "folder_name": "Planfix clients"},
+        headers=AUTH,
+    )
+
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    assert detail["error"] == "needs_review"
+    assert detail["retry_after_seconds"] == 30.0
+    assert detail["retry_at"] > 0
+    assert resp.headers["Retry-After"] == "30"
+    assert backend.calls == []
+
+
+def test_http_chats_inspect_does_not_clobber_a_paced_flood_waits_own_retry_after() -> None:
+    """An error that already carries retry-after keeps its own values.
+
+    ``_annotate_retry_after`` fills in only what is missing, so a
+    ``PacedFloodWaitError``-shaped exception (the pin/unpin pacer's, which knows
+    a real wall-clock ``retry_at``) is passed through untouched rather than
+    overwritten with ``.seconds``.
+    """
+    paced = FloodWaitError(30.0)
+    paced.retry_after_seconds = 7.5  # type: ignore[attr-defined]
+    paced.retry_at = 1_900_000_000.0  # type: ignore[attr-defined]
+    backend = FakeInspectBackend(error=paced)
+    client = _http_client(access_block=_READ_ACCESS, backend=backend)
+
+    resp = client.get(
+        "/telegram/chats/inspect", params={"chat_id": CHAT_ID}, headers=AUTH
+    )
+
+    assert resp.status_code == 502, resp.text
+    detail = resp.json()["detail"]
+    assert detail["retry_after_seconds"] == 7.5
+    assert detail["retry_at"] == 1_900_000_000.0
+    assert resp.headers["Retry-After"] == "8"
 
 
 def test_http_chats_inspect_requires_a_bearer_token() -> None:
@@ -826,6 +935,165 @@ def test_mcp_chats_inspect_maps_flood_wait_to_needs_review(
     assert error["error"] == "needs_review"
     assert error["status"] == 502
     assert error["detail"]["retry_after_seconds"] == 30.0
+
+
+def test_mcp_chats_inspect_flood_wait_while_resolving_keeps_retry_after(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """MCP's half of the resolution-throttle contract.
+
+    ``retry_after_details()`` reads ``retry_after_seconds``, which the bare
+    adapter-raised ``FloodWaitError`` does not carry; without the annotation
+    covering resolution the ``detail`` key is dropped entirely and the client
+    is told to wait an unknown amount of time.
+    """
+    backend = FakeInspectBackend()
+    config_yaml = _with_access(minimal_config_yaml, _MCP_READ_ACCESS)
+    with _mcp_client(
+        config_yaml, tmp_path, backend=backend, resolver=FloodResolver()
+    ) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client, token, "telegram_chats_inspect", {"entity": "@clientchat"}
+        )
+
+    assert result["isError"] is True, result
+    error = _error_payload(result)
+    assert error["error"] == "needs_review"
+    assert error["status"] == 502
+    assert error["detail"]["retry_after_seconds"] == 30.0
+    assert backend.calls == []
+
+
+@pytest.mark.parametrize(
+    ("wiring", "arguments", "expected_status", "expected_error"),
+    [
+        pytest.param(
+            lambda: {"backend": FakeInspectBackend(), "resolver": FakeResolver({})},
+            {"entity": "@nope"},
+            404,
+            "not_found",
+            id="entity-not-found",
+        ),
+        pytest.param(
+            lambda: {
+                "backend": FakeInspectBackend(),
+                "folder_backend": _folder_backend(),
+            },
+            {"chat_name": "Client chat", "folder_name": "Nonexistent folder"},
+            404,
+            "not_found",
+            id="folder-not-found",
+        ),
+        pytest.param(
+            lambda: {
+                "backend": FakeInspectBackend(),
+                "folder_backend": _folder_backend(),
+            },
+            {"chat_name": "Other chat", "folder_name": "Planfix clients"},
+            404,
+            "not_found",
+            id="chat-not-found-in-folder",
+        ),
+        pytest.param(
+            lambda: {"backend": FakeInspectBackend(), "resolver": AmbiguousResolver()},
+            {"entity": "Client chat"},
+            409,
+            "ambiguous_entity",
+            id="ambiguous-entity",
+        ),
+        pytest.param(
+            lambda: {
+                "backend": FakeInspectBackend(),
+                "folder_backend": _duplicate_title_folder_backend(),
+            },
+            {"chat_name": "Client chat", "folder_name": "Planfix clients"},
+            409,
+            "ambiguous_chat_name",
+            id="ambiguous-chat-name",
+        ),
+        pytest.param(
+            lambda: {
+                "backend": FakeInspectBackend(),
+                "folder_backend": _folder_backend(),  # folder_id=2
+            },
+            {
+                "chat_name": "Client chat",
+                "folder_name": "Planfix clients",
+                "folder_id": 999,
+            },
+            409,
+            "conflict",
+            id="folder-id-mismatch",
+        ),
+        pytest.param(
+            lambda: {
+                "backend": FakeInspectBackend(),
+                "folder_backend": _folder_backend(),
+            },
+            {"chat_name": "Client chat"},
+            400,
+            "invalid_request",
+            id="chat-name-without-folder-name",
+        ),
+        pytest.param(
+            lambda: {
+                "backend": FakeInspectBackend(
+                    error=ValueError(f"chat {CHAT_ID} is private or inaccessible")
+                )
+            },
+            {"chat_id": CHAT_ID},
+            400,
+            "invalid_request",
+            id="uninspectable-peer",
+        ),
+        pytest.param(
+            lambda: {"backend": FakeInspectBackend()},  # no resolver wired
+            {"entity": "@clientchat"},
+            503,
+            "backend_unavailable",
+            id="no-resolver-for-entity",
+        ),
+        pytest.param(
+            lambda: {"backend": FakeInspectBackend()},  # no folder backend wired
+            {"chat_name": "Client chat", "folder_name": "Planfix clients"},
+            503,
+            "backend_unavailable",
+            id="no-folder-backend-for-chat-name",
+        ),
+    ],
+)
+def test_mcp_chats_inspect_error_taxonomy(
+    minimal_config_yaml: str,
+    tmp_path: Path,
+    wiring: Any,
+    arguments: dict[str, Any],
+    expected_status: int,
+    expected_error: str,
+) -> None:
+    """Every failure ``inspect_chat_for_request`` raises, mapped by MCP.
+
+    One parametrized case per source rather than ten near-duplicate functions:
+    the helper *raises* and each surface *maps*, so the point of this test is
+    that the MCP mapping stays status-for-status identical to the HTTP route's
+    (each case above has a named HTTP sibling in this module). A future change
+    to how the helper splits raising from mapping cannot reshape one surface
+    without this failing.
+    """
+    wiring_kwargs = wiring()
+    config_yaml = _with_access(minimal_config_yaml, _MCP_READ_ACCESS)
+    with _mcp_client(config_yaml, tmp_path, **wiring_kwargs) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(client, token, "telegram_chats_inspect", arguments)
+
+    assert result["isError"] is True, result
+    error = _error_payload(result)
+    assert error["status"] == expected_status, error
+    assert error["error"] == expected_error, error
 
 
 @pytest.mark.parametrize(
