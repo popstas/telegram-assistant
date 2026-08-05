@@ -5,6 +5,7 @@
 
 ### Features
 
+- chats: Add the set-ttl domain op with a no-op short-circuit
 - mcp: Add telegram_chats_inspect tool
 - http: Serve chats inspect at GET /telegram/chats/inspect
 - cli: Add chats inspect

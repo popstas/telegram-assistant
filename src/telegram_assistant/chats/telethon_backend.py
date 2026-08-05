@@ -461,4 +461,88 @@ class TelethonChatInspectBackend:
         )
 
 
-__all__ = ["TelethonChatInspectBackend"]
+class TelethonChatTtlBackend:
+    """Adapter from the Telethon ``TelegramClient`` to ``ChatTtlBackend``.
+
+    Two RPCs at most per call, and the peer dispatch is the same shape as
+    :class:`TelethonChatInspectBackend` — the ``ttl_period`` field lives on
+    ``full_chat`` for channels and basic groups, on ``full_user`` for users.
+    """
+
+    def __init__(self, client: Any) -> None:
+        self._client = client
+
+    async def _peer(self, chat_id: int) -> tuple[Any, str]:
+        try:
+            peer = await self._client.get_input_entity(chat_id)
+        except Exception as exc:
+            translated = translate_flood_wait(exc)
+            if translated is not exc:
+                raise translated from exc
+            raise
+        kind = type(peer).__name__
+        if kind not in {
+            "InputPeerChannel",
+            "InputPeerChat",
+            "InputPeerUser",
+            "InputPeerSelf",
+        }:
+            raise ValueError(
+                f"chat {chat_id} has no auto-delete setting (resolved to {kind})"
+            )
+        return peer, kind
+
+    async def get_ttl(self, *, chat_id: int) -> int | None:
+        from telethon.errors import ChannelPrivateError
+        from telethon.tl import functions
+
+        peer, kind = await self._peer(chat_id)
+        if kind == "InputPeerChannel":
+            request = functions.channels.GetFullChannelRequest(channel=peer)
+            attr = "full_chat"
+        elif kind == "InputPeerChat":
+            request = functions.messages.GetFullChatRequest(chat_id=peer.chat_id)
+            attr = "full_chat"
+        else:
+            request = functions.users.GetFullUserRequest(id=peer)
+            attr = "full_user"
+
+        try:
+            result = await self._client(request)
+        except Exception as exc:
+            translated = translate_flood_wait(exc)
+            if translated is not exc:
+                raise translated from exc
+            # Mirrors the inspect adapter: the peer resolved but Telegram
+            # refuses the Full fetch, which is caller-input-shaped (exit 2),
+            # not an internal error.
+            if isinstance(exc, ChannelPrivateError):
+                raise ValueError(f"chat {chat_id} is private or inaccessible") from exc
+            raise
+
+        return getattr(getattr(result, attr, None), "ttl_period", None)
+
+    async def set_ttl(self, *, chat_id: int, period: int) -> None:
+        from telethon.tl import functions
+
+        peer, _kind = await self._peer(chat_id)
+        try:
+            await self._client(
+                functions.messages.SetHistoryTTLRequest(peer=peer, period=period)
+            )
+        except Exception as exc:
+            translated = translate_flood_wait(exc)
+            if translated is not exc:
+                raise translated from exc
+            # Proven live 2026-08-05 (Migragate): Telegram answered with a
+            # constructor newer than the installed layer, Telethon could not
+            # read it — and the write had applied. Treating that as a failure
+            # would report a successful change as an error; the domain's
+            # read-back is what decides. Matched by class *name* so no import
+            # of a Telethon-version-specific symbol is needed.
+            if type(exc).__name__ == "TypeNotFoundError":
+                return
+            raise
+
+
+__all__ = ["TelethonChatInspectBackend", "TelethonChatTtlBackend"]
