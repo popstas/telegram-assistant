@@ -25,6 +25,7 @@
 
 ### Documentation
 
+- skill: Add standalone Confirmation field to chats set-ttl section
 - Document chats set-ttl in the skill catalog and README
 - Implementation plan for chats set-ttl
 - Spec for chats set-ttl (CLI-only auto-delete write)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import pytest
 
 from telegram_assistant.chats.telethon_backend import TelethonChatTtlBackend
+from telegram_assistant.worker.queue import FloodWaitError
 
 
 class InputPeerChannel:
@@ -74,6 +75,19 @@ class FakeClient:
     @property
     def request_names(self) -> list[str]:
         return [type(r).__name__ for r in self.requests]
+
+
+def _flood_error() -> Exception:
+    """Name-spoofed like Telethon's own, so ``translate_flood_wait`` matches it
+    by class name alone — the same convention as
+    ``tests/test_messages_pin.py::_flood_error``."""
+
+    class _Flood(Exception):
+        def __init__(self) -> None:
+            self.seconds = 7
+
+    _Flood.__name__ = "FloodWaitError"
+    return _Flood()
 
 
 # --- get_ttl ----------------------------------------------------------------
@@ -141,6 +155,22 @@ async def test_get_ttl_forbidden_channel_raises_value_error_naming_chat() -> Non
 
 
 @pytest.mark.asyncio
+async def test_get_ttl_translates_flood_wait() -> None:
+    """The single most-cited fact behind this feature is that this method's
+    flood waits escalate into the hundreds of seconds — if the raw Telethon
+    error ever leaked through untranslated, the pacer's ``except
+    FloodWaitError`` in ``messages/pacing.py`` would never fire and a
+    ``chats set-ttl`` call would exit 1 on the first wait instead of sitting
+    through it. See ``tests/test_messages_pin.py::test_telethon_pin_translates_flood_wait``
+    for the identical pattern."""
+    client = FakeClient(peer=InputPeerChannel(7), full_error=_flood_error())
+    backend = TelethonChatTtlBackend(client)
+
+    with pytest.raises(FloodWaitError):
+        await backend.get_ttl(chat_id=-1007)
+
+
+@pytest.mark.asyncio
 async def test_get_ttl_forbidden_basic_group_raises_value_error_naming_chat() -> None:
     from telethon.errors import ChatForbiddenError
 
@@ -175,6 +205,23 @@ async def test_set_ttl_zero_disables() -> None:
     await backend.set_ttl(chat_id=-1007, period=0)
 
     assert client.requests[0].period == 0
+
+
+@pytest.mark.asyncio
+async def test_set_ttl_translates_flood_wait() -> None:
+    """Mirror of ``test_get_ttl_translates_flood_wait`` for the write side —
+    the pacer wraps ``set_chat_ttl``'s backend call, so an untranslated
+    ``FloodWaitError`` here would silently drop the feature's headline
+    sit-through-the-wait behaviour."""
+    client = FakeClient(
+        peer=InputPeerChannel(7),
+        full=FullChannelResult(None),
+        set_error=_flood_error(),
+    )
+    backend = TelethonChatTtlBackend(client)
+
+    with pytest.raises(FloodWaitError):
+        await backend.set_ttl(chat_id=-1007, period=86400)
 
 
 @pytest.mark.asyncio

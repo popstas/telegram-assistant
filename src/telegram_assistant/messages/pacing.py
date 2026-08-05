@@ -170,6 +170,13 @@ class Pacer:
                         retry_at=retry_at,
                         attempts=attempts,
                     ) from exc
+                # A silent multi-minute (or multi-hour, across retries) sleep is
+                # indistinguishable from a hang to whoever is watching the
+                # process — name the chat/key, the pause and which attempt this
+                # is before going quiet for it.
+                _log.warning(
+                    "flood_wait_pause", key=key, seconds=pause, attempt=attempts
+                )
                 await self._sleep(pause)
 
     async def _wait_for_slot(self, key: str, *, attempts: int = 0) -> None:

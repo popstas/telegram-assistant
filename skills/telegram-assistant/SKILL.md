@@ -616,7 +616,10 @@ command rather than after `folder_cache_ttl` seconds.
   `previous_ttl_seconds`, `ttl_period`, `changed`, `dry_run`.
   `previous_ttl_seconds` and `ttl_period` are `null` when auto-delete is off,
   never `0` — the same spelling `chats inspect` uses. `ttl_period` is what the
-  server reported **after** the write, not what was asked for.
+  server reported **after** the write, not what was asked for. `chat_name`
+  echoes the caller's own reference string (e.g. `@username`), or `null` for
+  `--chat-id` — it is not the chat's real title the way `chats inspect`'s
+  `title` field is; do not relay it to a human as the chat's name.
 - **Every successful change posts a service message into the chat**, visible to
   all members. Say so in the plan before asking for confirmation — in a client
   chat that message is seen by the client.
@@ -632,8 +635,9 @@ command rather than after `folder_cache_ttl` seconds.
   hang for minutes is normal — do not kill and retry it, and never run two at
   once against the same account.
 - Sweeping a folder: loop the command over the chat ids from `folders inspect`,
-  one chat per call, sequentially. There is no bulk mode and no folder flag —
-  and running several in parallel makes the flood waits worse.
+  one chat per call, sequentially. There is no bulk mode and no fan-out flag —
+  `--folder-name`/`--folder-id` only scope `--chat-name` — and running several
+  in parallel makes the flood waits worse.
 - Other surfaces: none. This is **CLI-only** — there is no HTTP route and no MCP
   tool for it.
 - Confirmation: required (bucket 2).
