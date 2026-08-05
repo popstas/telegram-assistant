@@ -20,6 +20,7 @@
 
 ### Documentation
 
+- Implementation plan for chats set-ttl
 - Spec for chats set-ttl (CLI-only auto-delete write)
 - Document the chats inspect HTTP route and MCP tool
 - Implementation plan for chats inspect phase 2 (HTTP + MCP)
