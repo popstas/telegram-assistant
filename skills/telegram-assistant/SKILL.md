@@ -566,6 +566,13 @@ command rather than after `folder_cache_ttl` seconds.
   serialized Telegram objects behind the curated fields, minus `access_hash`.
   Use it only when the human asks for a field the curated set does not name;
   it is large and its shape moves with the Telegram layer.
+- Other surfaces: the same op is served by HTTP `GET /telegram/chats/inspect`
+  and by the MCP tool `telegram_chats_inspect`, taking the same chat references
+  (`chat_id` / `chat_name` + `folder_name`/`folder_id` / `entity`) and returning
+  the same payload. `raw` is **CLI-only** there — both surfaces *reject*
+  `raw=true` (HTTP `400`, MCP a tool error) rather than ignoring it, so a
+  serialized dump can only be produced locally. This skill still uses the CLI;
+  mention the remote surfaces only if the human is asking about them.
 - Note it does **not** write anything: there is no way to *change* the TTL,
   the description or the archive state through this CLI. If the human asks to
   set auto-delete, say so plainly rather than reaching for another command.
@@ -577,7 +584,10 @@ command rather than after `folder_cache_ttl` seconds.
   — the reference resolved to something with no metadata to read),
   `chat <id> is private or inaccessible` (exit 2), `chat <id> is forbidden`
   (exit 2 — we were removed from it), `access denied ...` (exit 3), entity
-  not-found / ambiguous (exit 2).
+  not-found / ambiguous (exit 2). A `FLOOD_WAIT` exits 1 on the CLI (one-shot
+  read, nothing retries it); on HTTP/MCP the same throttle comes back as
+  `502` / `needs_review` carrying `retry_after_seconds` — wait that long and
+  try again rather than retrying immediately.
 
 #### `messages` / `send`
 

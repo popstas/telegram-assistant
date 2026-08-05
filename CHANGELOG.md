@@ -5,6 +5,7 @@
 
 ### Features
 
+- mcp: Add telegram_chats_inspect tool
 - http: Serve chats inspect at GET /telegram/chats/inspect
 - cli: Add chats inspect
 - chats: Map channel/basic-group/user metadata in the Telethon adapter
