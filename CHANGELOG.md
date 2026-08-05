@@ -13,6 +13,7 @@
 
 ### Bug Fixes
 
+- http: Annotate chats-inspect flood waits raised during resolution
 - chats-inspect: Report muted only while a mute is in force
 - chats: Redact access_hash recursively from --raw payloads
 - chats: Forbidden peers raise ValueError; dedupe raw/mute mapping
