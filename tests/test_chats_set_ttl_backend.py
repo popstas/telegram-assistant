@@ -48,9 +48,10 @@ class TypeNotFoundError(Exception):
 
 
 class FakeClient:
-    def __init__(self, *, peer, full=None, set_error=None) -> None:
+    def __init__(self, *, peer, full=None, full_error=None, set_error=None) -> None:
         self._peer = peer
         self._full = full
+        self._full_error = full_error
         self._set_error = set_error
         self.requests: list[object] = []
 
@@ -61,6 +62,8 @@ class FakeClient:
         self.requests.append(request)
         name = type(request).__name__
         if name in {"GetFullChannelRequest", "GetFullChatRequest", "GetFullUserRequest"}:
+            if self._full_error is not None:
+                raise self._full_error
             return self._full
         if name == "SetHistoryTTLRequest":
             if self._set_error is not None:
@@ -122,6 +125,32 @@ async def test_unsupported_peer_raises_value_error() -> None:
     with pytest.raises(ValueError) as exc:
         await backend.get_ttl(chat_id=1)
     assert "1" in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_get_ttl_forbidden_channel_raises_value_error_naming_chat() -> None:
+    from telethon.errors import ChannelPrivateError
+
+    exc = ChannelPrivateError(request=object())
+    client = FakeClient(peer=InputPeerChannel(13), full_error=exc)
+    backend = TelethonChatTtlBackend(client)
+
+    with pytest.raises(ValueError, match="13") as excinfo:
+        await backend.get_ttl(chat_id=13)
+    assert excinfo.value.__cause__ is exc
+
+
+@pytest.mark.asyncio
+async def test_get_ttl_forbidden_basic_group_raises_value_error_naming_chat() -> None:
+    from telethon.errors import ChatForbiddenError
+
+    exc = ChatForbiddenError(request=object())
+    client = FakeClient(peer=InputPeerChat(14), full_error=exc)
+    backend = TelethonChatTtlBackend(client)
+
+    with pytest.raises(ValueError, match="14") as excinfo:
+        await backend.get_ttl(chat_id=14)
+    assert excinfo.value.__cause__ is exc
 
 
 # --- set_ttl ----------------------------------------------------------------

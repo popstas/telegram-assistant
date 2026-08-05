@@ -493,7 +493,7 @@ class TelethonChatTtlBackend:
         return peer, kind
 
     async def get_ttl(self, *, chat_id: int) -> int | None:
-        from telethon.errors import ChannelPrivateError
+        from telethon.errors import ChannelPrivateError, ChatForbiddenError
         from telethon.tl import functions
 
         peer, kind = await self._peer(chat_id)
@@ -513,11 +513,14 @@ class TelethonChatTtlBackend:
             translated = translate_flood_wait(exc)
             if translated is not exc:
                 raise translated from exc
-            # Mirrors the inspect adapter: the peer resolved but Telegram
-            # refuses the Full fetch, which is caller-input-shaped (exit 2),
-            # not an internal error.
-            if isinstance(exc, ChannelPrivateError):
+            # Mirrors the inspect adapter's two forbidden-Full-fetch branches
+            # (``_inspect_channel``/``_inspect_basic_group``): the peer
+            # resolved but Telegram refuses the Full fetch, which is
+            # caller-input-shaped (exit 2), not an internal error.
+            if kind == "InputPeerChannel" and isinstance(exc, ChannelPrivateError):
                 raise ValueError(f"chat {chat_id} is private or inaccessible") from exc
+            if kind == "InputPeerChat" and isinstance(exc, ChatForbiddenError):
+                raise ValueError(f"chat {chat_id} is forbidden") from exc
             raise
 
         return getattr(getattr(result, attr, None), "ttl_period", None)
