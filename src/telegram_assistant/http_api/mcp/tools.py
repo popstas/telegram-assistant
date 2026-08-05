@@ -58,6 +58,7 @@ from telegram_assistant.http_api.access import (
     translate_access_error,
     translate_entity_error,
 )
+from telegram_assistant.http_api.chats import inspect_chat_for_request
 from telegram_assistant.http_api.folders import AddChatRequest
 from telegram_assistant.http_api.groups import (
     ContactBody,
@@ -2060,6 +2061,48 @@ def register_telegram_tools(server: FastMCP[Any], provider: AppStateProvider) ->
                 "filter": filter,
                 **result.to_dict(),
             }
+        except Exception as exc:
+            _raise_from_exception(exc)
+
+    @server.tool(
+        name="telegram_chats_inspect",
+        annotations=READ_TELEGRAM,
+        structured_output=True,
+    )
+    async def telegram_chats_inspect(
+        chat_id: int | None = None,
+        chat_name: str | None = None,
+        entity: str | int | None = None,
+        folder_name: str | None = None,
+        folder_id: int | None = None,
+        raw: bool = False,
+    ) -> dict[str, Any]:
+        """Read one chat's metadata: TTL, description, counts, rights (READ-gated).
+
+        Answers "what is this chat" for every peer kind with one flat payload —
+        auto-delete ``ttl_period``, ``about``, member counts, slow mode,
+        restrictions, our own rights — so a caller can read a field without
+        branching on whether the target is a supergroup, a channel or a private
+        chat. Target it with exactly one of ``chat_id``, ``entity``, or
+        ``chat_name`` (which requires ``folder_name``, optionally cross-checked
+        by ``folder_id``). It never writes: there is no way to *change* any of
+        these settings through this tool.
+
+        ``raw`` is accepted only so it can be rejected — the serialized Telethon
+        objects are CLI-only, and silently dropping the flag would look like an
+        empty raw payload.
+        """
+        request = _request(provider)
+        try:
+            return await inspect_chat_for_request(
+                request,  # type: ignore[arg-type]
+                chat_id=chat_id,
+                chat_name=chat_name,
+                entity=entity,
+                folder_name=folder_name,
+                folder_id=folder_id,
+                raw=raw,
+            )
         except Exception as exc:
             _raise_from_exception(exc)
 

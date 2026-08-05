@@ -8,12 +8,14 @@ shape, the CLI-only ``raw`` rejection and the status / error taxonomy.
 
 from __future__ import annotations
 
+import json
 import tempfile
 import textwrap
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 from telegram_assistant.chats import ChatInfo
@@ -27,6 +29,15 @@ from telegram_assistant.folders import FolderChat, FolderSnapshot
 from telegram_assistant.http_api import create_app
 from telegram_assistant.persistence import OperationStore
 from telegram_assistant.worker.queue import FloodWaitError
+from tests.test_mcp_mount import (
+    FakeGoogleOidcProvider,
+    FakeSessionManager,
+    _enabled_mcp_yaml,
+    _initialize_payload,
+    _list_tools,
+    _mcp_headers,
+    _mint_token,
+)
 
 AUTH = {"Authorization": "Bearer secret_token"}
 
@@ -553,3 +564,288 @@ def test_http_chats_inspect_requires_a_bearer_token() -> None:
     # A missing Authorization header is 401 on every /telegram/* route
     # (tests/test_app_skeleton.py::test_protected_endpoint_requires_authorization_header).
     assert resp.status_code == 401, resp.text
+
+
+# --- MCP -------------------------------------------------------------------
+
+
+def _with_access(minimal_config_yaml: str, access_block: str) -> str:
+    """Splice an `access:` block into the shared minimal config fixture."""
+    return minimal_config_yaml.replace(
+        "  defaults:\n",
+        f"  access:\n{access_block}  defaults:\n",
+        1,
+    )
+
+
+_MCP_READ_ACCESS = "    rules:\n      - all: true\n        permission: read\n"
+_MCP_WRITE_ACCESS = "    rules:\n      - all: true\n        permission: write\n"
+
+
+def _mcp_client(
+    config_yaml: str,
+    tmp_path: Path,
+    *,
+    backend: FakeInspectBackend | None = None,
+    resolver: FakeResolver | None = None,
+    folder_backend: FakeFolderBackend | None = None,
+    disabled_tools: tuple[str, ...] = (),
+) -> TestClient:
+    config = load_config_from_text(
+        _enabled_mcp_yaml(config_yaml, disabled_tools=disabled_tools)
+    )
+    app = create_app(
+        config,
+        session_manager=FakeSessionManager(),  # type: ignore[arg-type]
+        mcp_google_provider=FakeGoogleOidcProvider(),
+        chat_inspect_backend_factory=(
+            (lambda _r: backend) if backend is not None else (lambda _r: None)
+        ),
+        folder_backend_factory=(
+            (lambda _r: folder_backend)
+            if folder_backend is not None
+            else (lambda _r: None)
+        ),
+        resolver_factory=lambda _r: resolver,
+        operation_store=OperationStore(tmp_path / "state.db"),
+    )
+    return TestClient(app)
+
+
+def _initialize(client: TestClient, token: str) -> None:
+    headers = _mcp_headers(token)
+    initialize = client.post("/mcp", json=_initialize_payload(), headers=headers)
+    assert initialize.status_code == 200, initialize.text
+    initialized = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+        headers=headers,
+    )
+    assert initialized.status_code == 202, initialized.text
+
+
+def _call_tool(
+    client: TestClient, token: str, name: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    response = client.post(
+        "/mcp",
+        json={
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {"name": name, "arguments": arguments},
+        },
+        headers=_mcp_headers(token),
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["result"]
+
+
+def _error_payload(result: dict[str, Any]) -> dict[str, Any]:
+    """The JSON error body an MCP tool failure carries.
+
+    The mcp SDK's ``Tool.run`` (``mcp/server/fastmcp/tools/base.py``) wraps
+    *every* exception a tool raises — including our own ``McpToolError``,
+    whose message is already the JSON payload — in
+    ``f"Error executing tool {name}: {e}"`` before it reaches ``content[0]``.
+    That prefix is universal (it predates this tool and applies to every MCP
+    tool's error path), not something this tool's registration controls, so
+    it is stripped here rather than in production code.
+    """
+    text = result["content"][0]["text"]
+    prefix, _, remainder = text.partition(": ")
+    if prefix.startswith("Error executing tool "):
+        text = remainder
+    return json.loads(text)
+
+
+def test_mcp_chats_inspect_reads_via_backend(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeInspectBackend()
+    config_yaml = _with_access(minimal_config_yaml, _MCP_READ_ACCESS)
+    with _mcp_client(config_yaml, tmp_path, backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client, token, "telegram_chats_inspect", {"chat_id": CHAT_ID}
+        )
+
+    assert result["isError"] is False, result
+    payload = result["structuredContent"]
+    assert payload["chat_id"] == CHAT_ID
+    assert payload["kind"] == "supergroup"
+    assert payload["ttl_period"] == 86400
+    assert payload["topics_layout"] == "tabs"
+    assert "raw" not in payload
+    assert backend.calls == [{"chat_id": CHAT_ID, "raw": False}]
+
+
+def test_mcp_chats_inspect_resolves_entity(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeInspectBackend()
+    config_yaml = _with_access(minimal_config_yaml, _MCP_READ_ACCESS)
+    with _mcp_client(
+        config_yaml,
+        tmp_path,
+        backend=backend,
+        resolver=FakeResolver({"@clientchat": CHAT_ID}),
+    ) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client, token, "telegram_chats_inspect", {"entity": "@clientchat"}
+        )
+
+    assert result["isError"] is False, result
+    assert result["structuredContent"]["chat_id"] == CHAT_ID
+    assert backend.calls == [{"chat_id": CHAT_ID, "raw": False}]
+
+
+def test_mcp_chats_inspect_resolves_chat_name_in_folder(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeInspectBackend()
+    config_yaml = _with_access(minimal_config_yaml, _MCP_READ_ACCESS)
+    with _mcp_client(
+        config_yaml, tmp_path, backend=backend, folder_backend=_folder_backend()
+    ) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_chats_inspect",
+            {"chat_name": "Client chat", "folder_name": "Planfix clients"},
+        )
+
+    assert result["isError"] is False, result
+    assert result["structuredContent"]["chat_id"] == CHAT_ID
+    assert backend.calls == [{"chat_id": CHAT_ID, "raw": False}]
+
+
+def test_mcp_chats_inspect_rejects_raw(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """`raw` is CLI-only — a tool error, never a silently dropped flag."""
+    backend = FakeInspectBackend()
+    config_yaml = _with_access(minimal_config_yaml, _MCP_READ_ACCESS)
+    with _mcp_client(config_yaml, tmp_path, backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client,
+            token,
+            "telegram_chats_inspect",
+            {"chat_id": CHAT_ID, "raw": True},
+        )
+
+    assert result["isError"] is True, result
+    error = _error_payload(result)
+    assert error["error"] == "invalid_request"
+    assert error["status"] == 400
+    assert "raw is CLI-only" in error["message"]
+    # Nothing reached the domain op, so no raw payload could ever be built.
+    assert backend.calls == []
+
+
+def test_mcp_chats_inspect_requires_exactly_one_ref(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeInspectBackend()
+    config_yaml = _with_access(minimal_config_yaml, _MCP_READ_ACCESS)
+    with _mcp_client(config_yaml, tmp_path, backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(client, token, "telegram_chats_inspect", {})
+
+    assert result["isError"] is True, result
+    error = _error_payload(result)
+    assert error["error"] == "invalid_request"
+    assert "exactly one" in error["message"]
+    assert backend.calls == []
+
+
+def test_mcp_chats_inspect_denied_without_read(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeInspectBackend()
+    config_yaml = _with_access(minimal_config_yaml, _MCP_WRITE_ACCESS)
+    with _mcp_client(config_yaml, tmp_path, backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client, token, "telegram_chats_inspect", {"chat_id": CHAT_ID}
+        )
+
+    assert result["isError"] is True, result
+    assert _error_payload(result)["error"] == "access_denied"
+    assert backend.calls == []
+
+
+def test_mcp_chats_inspect_backend_unavailable(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    config_yaml = _with_access(minimal_config_yaml, _MCP_READ_ACCESS)
+    with _mcp_client(config_yaml, tmp_path) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client, token, "telegram_chats_inspect", {"chat_id": CHAT_ID}
+        )
+
+    assert result["isError"] is True, result
+    error = _error_payload(result)
+    assert error["error"] == "backend_unavailable"
+    assert error["status"] == 503
+
+
+def test_mcp_chats_inspect_maps_flood_wait_to_needs_review(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    backend = FakeInspectBackend(error=FloodWaitError(30.0))
+    config_yaml = _with_access(minimal_config_yaml, _MCP_READ_ACCESS)
+    with _mcp_client(config_yaml, tmp_path, backend=backend) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+
+        result = _call_tool(
+            client, token, "telegram_chats_inspect", {"chat_id": CHAT_ID}
+        )
+
+    assert result["isError"] is True, result
+    error = _error_payload(result)
+    assert error["error"] == "needs_review"
+    assert error["status"] == 502
+    assert error["detail"]["retry_after_seconds"] == 30.0
+
+
+@pytest.mark.parametrize(
+    "disabled",
+    ["telegram_chats_inspect", "telegram_chats_*"],
+)
+def test_mcp_chats_inspect_can_be_disabled(
+    minimal_config_yaml: str, tmp_path: Path, disabled: str
+) -> None:
+    """`mcp.disabled_tools` prunes it by exact name and by prefix wildcard."""
+    config_yaml = _with_access(minimal_config_yaml, _MCP_READ_ACCESS)
+    with _mcp_client(
+        config_yaml,
+        tmp_path,
+        backend=FakeInspectBackend(),
+        disabled_tools=(disabled,),
+    ) as client:
+        token = _mint_token(client)
+        listed = _list_tools(client, token)
+
+    assert "telegram_chats_inspect" not in set(listed)
+    # The filter is targeted, not a blanket prune.
+    assert "telegram_members_list" in set(listed)
