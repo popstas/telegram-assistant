@@ -255,6 +255,38 @@ class TelegramConfig(BaseModel):
             "HTTP/MCP server pace against each other). 0 disables pacing."
         ),
     )
+    ttl_min_interval_seconds: float = Field(
+        default=2.0,
+        ge=0.0,
+        description=(
+            "Minimum seconds between two `chats set-ttl` writes on the same "
+            "chat, paced through the same shared SQLite gate as pins but on a "
+            "separate row (Telegram meters SetHistoryTTL separately). "
+            "0 disables pacing."
+        ),
+    )
+    ttl_max_flood_wait_seconds: float = Field(
+        default=3600.0,
+        ge=0.0,
+        description=(
+            "Longest single FLOOD_WAIT `chats set-ttl` will sleep through. "
+            "Waits on SetHistoryTTL escalate into the hundreds of seconds "
+            "(261s, 703s and 866s observed within one hour), so the default is "
+            "far above the 60s used elsewhere — but finite, so a stuck call "
+            "cannot hang unnoticed forever."
+        ),
+    )
+    ttl_max_flood_wait_retries: int = Field(
+        default=5,
+        ge=1,
+        description=(
+            "How many FLOOD_WAIT pauses `chats set-ttl` will sit through before "
+            "giving up. Above the pacer's own default of 3 because the waits "
+            "escalate: one chat can plausibly spend two or three of them, and "
+            "running out reports a flood wait as a failure on a call that was "
+            "about to succeed."
+        ),
+    )
     download_root: str | None = Field(
         default=None,
         description=(

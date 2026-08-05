@@ -143,13 +143,15 @@ def _reported(period: int | None) -> int | None:
 
 
 def ttl_gate_key(chat_id: int) -> str:
-    """Gate key for TTL writes — bare id, so marked and bare ids share one row.
+    """Gate key for TTL writes.
 
-    Task 3 adds ``ttl_pacing_key`` to :mod:`telegram_assistant.messages.pacing`
-    (all gate keys live together there) and this becomes a re-export of it. Kept
-    inline here so this task is independently green ahead of Task 3.
+    Delegates to :func:`telegram_assistant.messages.pacing.ttl_pacing_key` so
+    every gate key lives in one module; imported lazily to keep this module free
+    of an import-time dependency on ``messages``.
     """
-    return f"ttl:{EntityRef(raw=int(chat_id)).numeric_id}"
+    from telegram_assistant.messages import ttl_pacing_key
+
+    return ttl_pacing_key(chat_id)
 
 
 async def set_chat_ttl(

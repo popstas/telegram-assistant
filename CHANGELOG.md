@@ -15,6 +15,7 @@
 
 ### Bug Fixes
 
+- chats: Map ChatForbiddenError in get_ttl and cover both branches
 - http: Annotate chats-inspect flood waits raised during resolution
 - chats-inspect: Report muted only while a mute is in force
 - chats: Redact access_hash recursively from --raw payloads

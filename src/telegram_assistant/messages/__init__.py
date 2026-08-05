@@ -47,6 +47,7 @@ from telegram_assistant.messages.pacing import (
     RateGate,
     pin_pacing_key,
     retry_after_details,
+    ttl_pacing_key,
 )
 from telegram_assistant.messages.pinning import (
     PinBackend,
@@ -236,6 +237,7 @@ __all__ = [
     "RateGate",
     "pin_pacing_key",
     "retry_after_details",
+    "ttl_pacing_key",
     "PinBackend",
     "PinMessageRequest",
     "PinMessageResult",

@@ -364,3 +364,48 @@ async def test_marked_chat_id_is_reported_bare() -> None:
     assert result.chat_id == 2305069221
     # The backend still receives what the caller resolved.
     assert backend.writes == [{"chat_id": -1002305069221, "period": 86400}]
+
+
+# --- gate key and config ----------------------------------------------------
+
+
+def test_ttl_pacing_key_uses_the_bare_id() -> None:
+    from telegram_assistant.messages import ttl_pacing_key
+
+    assert ttl_pacing_key(-1002305069221) == "ttl:2305069221"
+    assert ttl_pacing_key(2305069221) == "ttl:2305069221"
+
+
+def test_ttl_gate_key_matches_the_pacing_key() -> None:
+    from telegram_assistant.chats.ttl import ttl_gate_key
+    from telegram_assistant.messages import ttl_pacing_key
+
+    assert ttl_gate_key(-1002305069221) == ttl_pacing_key(-1002305069221)
+
+
+def test_ttl_gate_key_does_not_collide_with_the_pin_gate() -> None:
+    from telegram_assistant.messages import pin_pacing_key, ttl_pacing_key
+
+    assert ttl_pacing_key(5) != pin_pacing_key(5)
+
+
+def test_config_defaults_for_ttl_pacing(minimal_config_yaml) -> None:
+    from telegram_assistant.config.loader import load_config_from_text
+
+    config = load_config_from_text(minimal_config_yaml, source="test")
+
+    assert config.telegram.ttl_min_interval_seconds == 2.0
+    assert config.telegram.ttl_max_flood_wait_seconds == 3600.0
+    assert config.telegram.ttl_max_flood_wait_retries == 5
+
+
+def test_config_rejects_negative_ttl_interval(minimal_config_yaml) -> None:
+    from telegram_assistant.config.loader import ConfigError, load_config_from_text
+
+    # The fixture's `telegram:` line is followed by 2-space-indented keys, so
+    # inserting one right after the header keeps the YAML valid.
+    text = minimal_config_yaml.replace(
+        "telegram:", "telegram:\n  ttl_min_interval_seconds: -1", 1
+    )
+    with pytest.raises((ConfigError, ValueError)):
+        load_config_from_text(text, source="test")
