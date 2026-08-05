@@ -604,8 +604,8 @@ command rather than after `folder_cache_ttl` seconds.
 - Required flags: exactly one chat reference, plus `--ttl`.
 - From config: `--folder-name` default when resolving `--chat-name`.
 - Temp file: no.
-- Automation: none. This is a bucket-2 state change — always `--dry-run` first,
-  show the plan, confirm via `AskUserQuestion`, then run for real.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first, show the
+  plan, wait for confirmation, then run without `--dry-run`.
 - `--ttl` values: `off` (or `0`) disables auto-delete; otherwise
   `<integer><unit>` with unit `s`/`m`/`h`/`d`/`w` (`1d`, `24h`, `93d`, `2w`); a
   bare integer is seconds. Telegram's own clients offer only day/week/month, but
@@ -636,6 +636,7 @@ command rather than after `folder_cache_ttl` seconds.
   and running several in parallel makes the flood waits worse.
 - Other surfaces: none. This is **CLI-only** — there is no HTTP route and no MCP
   tool for it.
+- Confirmation: required (bucket 2).
 - Typical errors: `cannot parse --ttl ...` (exit 2), `access denied ...`
   (exit 3), `chat N: requested ttl X but the server stored Y` (exit 2 — the
   server refused or clamped the value), `chats set-ttl rate-limited by

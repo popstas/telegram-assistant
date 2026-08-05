@@ -25,6 +25,7 @@
 
 ### Documentation
 
+- Document chats set-ttl in the skill catalog and README
 - Implementation plan for chats set-ttl
 - Spec for chats set-ttl (CLI-only auto-delete write)
 - Document the chats inspect HTTP route and MCP tool
