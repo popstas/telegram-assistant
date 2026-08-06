@@ -170,6 +170,13 @@ class Pacer:
                         retry_at=retry_at,
                         attempts=attempts,
                     ) from exc
+                # A silent multi-minute (or multi-hour, across retries) sleep is
+                # indistinguishable from a hang to whoever is watching the
+                # process — name the chat/key, the pause and which attempt this
+                # is before going quiet for it.
+                _log.warning(
+                    "flood_wait_pause", key=key, seconds=pause, attempt=attempts
+                )
                 await self._sleep(pause)
 
     async def _wait_for_slot(self, key: str, *, attempts: int = 0) -> None:
@@ -237,6 +244,23 @@ def pin_pacing_key(chat_id: int) -> str:
     return f"pin:{EntityRef(raw=int(chat_id)).numeric_id}"
 
 
+def ttl_pacing_key(chat_id: int) -> str:
+    """Gate key for auto-delete (TTL) writes — a different Telegram limit than pins.
+
+    Its own gate row rather than sharing ``pin:``: Telegram meters
+    ``messages.SetHistoryTTL`` separately, and observed waits on it escalate far
+    past anything pins produce (261s, 703s and 866s within one hour on one
+    account, 2026-08-05). Sharing a row would let a slow TTL sweep throttle
+    unrelated pins and vice versa.
+
+    The id is reduced to its bare form for the same reason ``pin_pacing_key``
+    does it: an explicit ``--chat-id -1001234567890`` keeps the marker while an
+    ``--entity`` lookup yields the bare id, and keying on the raw value would
+    open two independent rows for one chat.
+    """
+    return f"ttl:{EntityRef(raw=int(chat_id)).numeric_id}"
+
+
 def retry_after_details(exc: BaseException) -> dict[str, float] | None:
     """Extract the retry-after payload from a paced flood-wait error.
 
@@ -262,4 +286,5 @@ __all__ = [
     "RateGate",
     "pin_pacing_key",
     "retry_after_details",
+    "ttl_pacing_key",
 ]

@@ -12,6 +12,7 @@ from fastapi import APIRouter, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 from telegram_assistant import __version__
+from telegram_assistant.chats import ChatInspectBackend
 from telegram_assistant.config import (
     AppConfig,
     ConfigWatcher,
@@ -24,6 +25,7 @@ from telegram_assistant.folders import FolderBackend
 from telegram_assistant.groups import GroupBackend
 from telegram_assistant.health import collect_health, default_database_path
 from telegram_assistant.http_api.auth import BearerAuth
+from telegram_assistant.http_api.chats import build_router as build_chats_router
 from telegram_assistant.http_api.folders import build_router as build_folders_router
 from telegram_assistant.http_api.groups import build_router as build_groups_router
 from telegram_assistant.http_api.mcp import (
@@ -69,6 +71,7 @@ from telegram_assistant.topics import TopicBackend
 
 _log = get_logger(__name__)
 
+ChatInspectBackendFactory = Callable[[Request], ChatInspectBackend | None]
 FolderBackendFactory = Callable[[Request], FolderBackend | None]
 GroupBackendFactory = Callable[[Request], GroupBackend | None]
 TopicBackendFactory = Callable[[Request], TopicBackend | None]
@@ -218,6 +221,30 @@ def _default_member_list_backend_factory(
         )
 
         return TelethonMemberListBackend(client)
+
+    return _factory
+
+
+def _default_chat_inspect_backend_factory(
+    session_manager: TelethonSessionManager | None,
+) -> ChatInspectBackendFactory:
+    """Build a Telethon-backed chat-inspect factory for the read op.
+
+    Mirrors :func:`_default_member_list_backend_factory`: returns ``None`` until
+    a Telethon client is available so the endpoint can return 503.
+    """
+
+    def _factory(_request: Request) -> ChatInspectBackend | None:
+        if session_manager is None:
+            return None
+        client = getattr(session_manager, "_client", None)
+        if client is None:
+            return None
+        from telegram_assistant.chats.telethon_backend import (
+            TelethonChatInspectBackend,
+        )
+
+        return TelethonChatInspectBackend(client)
 
     return _factory
 
@@ -581,6 +608,7 @@ def create_app(
     member_backend_factory: MemberBackendFactory | None = None,
     member_remove_backend_factory: MemberRemoveBackendFactory | None = None,
     member_list_backend_factory: MemberListBackendFactory | None = None,
+    chat_inspect_backend_factory: ChatInspectBackendFactory | None = None,
     message_backend_factory: MessageBackendFactory | None = None,
     message_read_backend_factory: MessageReadBackendFactory | None = None,
     search_backend_factory: SearchBackendFactory | None = None,
@@ -840,6 +868,11 @@ def create_app(
         if member_list_backend_factory is not None
         else _default_member_list_backend_factory(session_manager)
     )
+    app.state.chat_inspect_backend_factory = (
+        chat_inspect_backend_factory
+        if chat_inspect_backend_factory is not None
+        else _default_chat_inspect_backend_factory(session_manager)
+    )
     app.state.resolver_factory = (
         resolver_factory
         if resolver_factory is not None
@@ -927,6 +960,7 @@ def create_app(
     app.include_router(build_groups_router(), prefix="/telegram")
     app.include_router(build_topics_router(), prefix="/telegram")
     app.include_router(build_members_router(), prefix="/telegram")
+    app.include_router(build_chats_router(), prefix="/telegram")
     app.include_router(build_messages_router(), prefix="/telegram")
     app.include_router(build_notifications_router(), prefix="/telegram")
     if mcp_asgi_app is not None:

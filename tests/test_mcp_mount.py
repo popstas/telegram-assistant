@@ -213,6 +213,7 @@ def _list_tools(client: TestClient, token: str) -> dict[str, dict[str, object]]:
 
 
 EXPECTED_TOOL_NAMES = {
+    "telegram_chats_inspect",
     "telegram_folders_add_chat",
     "telegram_folders_inspect",
     "telegram_folders_remove_chat",

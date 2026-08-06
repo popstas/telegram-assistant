@@ -69,14 +69,15 @@ telegram-assistant health
 Commands fall into three buckets:
 
 1. **Read-only** — `health`, `folders inspect`, `operations status`,
-   `groups get-layout`, `members list`. Run them immediately, no
-   confirmation, no `--dry-run`.
+   `groups get-layout`, `members list`, `chats inspect`. Run them
+   immediately, no confirmation, no `--dry-run`.
 2. **State-changing, single object** — `groups create`, `groups set-layout`,
    `groups rename`, `topics create`, `topics close`, `topics open`,
    `topics rename`,
    `messages send` (single chat),
    `messages react`, `messages forward`, `notifications mute`,
    `notifications unmute`, `folders add-chat`, `folders remove-chat`,
+   `chats set-ttl`,
    `operations retry`. Always:
    prepare command → run with `--dry-run` →
    show the plan and dry-run output → ask for explicit human confirmation
@@ -168,7 +169,7 @@ not skip steps, even if the request looks obvious.
    `members bulk-add`, `members bulk-remove`,
    `messages send`, `messages react`, `messages forward`,
    `notifications mute`, `notifications unmute`, `folders add-chat`,
-   `folders remove-chat`, `operations retry`.
+   `folders remove-chat`, `chats set-ttl`, `operations retry`.
 8. Present a short plan to the human: what was found (chat id, folder,
    matched users), the full command that would run, and the relevant parts
    of the dry-run output (`status = dry_run`, planned actions, validation
@@ -220,6 +221,8 @@ agent stops and asks for clarification — it does not invent a new path.
 | `members` | `bulk-add` | Add one or many users to a chat, optionally as admin. | `telegram-assistant members bulk-add ...` |
 | `members` | `bulk-remove` | Remove one or many users from a chat (kick or permanent ban). | `telegram-assistant members bulk-remove ...` |
 | `members` | `list` | Read-only: list a chat's participants (`--query`, `--filter all\|admins\|bots`, `--limit`, default 200), or check one user's membership with `--user` (READ-gated, never writes). | `telegram-assistant members list ...` |
+| `chats` | `inspect` | Read-only: report one chat's metadata — auto-delete TTL, description, member counts, slow mode, restrictions, our own rights (READ-gated, no `--dry-run`). `--raw` adds the serialized entity/Full objects. | `telegram-assistant chats inspect ...` |
+| `chats` | `set-ttl` | Change a chat's auto-delete period (`--ttl off\|1d\|93d`, WRITE-gated; `--dry-run`). Setting the period the chat already has writes nothing. | `telegram-assistant chats set-ttl ...` |
 | `messages` | `send` | Send a message or service command to one chat/topic, or fan it out across a folder. `--rich-markdown <file.md>` sends a Telegram rich message (article) instead of plain text, with paragraph spacing, line splitting and `<tg-collage>` grouping on by default (`--no-spaced-paragraphs`, `--no-line-breaks`, `--media-group`) and local media resolved from the article's directory (`--rich-file`, `--vault-dir`). | `telegram-assistant messages send ...` |
 | `messages` | `recent` | Read-only: return the most recent messages from a chat (READ-gated; default limit 5). | `telegram-assistant messages recent ...` |
 | `messages` | `react` | Set (`--emoji`) or clear (`--clear`) an emoji reaction on a message (`--message-id`, WRITE-gated). | `telegram-assistant messages react ...` |
@@ -530,6 +533,118 @@ command rather than after `folder_cache_ttl` seconds.
   and the agent asks again before adding `--force`.
 - Typical errors: `refusing to remove without --yes (or use --dry-run
   to preview)`, protected-account refusals, `BulkMemberRemoveNeedsReview`.
+
+#### `chats` / `inspect`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`), optional
+  `--raw`.
+- Required flags: exactly one chat reference.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: read-only — run immediately when the human asks «какой статус
+  автоудаления у чата X», «что за чат X», «сколько участников в X», «почему в X
+  не отправляется». No `--dry-run` (there is none), no confirmation.
+- Payload: one flat JSON object with the same keys for every chat kind —
+  fields that do not apply are `null`. Always present: `chat_id` (bare id, no
+  `-100`), `kind` (`user`/`bot`/`basic_group`/`supergroup`/`channel`), `title`,
+  `username`, `about`, `ttl_period` (auto-delete, seconds; `null` = off),
+  `pinned_message_id`, `archived`, `muted`/`muted_until`/`silent`, `restricted` +
+  `restriction_reason`, `is_creator`, `left`, `invite_link`,
+  `my_admin_rights`, `default_banned_rights`. Groups and channels add
+  `is_forum`, `topics_layout`, `participants_count`, `admins_count`,
+  `kicked_count`, `banned_count`, `online_count`, `slowmode_seconds`,
+  `linked_chat_id`, `hidden_prehistory`, `antispam`, `join_to_send`,
+  `noforwards`, `available_reactions` and friends. Private chats add
+  `first_name`/`last_name`, `phone`, `is_bot`, `is_premium`, `is_contact`,
+  `blocked`, `common_chats_count`, `birthday`, `last_seen_status`.
+- Notifications are three fields, not one. `muted` is true only while the
+  chat's notifications are suppressed **right now** — an expired mute, and the
+  unmuted state Telegram spells as an epoch timestamp, both report `false` with
+  `muted_until` `null`. `muted_until` is the future expiry when there is one,
+  `null` otherwise (never a past date). `silent` is a separate Telegram flag —
+  the notification's *sound* is off — so a chat can be `silent: true` and
+  `muted: false`. Do not report a chat as muted on `silent` alone.
+- `--raw`: adds a `raw` key holding `{"entity": …, "full": …}` — the two
+  serialized Telegram objects behind the curated fields, minus `access_hash`.
+  Use it only when the human asks for a field the curated set does not name;
+  it is large and its shape moves with the Telegram layer.
+- Other surfaces: the same op is served by HTTP `GET /telegram/chats/inspect`
+  and by the MCP tool `telegram_chats_inspect`, taking the same chat references
+  (`chat_id` / `chat_name` + `folder_name`/`folder_id` / `entity`) and returning
+  the same **fields** — every key of the CLI payload, with the same meanings.
+  Only the datetime *rendering* differs: the CLI prints Python's own repr
+  (`"2026-01-02 03:04:05+00:00"`), the JSON surfaces ISO-8601
+  (`"2026-01-02T03:04:05Z"`), for `created_at`, `muted_until` and
+  `slowmode_next_send_date`. Parse them, do not string-compare across
+  surfaces. `raw` is **CLI-only** there — both surfaces *reject*
+  `raw=true` (HTTP `400`, MCP a tool error) rather than ignoring it, so a
+  serialized dump can only be produced locally. This skill still uses the CLI;
+  mention the remote surfaces only if the human is asking about them.
+- Note it does **not** write anything: there is no way to *change* the
+  description or the archive state through this CLI. The one write
+  counterpart is `chats set-ttl`, and it covers `ttl_period` alone — if the
+  human asks to set auto-delete, use that command, not this one.
+- Confirmation: not required (read-only). Still READ-gated by the
+  `telegram.access` policy — a chat with no `read` grant exits 3 with
+  `access denied`; surface that and stop.
+- Typical errors: `exactly one of --chat-id, --chat-name, or --entity must be
+  supplied` (exit 2), `chat <id> cannot be inspected (resolved to ...)` (exit 2
+  — the reference resolved to something with no metadata to read),
+  `chat <id> is private or inaccessible` (exit 2), `chat <id> is forbidden`
+  (exit 2 — we were removed from it), `access denied ...` (exit 3), entity
+  not-found / ambiguous (exit 2). A `FLOOD_WAIT` exits 1 on the CLI (one-shot
+  read, nothing retries it); on HTTP/MCP the same throttle comes back as
+  `502` / `needs_review` carrying `retry_after_seconds` — wait that long and
+  try again rather than retrying immediately.
+
+#### `chats` / `set-ttl`
+
+- Extract: chat reference (`--chat-id` / `--chat-name` / `--entity`) and the new
+  period (`--ttl`).
+- Required flags: exactly one chat reference, plus `--ttl`.
+- From config: `--folder-name` default when resolving `--chat-name`.
+- Temp file: no.
+- Automation: none — WRITE-gated state change. Run `--dry-run` first, show the
+  plan, wait for confirmation, then run without `--dry-run`.
+- `--ttl` values: `off` (or `0`) disables auto-delete; otherwise
+  `<integer><unit>` with unit `s`/`m`/`h`/`d`/`w` (`1d`, `24h`, `93d`, `2w`); a
+  bare integer is seconds. Telegram's own clients offer only day/week/month, but
+  arbitrary periods are accepted — real chats have been found at 31, 93 and 180
+  days. There is no preset allow-list; an unacceptable value is rejected by the
+  server, not by the CLI.
+- Payload: `chat_id` (bare), `chat_name`, `requested_ttl_seconds`,
+  `previous_ttl_seconds`, `ttl_period`, `changed`, `dry_run`.
+  `previous_ttl_seconds` and `ttl_period` are `null` when auto-delete is off,
+  never `0` — the same spelling `chats inspect` uses. `ttl_period` is what the
+  server reported **after** the write, not what was asked for. `chat_name`
+  echoes the caller's own reference string (e.g. `@username`), or `null` for
+  `--chat-id` — it is not the chat's real title the way `chats inspect`'s
+  `title` field is; do not relay it to a human as the chat's name.
+- **Every successful change posts a service message into the chat**, visible to
+  all members. Say so in the plan before asking for confirmation — in a client
+  chat that message is seen by the client.
+- Setting the period a chat already has is a no-op: `changed: false`, no write,
+  no service message. The `--dry-run` envelope says so in `warnings` and leaves
+  `planned_actions` empty. Do not "re-apply to be sure" — that is exactly what
+  would spam the chat.
+- Slowness is expected. Telegram flood-waits this method hard and the waits
+  escalate (261s, 703s and 866s were observed within one hour on one account).
+  The command sits through them by design, up to
+  `telegram.ttl_max_flood_wait_seconds` (default 3600) and
+  `telegram.ttl_max_flood_wait_retries` (default 5). A command that appears to
+  hang for minutes is normal — do not kill and retry it, and never run two at
+  once against the same account.
+- Sweeping a folder: loop the command over the chat ids from `folders inspect`,
+  one chat per call, sequentially. There is no bulk mode and no fan-out flag —
+  `--folder-name`/`--folder-id` only scope `--chat-name` — and running several
+  in parallel makes the flood waits worse.
+- Other surfaces: none. This is **CLI-only** — there is no HTTP route and no MCP
+  tool for it.
+- Confirmation: required (bucket 2).
+- Typical errors: `cannot parse --ttl ...` (exit 2), `access denied ...`
+  (exit 3), `chat N: requested ttl X but the server stored Y` (exit 2 — the
+  server refused or clamped the value), `chats set-ttl rate-limited by
+  Telegram ... Retry after Ns` (exit 1).
 
 #### `messages` / `send`
 
@@ -1428,6 +1543,48 @@ Request: «Кто состоит в чате Клиент / проект?» / «
 6. Typical errors: `exactly one of --chat-id, --chat-name, or --entity
    must be supplied` and `unknown filter '...'` (exit 2); a chat with no
    READ grant exits 3.
+
+### `chats inspect`
+
+Request: «Какой статус автоудаления у чата 2305069221?»
+
+1. Resource/action: `chats` / `inspect`. Read-only — run it immediately, no
+   `--dry-run`, no confirmation.
+2. Run:
+
+   ```bash
+   telegram-assistant chats inspect --entity 2305069221
+   ```
+
+3. Read `ttl_period` from the payload: `null` means auto-delete is off,
+   otherwise it is the window in seconds (86400 = 1 day, 604800 = 1 week).
+   Report the other fields only if the human asked for them — the payload is
+   wide by design.
+4. If the human then asks to *change* it, use `chats set-ttl` — see the next
+   scenario.
+
+### `chats set-ttl`
+
+1. Resource/action: `chats` / `set-ttl`. **Bucket 2** — never run it without a
+   confirmed dry-run.
+2. Read the current state first with `chats inspect` and show it: the human
+   should see what the period is now before deciding what it becomes.
+3. Dry-run:
+
+   ```bash
+   telegram-assistant chats set-ttl --entity 2305069221 --ttl off --dry-run
+   ```
+
+4. Show the plan with three things named explicitly: the chat, the old and new
+   periods, and that a service message will appear in the chat for everyone to
+   see. If the dry-run reports `changed: false`, stop — there is nothing to do,
+   and re-applying would post that message for no reason.
+5. Confirm via `AskUserQuestion`, then re-run without `--dry-run`.
+6. Expect it to be slow. Flood waits on this method run into minutes; the
+   command waits them out on purpose. Do not start a second one in parallel.
+7. For several chats, loop one call per chat over the ids from `folders
+   inspect`, sequentially — and say up front how many chats will each get a
+   service message.
 
 ### `messages send` — targeted
 

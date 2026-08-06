@@ -1,6 +1,51 @@
 # Changelog
 
 
+## Unreleased
+
+### Features
+
+- cli: Add chats set-ttl with dry-run and ttl pacing
+- config: Add ttl pacing knobs and a dedicated ttl gate key
+- chats: Add the Telethon set-ttl adapter, tolerating unparseable responses
+- chats: Add the set-ttl domain op with a no-op short-circuit
+- mcp: Add telegram_chats_inspect tool
+- http: Serve chats inspect at GET /telegram/chats/inspect
+- cli: Add chats inspect
+- chats: Map channel/basic-group/user metadata in the Telethon adapter
+- chats: Add read-only chat-inspect domain op
+
+### Bug Fixes
+
+- chats: Map ChatForbiddenError in get_ttl and cover both branches
+- http: Annotate chats-inspect flood waits raised during resolution
+- chats-inspect: Report muted only while a mute is in force
+- chats: Redact access_hash recursively from --raw payloads
+- chats: Forbidden peers raise ValueError; dedupe raw/mute mapping
+
+### Documentation
+
+- skill: Add standalone Confirmation field to chats set-ttl section
+- Document chats set-ttl in the skill catalog and README
+- Implementation plan for chats set-ttl
+- Spec for chats set-ttl (CLI-only auto-delete write)
+- Document the chats inspect HTTP route and MCP tool
+- Implementation plan for chats inspect phase 2 (HTTP + MCP)
+- Record phase-2 surface decisions in the chats inspect spec
+- Fix chats inspect README placement, add missing error strings
+- Document chats inspect in the skill, README and CLAUDE.md
+- Implementation plan for `chats inspect`
+- Design for read-only `chats inspect`
+
+### Miscellaneous
+
+- Regenerate changelog
+
+### Testing
+
+- http: Cover chats-inspect 404/409/503 sources on both ref branches
+- http: Cover chats-inspect 409 ambiguous-entity mapping
+
 ## v0.11.2 - 2026-08-03
 
 ### Bug Fixes
