@@ -37,7 +37,9 @@ class MediaProbe:
 
     ``duration`` is seconds and ``0.0`` when it could not be determined;
     ``width``/``height`` are ``None`` unless a real (non-cover-art) video stream
-    reported them.
+    reported them. ``has_cover_art`` is the other half of that distinction: the
+    artwork is useless as dimensions and exactly right as a thumbnail, and
+    knowing it is there keeps the extra ffmpeg run off every artwork-less file.
     """
 
     duration: float
@@ -45,6 +47,7 @@ class MediaProbe:
     height: int | None
     has_video: bool
     has_audio: bool
+    has_cover_art: bool = False
 
 
 @cache
@@ -146,6 +149,9 @@ def probe_media(path: Path | str) -> MediaProbe | None:
         height=_positive_int((video or {}).get("height")),
         has_video=video is not None,
         has_audio=audio is not None,
+        has_cover_art=any(
+            s.get("codec_type") == "video" and _is_cover_art(s) for s in streams
+        ),
     )
 
 
@@ -186,6 +192,42 @@ def extract_thumbnail(path: Path | str, *, duration: float = 0.0) -> bytes | Non
             "1",
             "-vf",
             f"scale={THUMBNAIL_WIDTH}:-2",
+            "-f",
+            "mjpeg",
+            "-",
+        ],
+        timeout=THUMBNAIL_TIMEOUT_SECONDS,
+    )
+    if completed is None or completed.returncode != 0 or not completed.stdout:
+        return None
+    return completed.stdout
+
+
+def extract_cover_art(path: Path | str) -> bytes | None:
+    """Return JPEG bytes for an audio file's embedded artwork, or ``None``.
+
+    Telegram never re-reads the ID3 tags of an upload, so artwork that plays
+    back correctly in every desktop player still leaves the clients drawing a
+    blank disc beside the audio: only an explicit ``thumb=`` puts the cover in
+    the player. The artwork rides as an ``attached_pic`` video stream, hence
+    ``-map 0:v:0`` and no ``-ss`` — unlike a video preview there is exactly one
+    frame, and seeking into it would land past the end.
+    """
+    if not ffmpeg_available():
+        return None
+    completed = _run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:v:0",
+            "-frames:v",
+            "1",
+            "-vf",
+            f"scale='min({THUMBNAIL_WIDTH},iw)':-2",
             "-f",
             "mjpeg",
             "-",

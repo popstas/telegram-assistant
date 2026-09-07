@@ -2107,9 +2107,54 @@ async def test_a_missing_thumbnail_does_not_fail_the_send(
 
 
 @pytest.mark.asyncio
-async def test_audio_gets_no_thumbnail(tmp_path: Any, monkeypatch: Any) -> None:
-    """Only videos need a preview frame; running ffmpeg over every mp3 would
-    spend a subprocess for nothing."""
+async def test_audio_carries_its_embedded_cover_art_as_the_thumbnail(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Telegram does not read the ID3 artwork inside the upload: without an
+    explicit thumbnail the clients draw a blank disc beside the player, so an
+    album cover only reaches the player when it is attached here."""
+    from telegram_assistant.messages import media_probe
+    from telegram_assistant.messages.media_probe import MediaProbe
+
+    _fake_probe(
+        monkeypatch,
+        MediaProbe(
+            duration=139.5,
+            width=None,
+            height=None,
+            has_video=False,
+            has_audio=True,
+            has_cover_art=True,
+        ),
+    )
+    seen: list[Any] = []
+
+    def fake_cover(path: Any) -> bytes:
+        seen.append(path)
+        return b"\xff\xd8jpeg"
+
+    monkeypatch.setattr(media_probe, "extract_cover_art", fake_cover)
+    audio = _rich_file(tmp_path, "song.mp3", "song", "audio")
+    client = _UploadingClient()
+    backend = TelethonMessageBackend(client)
+
+    await backend.send_message(
+        chat_id=1,
+        text="",
+        rich_markdown="![](tg://audio?id=song)\n",
+        rich_files=(audio,),
+    )
+
+    assert len(seen) == 1
+    assert client.upload_media[0].media.thumb == "handle:thumb.jpg"
+
+
+@pytest.mark.asyncio
+async def test_audio_without_cover_art_gets_no_thumbnail(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The probe already knows whether there is artwork; running ffmpeg over
+    every mp3 without one would spend a subprocess for nothing."""
     from telegram_assistant.messages import media_probe
     from telegram_assistant.messages.media_probe import MediaProbe
 
@@ -2117,6 +2162,9 @@ async def test_audio_gets_no_thumbnail(tmp_path: Any, monkeypatch: Any) -> None:
     _fake_probe(
         monkeypatch,
         MediaProbe(duration=184.5, width=None, height=None, has_video=False, has_audio=True),
+    )
+    monkeypatch.setattr(
+        media_probe, "extract_cover_art", lambda path: calls.append(path) or None
     )
     monkeypatch.setattr(
         media_probe,

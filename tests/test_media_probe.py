@@ -103,6 +103,54 @@ def test_probe_media_ignores_cover_art_as_a_video_stream(
     assert probe.duration == 184.5
 
 
+def test_probe_media_reports_embedded_cover_art(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The artwork is not the media's dimensions, but it *is* what Telegram
+    wants as the audio document's thumbnail. The probe already sees the stream,
+    so it reports it and the backend spends no ffmpeg run on an mp3 without
+    artwork."""
+    payload = json.dumps(
+        {
+            "streams": [
+                {
+                    "codec_type": "video",
+                    "codec_name": "mjpeg",
+                    "width": 600,
+                    "height": 600,
+                    "disposition": {"attached_pic": 1},
+                },
+                {"codec_type": "audio", "codec_name": "mp3"},
+            ],
+            "format": {"duration": "139.5"},
+        }
+    ).encode()
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(media_probe.subprocess, "run", _fake_run(payload))
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"\x00")
+
+    probe = probe_media(song)
+
+    assert probe is not None
+    assert probe.has_cover_art is True
+    assert probe.has_video is False
+
+
+def test_probe_media_reports_no_cover_art_for_a_plain_media_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(media_probe.subprocess, "run", _fake_run(FFPROBE_JSON))
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"\x00")
+
+    probe = probe_media(clip)
+
+    assert probe is not None
+    assert probe.has_cover_art is False
+
+
 def test_probe_media_returns_none_without_ffprobe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -226,6 +274,67 @@ def test_extract_thumbnail_returns_none_without_ffmpeg(
     clip.write_bytes(b"\x00")
 
     assert media_probe.extract_thumbnail(clip, duration=1.0) is None
+
+
+def test_extract_cover_art_returns_the_jpeg_bytes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(media_probe.subprocess, "run", _fake_run(b"\xff\xd8jpeg"))
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"\x00")
+
+    assert media_probe.extract_cover_art(song) == b"\xff\xd8jpeg"
+
+
+def test_extract_cover_art_reads_the_artwork_stream_without_seeking(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Artwork is a single attached picture, not a timeline: the 10% seek a
+    video preview takes would land past the only frame there is."""
+    seen: dict[str, Any] = {}
+
+    def run(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[bytes]:
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, b"\xff\xd8jpeg", b"")
+
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(media_probe.subprocess, "run", run)
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"\x00")
+
+    media_probe.extract_cover_art(song)
+
+    argv = seen["argv"]
+    assert argv[0] == "ffmpeg"
+    assert "-ss" not in argv
+    assert "0:v:0" in argv
+
+
+@pytest.mark.parametrize(
+    "stdout,returncode",
+    [(b"", 0), (b"\xff\xd8", 1)],
+    ids=["empty-output", "nonzero-exit"],
+)
+def test_extract_cover_art_returns_none_on_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, stdout: bytes, returncode: int
+) -> None:
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(media_probe.subprocess, "run", _fake_run(stdout, returncode))
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"\x00")
+
+    assert media_probe.extract_cover_art(song) is None
+
+
+def test_extract_cover_art_returns_none_without_ffmpeg(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(media_probe.shutil, "which", lambda name: None)
+    song = tmp_path / "song.mp3"
+    song.write_bytes(b"\x00")
+
+    assert media_probe.extract_cover_art(song) is None
 
 
 def test_convert_gif_to_mp4_returns_the_converted_file(
