@@ -540,6 +540,12 @@ class TelethonMessageBackend:
                                 duration=probe.duration if probe is not None else 0.0,
                                 log_path=rich_file.path,
                             )
+                        elif rich_file.kind == "audio" and (
+                            probe is not None and probe.has_cover_art
+                        ):
+                            thumb = await self._upload_audio_cover_art(
+                                path=upload_path, log_path=rich_file.path
+                            )
                         media = types.InputMediaUploadedDocument(
                             file=handle,
                             mime_type=mime_type,
@@ -602,6 +608,30 @@ class TelethonMessageBackend:
         thumb_bytes = await asyncio.to_thread(
             media_probe.extract_thumbnail, path, duration=duration
         )
+        return await self._upload_thumbnail_bytes(thumb_bytes, log_path=log_path)
+
+    async def _upload_audio_cover_art(
+        self, *, path: str, log_path: str | None = None
+    ) -> Any:
+        """Return the audio file's embedded artwork as an uploaded thumbnail.
+
+        Telegram does not re-read an upload's ID3 tags, so without this the
+        clients show a blank disc beside a track whose cover every desktop
+        player displays. The caller only reaches here when the probe saw an
+        ``attached_pic`` stream, so a failure below is a real extraction
+        problem rather than "this mp3 has no artwork", and — like a video
+        preview — it is logged and never fails the send.
+        """
+        if log_path is None:
+            log_path = path
+        thumb_bytes = await asyncio.to_thread(media_probe.extract_cover_art, path)
+        return await self._upload_thumbnail_bytes(thumb_bytes, log_path=log_path)
+
+    async def _upload_thumbnail_bytes(
+        self, thumb_bytes: bytes | None, *, log_path: str
+    ) -> Any:
+        """Upload preview bytes, or return ``None`` — a preview is never worth
+        failing a send over, so both halves only log."""
         if not thumb_bytes:
             _log.warning("rich media thumbnail could not be generated", path=log_path)
             return None
