@@ -13,3 +13,9 @@
   - **Заодно:** при отправке статьи с большим числом медиа не обрезать вывод CLI — сохранять полный stderr.
 - [ ] rich_markdown: пробросить `noautolink` и `rtl` у `InputRichMessageMarkdown`
   - **Контекст:** остаток от пункта про inline media выше. `noautolink` (в Bot API — `skip_entity_detection`) отключает автодетект ссылок/упоминаний/хэштегов, `rtl` переключает направление статьи. Сейчас оба всегда `None`.
+- [ ] `chats mark-unread` / `mark-read`: ручной флаг непрочитанного на диалоге
+  - **Повод (2026-08-16):** после отправки статьи в канал понадобилось вернуть его в непрочитанные, чтобы не потерять. В CLI такого нет — в `chats` только `inspect`/`set-ttl`, в `messages` ничего про read-state. Пришлось делать руками в клиенте.
+  - **API:** `messages.markDialogUnread(peer, unread=True|False)` — тот же пункт «Отметить как непрочитанное» из контекстного меню, ставит/снимает ручной флаг на диалоге целиком (не про конкретное сообщение). Обратная операция — `unread=False`; для «прочитать до сообщения N» нужен другой RPC (`messages.readHistory`), это отдельный вопрос.
+  - **Что сделать:** WRITE-gated операция + CLI `chats mark-unread` / `chats mark-read` с обычной обвязкой (`--chat-id`/`--chat-name`/`--entity`, `--folder-name`, `--dry-run`), идемпотентность (флаг уже стоит → `changed: false`, без записи), юнит-тесты, README и SKILL.md (+ ресинк скилла).
+  - **Открытый вопрос:** отдавать ли текущее состояние флага в `chats inspect` (`unread_mark`, есть в `DialogPeer`/`Dialog.unread_mark`) — без этого dry-run не сможет честно сказать `changed`.
+- [ ] Прогнать `/claude-md-management:revise-claude-md` — обновить CLAUDE.md по накопленному опыту сессий
