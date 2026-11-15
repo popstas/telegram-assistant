@@ -3,6 +3,14 @@
 
 ## Unreleased
 
+### Features
+
+- messages: Attach embedded cover art as the audio thumbnail (#27)
+
+### Documentation
+
+- Update TODO.md
+
 ### Task
 
 - Drop completed items from docs/TODO.md
