@@ -444,6 +444,49 @@ def test_mcp_recent_messages_reads_via_backend(
     assert backend.calls == [{"chat_id": -100123, "limit": 1}]
 
 
+_ARTICLE = RecentMessage(
+    id=9,
+    sender=None,
+    date=None,
+    reply_to=None,
+    text="# Notes\n\nbody",
+    rich=True,
+    rich_partial=True,
+)
+
+
+def test_mcp_recent_and_search_carry_the_rich_markers(
+    minimal_config_yaml: str, tmp_path: Path
+) -> None:
+    """Rich rows reach MCP with the same keys as CLI/HTTP; plain rows gain none."""
+    rows = [_ARTICLE, *_messages()]
+    with _client(
+        minimal_config_yaml,
+        tmp_path,
+        read_backend=FakeReadBackend(rows),
+        search_backend=FakeSearchBackend(rows),
+    ) as client:
+        token = _mint_token(client)
+        _initialize(client, token)
+        recent = _call_tool(
+            client, token, "telegram_messages_recent", {"chat_id": -100123, "limit": 2}
+        )
+        search = _call_tool(
+            client,
+            token,
+            "telegram_messages_search",
+            {"chat_id": -100123, "query": "notes", "limit": 2},
+        )
+
+    for result in (recent, search):
+        assert result["isError"] is False
+        article, plain = result["structuredContent"]["messages"]
+        assert article["text"] == "# Notes\n\nbody"
+        assert article["rich"] is True
+        assert article["rich_partial"] is True
+        assert "rich" not in plain and "rich_partial" not in plain
+
+
 def test_mcp_search_messages_via_backend(
     minimal_config_yaml: str, tmp_path: Path
 ) -> None:

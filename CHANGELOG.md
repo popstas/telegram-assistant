@@ -7,6 +7,10 @@
 
 - messages: Attach embedded cover art as the audio thumbnail (#27)
 
+### Bug Fixes
+
+- messages: Read rich messages (articles) back as markdown
+
 ### Documentation
 
 - claude-md: Part=True у статьи и полное тело через messages.getRichMessage
