@@ -145,6 +145,30 @@ def test_recent_default_limit_five() -> None:
     assert backend.calls == [{"chat_id": -100, "limit": 5}]
 
 
+def test_recent_rich_row_carries_the_rich_marker() -> None:
+    rows = [
+        RecentMessage(
+            id=9, sender=None, date=None, reply_to=None, text="# Notes", rich=True
+        ),
+        *_messages(1),
+    ]
+    client = _client(None, read_backend=FakeReadBackend(rows))
+    resp = client.get(
+        "/telegram/messages/recent", params={"chat_id": -100, "limit": 2}, headers=AUTH
+    )
+    assert resp.status_code == 200, resp.text
+    article, plain = resp.json()["messages"]
+    assert article == {
+        "id": 9,
+        "sender": None,
+        "date": None,
+        "reply_to": None,
+        "text": "# Notes",
+        "rich": True,
+    }
+    assert "rich" not in plain
+
+
 def test_recent_limit_override() -> None:
     backend = FakeReadBackend(_messages(10))
     client = _client(None, read_backend=backend)

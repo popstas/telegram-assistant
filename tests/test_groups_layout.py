@@ -556,3 +556,76 @@ async def test_get_topics_layout_service_returns_list() -> None:
     layout = await get_topics_layout(backend=backend, telegram_chat_id=-100)
     assert layout == "list"
     assert backend.get_calls == [-100]
+
+
+# ---------------------------------------------------------------------------
+# ToggleForumRequest signature drift across Telethon layers
+# ---------------------------------------------------------------------------
+
+
+class _ToggleForumLayer228:
+    """telethon 1.46: ``tabs`` and the new ``sidebar`` are both required."""
+
+    def __init__(self, channel: Any, enabled: bool, tabs: bool, sidebar: bool) -> None:
+        self.channel, self.enabled, self.tabs, self.sidebar = channel, enabled, tabs, sidebar
+
+
+class _ToggleForumNoTabs:
+    """A Telethon predating forum tabs: neither ``tabs`` nor ``sidebar``."""
+
+    def __init__(self, channel: Any, enabled: bool) -> None:
+        self.channel, self.enabled = channel, enabled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tabs", [True, False])
+async def test_set_topics_layout_fills_the_required_sidebar_flag(
+    monkeypatch: pytest.MonkeyPatch, tabs: bool
+) -> None:
+    from telethon.tl.functions import channels
+
+    monkeypatch.setattr(channels, "ToggleForumRequest", _ToggleForumLayer228)
+    client = _RecordingClient()
+
+    await TelethonGroupBackend(client).set_topics_layout(chat_id=42, tabs=tabs)
+
+    (req,) = client.calls
+    assert req.tabs is tabs
+    # The sidebar layout is not something this service chooses; keep it off.
+    assert req.sidebar is False
+
+
+@pytest.mark.asyncio
+async def test_set_topics_layout_without_tabs_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from telethon.tl.functions import channels
+
+    monkeypatch.setattr(channels, "ToggleForumRequest", _ToggleForumNoTabs)
+    client = _RecordingClient()
+    backend = TelethonGroupBackend(client)
+
+    # Tabs is Telegram's default for a forum, so it still works...
+    await backend.set_topics_layout(chat_id=42, tabs=True)
+    (req,) = client.calls
+    assert req.enabled is True and not hasattr(req, "tabs")
+
+    # ...while the list layout cannot be expressed at all.
+    with pytest.raises(RuntimeError, match="tabs"):
+        await backend.set_topics_layout(chat_id=42, tabs=False)
+    assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_set_topics_layout_does_not_retry_on_an_rpc_type_error() -> None:
+    """A TypeError raised by the RPC itself is not a signature mismatch."""
+
+    class _Boom(_RecordingClient):
+        async def __call__(self, request: Any) -> Any:
+            self.calls.append(request)
+            raise TypeError("bad response")
+
+    client = _Boom()
+    with pytest.raises(TypeError, match="bad response"):
+        await TelethonGroupBackend(client).set_topics_layout(chat_id=42, tabs=True)
+    assert len(client.calls) == 1

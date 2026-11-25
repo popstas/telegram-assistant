@@ -46,6 +46,86 @@ def _media_summary(media: Any) -> str:
     return f"[{name.lower() or 'media'}]"
 
 
+#: Appended to an article whose full body could not be fetched, so a reader of
+#: the plain ``text`` sees it is cut short even without the ``rich_partial`` key.
+RICH_PARTIAL_MARKER = "[…truncated: only the article preview could be read]"
+
+
+async def _fetch_full_rich_message(client: Any, peer: Any, msg_id: int) -> Any | None:
+    """Fetch an article's full body through ``messages.getRichMessage``.
+
+    ``Message.rich_message`` on a long article arrives with ``part=True`` — a
+    preview carrying only its first blocks; the whole body is a separate RPC.
+    Returns the full ``RichMessage``, or ``None`` when the fetch fails or the
+    reply carries none, in which case the caller renders the preview and flags
+    it. A ``FloodWaitError`` is **not** swallowed: it propagates (translated by
+    the caller's ``except``) so the throttle pauses the read instead of
+    silently degrading every article to its preview.
+    """
+    from telegram_assistant.messages.rich_render import is_rich_message
+
+    try:
+        from telethon.tl.functions.messages import GetRichMessageRequest
+    except ImportError:  # pragma: no cover - Telethon predating layer 227
+        return None
+    try:
+        result = await client(GetRichMessageRequest(peer=peer, id=msg_id))
+    except Exception as exc:
+        if type(exc).__name__ == "FloodWaitError":
+            raise
+        _log.warning(
+            "rich message full body unavailable, rendering the preview",
+            message_id=msg_id,
+            reason=type(exc).__name__,
+        )
+        return None
+    for message in getattr(result, "messages", None) or ():
+        if int(getattr(message, "id", 0) or 0) != msg_id:
+            continue
+        rich = getattr(message, "rich_message", None)
+        if is_rich_message(rich):
+            return rich
+    return None
+
+
+async def _message_text(client: Any, peer: Any, msg: Any) -> tuple[str, bool, bool]:
+    """Return ``(text, rich, rich_partial)`` for one read-side message.
+
+    Plain messages keep the exact pre-existing mapping (``message``, else a
+    ``[type]`` media summary). A rich message (an *article*) has an empty
+    ``message`` and no ``media`` — its body is ``msg.rich_message`` — so it is
+    rendered back to rich markdown; a ``part=True`` preview is first replaced
+    by the full body (one ``messages.getRichMessage`` per truncated article).
+    """
+    from telegram_assistant.messages.rich_render import (
+        is_rich_message,
+        render_rich_message,
+    )
+
+    text = getattr(msg, "message", "") or ""
+    if text:
+        return text, False, False
+    rich = getattr(msg, "rich_message", None)
+    if is_rich_message(rich):
+        partial = False
+        if getattr(rich, "part", False):
+            full = await _fetch_full_rich_message(
+                client, peer, int(getattr(msg, "id", 0) or 0)
+            )
+            if full is not None:
+                rich = full
+            else:
+                partial = True
+        rendered = render_rich_message(rich)
+        if partial:
+            rendered = f"{rendered}\n\n{RICH_PARTIAL_MARKER}" if rendered else RICH_PARTIAL_MARKER
+        return rendered, True, partial
+    media = getattr(msg, "media", None)
+    if media is not None:
+        return _media_summary(media), False, False
+    return "", False, False
+
+
 class TelethonMessageReadBackend:
     """Adapter from the Telethon ``TelegramClient`` to :class:`MessageReadBackend`."""
 
@@ -65,11 +145,9 @@ class TelethonMessageReadBackend:
                 )
                 reply_to = getattr(msg, "reply_to_msg_id", None)
                 date = getattr(msg, "date", None)
-                text = getattr(msg, "message", "") or ""
-                if not text:
-                    media = getattr(msg, "media", None)
-                    if media is not None:
-                        text = _media_summary(media)
+                text, rich, rich_partial = await _message_text(
+                    self._client, channel, msg
+                )
                 out.append(
                     RecentMessage(
                         id=int(getattr(msg, "id", 0)),
@@ -77,6 +155,8 @@ class TelethonMessageReadBackend:
                         date=date.isoformat() if date is not None else None,
                         reply_to=int(reply_to) if reply_to else None,
                         text=text,
+                        rich=rich,
+                        rich_partial=rich_partial,
                     )
                 )
         except Exception as exc:
@@ -1203,11 +1283,9 @@ class TelethonSearchBackend:
                             continue
                         if to_date is not None and stamp > to_date:
                             continue
-                    text = getattr(msg, "message", "") or ""
-                    if not text:
-                        media = getattr(msg, "media", None)
-                        if media is not None:
-                            text = _media_summary(media)
+                    text, rich, rich_partial = await _message_text(
+                        self._client, peer, msg
+                    )
                     out.append(
                         RecentMessage(
                             id=msg_id,
@@ -1215,6 +1293,8 @@ class TelethonSearchBackend:
                             date=date.isoformat() if date is not None else None,
                             reply_to=_search_reply_to(msg),
                             text=text,
+                            rich=rich,
+                            rich_partial=rich_partial,
                         )
                     )
                     if len(out) >= limit:

@@ -417,6 +417,14 @@ class RecentMessage:
     ``date`` is an ISO-8601 timestamp string (``None`` when the backend can't
     supply one); ``reply_to`` is the replied-to message id; ``text`` is the
     message body or, for media-only messages, a short media summary.
+
+    ``rich`` marks a Telegram *article* (a rich message): its ``message`` is
+    empty on the wire, so ``text`` is the article rendered back to the rich
+    markdown dialect by :mod:`rich_render`. ``rich_partial`` is set when only
+    the truncated ``part=True`` preview could be read (the full-body
+    ``messages.getRichMessage`` fetch failed), so the text is incomplete. Both
+    keys are emitted by :meth:`to_dict` **only when true**, leaving the payload
+    of every plain message byte-for-byte what it was.
     """
 
     id: int
@@ -424,15 +432,22 @@ class RecentMessage:
     date: str | None
     reply_to: int | None
     text: str
+    rich: bool = False
+    rich_partial: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "id": self.id,
             "sender": self.sender,
             "date": self.date,
             "reply_to": self.reply_to,
             "text": self.text,
         }
+        if self.rich:
+            payload["rich"] = True
+        if self.rich_partial:
+            payload["rich_partial"] = True
+        return payload
 
 
 class MessageReadBackend(Protocol):

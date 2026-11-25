@@ -173,6 +173,22 @@ def test_http_search_returns_rows() -> None:
     ]
 
 
+def test_http_search_rich_row_carries_the_rich_marker() -> None:
+    backend = FakeSearchBackend(
+        [RecentMessage(id=9, sender=None, date=None, reply_to=None, text="# Notes", rich=True)]
+    )
+    client = _http_client(access_block=_READ_ACCESS, search_backend=backend)
+    resp = client.get(
+        "/telegram/messages/search",
+        params={"chat_id": -100123, "query": "notes"},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200, resp.text
+    (row,) = resp.json()["messages"]
+    assert row["text"] == "# Notes"
+    assert row["rich"] is True
+
+
 def test_http_search_passes_optional_args() -> None:
     backend = FakeSearchBackend(_messages(3))
     client = _http_client(access_block=_READ_ACCESS, search_backend=backend)
