@@ -873,6 +873,14 @@ command rather than after `folder_cache_ttl` seconds.
 - Confirmation: not required (read-only). Still READ-gated by the
   `telegram.access` policy — if the chat is not permitted the CLI exits
   non-zero with `access denied`; surface that and stop.
+- Rich messages (articles): a row with `"rich": true` is an article; its
+  `text` is the article rendered back to rich markdown (headings, lists,
+  tables, quotes, code, `<details>`, `<tg-collage>`), so it can be edited
+  and re-sent with `messages send --rich-markdown <file.md>`. Media inside
+  it are placeholders (`[photo: caption]`, `[video]`, `[audio]`), never
+  downloaded. `"rich_partial": true` means only the truncated preview was
+  readable — say the text is incomplete. `messages search` rows look the
+  same. Plain messages carry no `rich` key.
 - Typical errors: `exactly one of --chat-id, --chat-name, or --entity
   must be supplied`, `--minutes must be a positive integer`,
   `access denied ...` (exit code 3), entity

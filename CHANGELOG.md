@@ -9,6 +9,7 @@
 
 ### Documentation
 
+- claude-md: Part=True у статьи и полное тело через messages.getRichMessage
 - Update TODO.md
 
 ### Task
