@@ -8,6 +8,7 @@ into the corresponding Telethon call.
 
 from __future__ import annotations
 
+import inspect
 from collections.abc import Sequence
 from typing import Any
 
@@ -175,23 +176,35 @@ class TelethonGroupBackend:
             channel = await self._client.get_input_entity(chat_id)
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
+        # The constructor drifts across layers: `tabs` is absent before forum
+        # tabs existed, and telethon 1.46 (layer 228) made it a *required*
+        # Bool next to a new required `sidebar`. Pick the arguments from the
+        # signature up front rather than catching `TypeError` around the call,
+        # which would also swallow a TypeError raised by the RPC itself.
+        # Only *building* the request may fall back on a TypeError (a build that
+        # rejects `tabs=` at runtime); the RPC's own errors are never retried.
+        unsupported = RuntimeError(
+            "Telethon build does not support the `tabs` argument to "
+            "ToggleForumRequest; cannot switch a forum to list layout"
+        )
+        params = inspect.signature(ToggleForumRequest.__init__).parameters
+        kwargs: dict[str, Any] = {"channel": channel, "enabled": True}
+        if "tabs" in params:
+            kwargs["tabs"] = tabs
+        if "sidebar" in params:
+            # The sidebar layout is not something this service chooses.
+            kwargs["sidebar"] = False
+        if "tabs" not in kwargs and not tabs:
+            raise unsupported
         try:
-            await self._client(
-                ToggleForumRequest(channel=channel, enabled=True, tabs=tabs)
-            )
+            request = ToggleForumRequest(**kwargs)
         except TypeError:
-            if tabs:
-                try:
-                    await self._client(
-                        ToggleForumRequest(channel=channel, enabled=True)
-                    )
-                except Exception as exc:
-                    raise translate_flood_wait(exc) from exc
-                return
-            raise RuntimeError(
-                "Telethon build does not support the `tabs` argument to "
-                "ToggleForumRequest; cannot switch a forum to list layout"
-            ) from None
+            if not tabs:
+                raise unsupported from None
+            # Tabs is Telegram's default for a forum: plain enable still works.
+            request = ToggleForumRequest(channel=channel, enabled=True)
+        try:
+            await self._client(request)
         except Exception as exc:
             raise translate_flood_wait(exc) from exc
 

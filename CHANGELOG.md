@@ -16,6 +16,10 @@
 - claude-md: Part=True у статьи и полное тело через messages.getRichMessage
 - Update TODO.md
 
+### Testing
+
+- messages: Pin rich markers on HTTP and MCP recent/search
+
 ### Task
 
 - Drop completed items from docs/TODO.md
