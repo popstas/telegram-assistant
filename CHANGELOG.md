@@ -9,6 +9,7 @@
 
 ### Bug Fixes
 
+- groups: Fill the required sidebar flag of ToggleForumRequest on telethon 1.46
 - messages: Read rich messages (articles) back as markdown
 
 ### Documentation
